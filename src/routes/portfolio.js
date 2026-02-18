@@ -9,7 +9,8 @@ router.get('/', async (req, res) => {
     const { data: holdings, error: hError } = await supabase
       .from('holdings')
       .select('*')
-      .eq('user_id', req.userId);
+      .eq('user_id', req.userId)
+      .is('deleted_at', null);
 
     if (hError) throw hError;
 
@@ -33,14 +34,15 @@ router.get('/', async (req, res) => {
     holdings.forEach(h => {
       const metal = h.metal.toLowerCase();
       const spotPrice = priceMap[metal] || 0;
-      const value = h.total_oz * spotPrice;
-      const cost = h.total_cost || 0;
+      const itemOz = h.weight * h.quantity;
+      const itemCost = h.purchase_price * h.quantity;
+      const value = itemOz * spotPrice;
 
-      breakdown[metal].oz += h.total_oz;
+      breakdown[metal].oz += itemOz;
       breakdown[metal].value += value;
-      breakdown[metal].cost += cost;
+      breakdown[metal].cost += itemCost;
       totalValue += value;
-      totalCost += cost;
+      totalCost += itemCost;
     });
 
     const unrealizedPL = totalValue - totalCost;
@@ -62,6 +64,8 @@ router.get('/', async (req, res) => {
         };
         return acc;
       }, {}),
+      item_count: holdings.length,
+    });
       item_count: holdings.length,
     });
   } catch (err) {

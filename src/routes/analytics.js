@@ -8,7 +8,8 @@ router.get('/', async (req, res) => {
     const { data: holdings, error: hError } = await supabase
       .from('holdings')
       .select('*')
-      .eq('user_id', req.userId);
+      .eq('user_id', req.userId)
+      .is('deleted_at', null);
 
     if (hError) throw hError;
 
@@ -27,8 +28,8 @@ router.get('/', async (req, res) => {
 
     metals.forEach(metal => {
       const metalHoldings = holdings.filter(h => h.metal.toLowerCase() === metal);
-      const totalOz = metalHoldings.reduce((sum, h) => sum + h.total_oz, 0);
-      const totalCost = metalHoldings.reduce((sum, h) => sum + (h.total_cost || 0), 0);
+      const totalOz = metalHoldings.reduce((sum, h) => sum + (h.weight * h.quantity), 0);
+      const totalCost = metalHoldings.reduce((sum, h) => sum + (h.purchase_price * h.quantity), 0);
       const spotPrice = priceMap[metal] || 0;
       const marketValue = totalOz * spotPrice;
 
