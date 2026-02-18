@@ -13,7 +13,7 @@ router.get('/', async (req, res) => {
     }
 
     const { data, error } = await supabase
-      .from('vault_watch')
+      .from('vault_data')
       .select('*')
       .eq('metal', metal)
       .order('date', { ascending: false })
@@ -25,13 +25,18 @@ router.get('/', async (req, res) => {
     res.json({
       metal,
       date: data.date,
-      registered_oz: data.registered,
-      eligible_oz: data.eligible,
-      combined_oz: data.combined,
-      daily_change_oz: data.daily_change,
-      oversubscribed_ratio: data.oversubscribed_ratio,
-      source: 'CME Group',
-      updated_at: data.updated_at,
+      registered_oz: data.registered_oz,
+      eligible_oz: data.eligible_oz,
+      combined_oz: data.combined_oz,
+      daily_change: {
+        registered: data.registered_change_oz,
+        eligible: data.eligible_change_oz,
+        combined: data.combined_change_oz,
+      },
+      open_interest_oz: data.open_interest_oz,
+      oversubscribed_ratio: parseFloat(data.oversubscribed_ratio),
+      source: data.source,
+      updated_at: data.created_at,
     });
   } catch (err) {
     console.error('Vault watch error:', err);
@@ -47,8 +52,8 @@ router.get('/history', async (req, res) => {
     since.setDate(since.getDate() - parseInt(days));
 
     const { data, error } = await supabase
-      .from('vault_watch')
-      .select('date, registered, eligible, combined, daily_change')
+      .from('vault_data')
+      .select('date, registered_oz, eligible_oz, combined_oz, registered_change_oz, eligible_change_oz, combined_change_oz, oversubscribed_ratio')
       .eq('metal', metal)
       .gte('date', since.toISOString().split('T')[0])
       .order('date', { ascending: true });

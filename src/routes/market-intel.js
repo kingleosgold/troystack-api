@@ -5,16 +5,19 @@ const supabase = require('../lib/supabase');
 // GET /v1/market-intel - Latest news headlines
 router.get('/', async (req, res) => {
   try {
-    const { limit = 20, category } = req.query;
+    const { limit = 20, metal, severity } = req.query;
 
     let query = supabase
-      .from('market_intelligence')
-      .select('id, headline, summary, category, sources, published_at, created_at')
+      .from('breaking_news')
+      .select('id, title, body, metal, severity, created_at')
       .order('created_at', { ascending: false })
       .limit(Math.min(parseInt(limit), 50));
 
-    if (category) {
-      query = query.eq('category', category);
+    if (metal) {
+      query = query.eq('metal', metal);
+    }
+    if (severity) {
+      query = query.eq('severity', severity);
     }
 
     const { data, error } = await query;
@@ -24,11 +27,11 @@ router.get('/', async (req, res) => {
       count: data.length,
       articles: data.map(a => ({
         id: a.id,
-        headline: a.headline,
-        summary: a.summary,
-        category: a.category,
-        sources: a.sources,
-        published_at: a.published_at || a.created_at,
+        title: a.title,
+        summary: a.body,
+        metal: a.metal,
+        severity: a.severity,
+        published_at: a.created_at,
       })),
     });
   } catch (err) {

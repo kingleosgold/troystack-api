@@ -5,24 +5,39 @@ const supabase = require('../lib/supabase');
 // GET /v1/prices - Live spot prices for all metals
 router.get('/', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('spot_prices')
-      .select('*')
-      .order('updated_at', { ascending: false })
+    // Get latest price entry
+    const { data: latest, error: latestErr } = await supabase
+      .from('price_log')
+      .select('id, timestamp, gold_price, silver_price, platinum_price, palladium_price, source, created_at')
+      .order('timestamp', { ascending: false })
       .limit(1)
       .single();
 
-    if (error) throw error;
+    if (latestErr) throw latestErr;
+
+    // Get price from ~24h ago for daily change
+    const yesterday = new Date(latest.timestamp);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    const { data: prev } = await supabase
+      .from('price_log')
+      .select('gold_price, silver_price, platinum_price, palladium_price')
+      .lte('timestamp', yesterday.toISOString())
+      .order('timestamp', { ascending: false })
+      .limit(1)
+      .single();
+
+    const calcChange = (current, previous) => previous ? Math.round(((current - previous) / previous) * 10000) / 100 : 0;
 
     res.json({
-      timestamp: data.updated_at,
+      timestamp: latest.timestamp,
       prices: {
-        gold: { symbol: 'Au', price: data.gold, change_pct: data.gold_change_pct, unit: 'USD/oz' },
-        silver: { symbol: 'Ag', price: data.silver, change_pct: data.silver_change_pct, unit: 'USD/oz' },
-        platinum: { symbol: 'Pt', price: data.platinum, change_pct: data.platinum_change_pct, unit: 'USD/oz' },
-        palladium: { symbol: 'Pd', price: data.palladium, change_pct: data.palladium_change_pct, unit: 'USD/oz' },
+        gold: { symbol: 'Au', price: latest.gold_price, change_pct: calcChange(latest.gold_price, prev?.gold_price), unit: 'USD/oz' },
+        silver: { symbol: 'Ag', price: latest.silver_price, change_pct: calcChange(latest.silver_price, prev?.silver_price), unit: 'USD/oz' },
+        platinum: { symbol: 'Pt', price: latest.platinum_price, change_pct: calcChange(latest.platinum_price, prev?.platinum_price), unit: 'USD/oz' },
+        palladium: { symbol: 'Pd', price: latest.palladium_price, change_pct: calcChange(latest.palladium_price, prev?.palladium_price), unit: 'USD/oz' },
       },
-      source: 'Stack Tracker Gold',
+      source: latest.source,
     });
   } catch (err) {
     console.error('Prices error:', err);
@@ -36,6 +51,7 @@ router.get('/history', async (req, res) => {
     const { metal = 'gold', range = '1M' } = req.query;
     const validMetals = ['gold', 'silver', 'platinum', 'palladium'];
     const validRanges = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365, '5Y': 1825, 'ALL': 3650 };
+    const metalCol = { gold: 'gold_price', silver: 'silver_price', platinum: 'platinum_price', palladium: 'palladium_price' };
 
     if (!validMetals.includes(metal)) {
       return res.status(400).json({ error: `Invalid metal. Use: ${validMetals.join(', ')}` });
@@ -48,11 +64,12 @@ router.get('/history', async (req, res) => {
     const since = new Date();
     since.setDate(since.getDate() - days);
 
+    const col = metalCol[metal];
     const { data, error } = await supabase
-      .from('price_history')
-      .select(`date, ${metal}`)
-      .gte('date', since.toISOString().split('T')[0])
-      .order('date', { ascending: true });
+      .from('price_log')
+      .select(`timestamp, ${col}`)
+      .gte('timestamp', since.toISOString())
+      .order('timestamp', { ascending: true });
 
     if (error) throw error;
 
@@ -61,7 +78,7 @@ router.get('/history', async (req, res) => {
       range,
       unit: 'USD/oz',
       data_points: data.length,
-      prices: data.map(d => ({ date: d.date, price: d[metal] })),
+      prices: data.map(d => ({ date: d.timestamp, price: d[col] })),
     });
   } catch (err) {
     console.error('Price history error:', err);

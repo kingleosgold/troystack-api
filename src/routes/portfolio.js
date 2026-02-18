@@ -15,15 +15,15 @@ router.get('/', async (req, res) => {
 
     // Fetch current prices
     const { data: prices, error: pError } = await supabase
-      .from('spot_prices')
-      .select('gold, silver, platinum, palladium, updated_at')
-      .order('updated_at', { ascending: false })
+      .from('price_log')
+      .select('gold_price, silver_price, platinum_price, palladium_price, timestamp')
+      .order('timestamp', { ascending: false })
       .limit(1)
       .single();
 
     if (pError) throw pError;
 
-    const metalMap = { gold: 'gold', silver: 'silver', platinum: 'platinum', palladium: 'palladium' };
+    const priceMap = { gold: prices.gold_price, silver: prices.silver_price, platinum: prices.platinum_price, palladium: prices.palladium_price };
     let totalValue = 0;
     let totalCost = 0;
 
@@ -32,7 +32,7 @@ router.get('/', async (req, res) => {
 
     holdings.forEach(h => {
       const metal = h.metal.toLowerCase();
-      const spotPrice = prices[metal] || 0;
+      const spotPrice = priceMap[metal] || 0;
       const value = h.total_oz * spotPrice;
       const cost = h.total_cost || 0;
 
@@ -50,11 +50,11 @@ router.get('/', async (req, res) => {
       total_cost: Math.round(totalCost * 100) / 100,
       unrealized_pl: Math.round(unrealizedPL * 100) / 100,
       unrealized_pl_pct: totalCost > 0 ? Math.round((unrealizedPL / totalCost) * 10000) / 100 : 0,
-      prices_as_of: prices.updated_at,
+      prices_as_of: prices.timestamp,
       breakdown: Object.entries(breakdown).reduce((acc, [metal, data]) => {
         acc[metal] = {
           total_oz: data.oz,
-          spot_price: prices[metal],
+          spot_price: priceMap[metal],
           market_value: Math.round(data.value * 100) / 100,
           cost_basis: Math.round(data.cost * 100) / 100,
           unrealized_pl: Math.round((data.value - data.cost) * 100) / 100,

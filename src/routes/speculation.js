@@ -22,30 +22,35 @@ router.get('/', async (req, res) => {
 
     // Fetch current prices
     const { data: current, error } = await supabase
-      .from('spot_prices')
-      .select('gold, silver, platinum, palladium')
-      .order('updated_at', { ascending: false })
+      .from('price_log')
+      .select('gold_price, silver_price, platinum_price, palladium_price')
+      .order('timestamp', { ascending: false })
       .limit(1)
       .single();
 
     if (error) throw error;
 
     const targets = {
-      gold: gold ? parseFloat(gold) : current.gold,
-      silver: silver ? parseFloat(silver) : current.silver,
-      platinum: platinum ? parseFloat(platinum) : current.platinum,
-      palladium: palladium ? parseFloat(palladium) : current.palladium,
+      gold: gold ? parseFloat(gold) : current.gold_price,
+      silver: silver ? parseFloat(silver) : current.silver_price,
+      platinum: platinum ? parseFloat(platinum) : current.platinum_price,
+      palladium: palladium ? parseFloat(palladium) : current.palladium_price,
     };
 
     const multipliers = {
-      gold: targets.gold / current.gold,
-      silver: targets.silver / current.silver,
-      platinum: targets.platinum / current.platinum,
-      palladium: targets.palladium / current.palladium,
+      gold: targets.gold / current.gold_price,
+      silver: targets.silver / current.silver_price,
+      platinum: targets.platinum / current.platinum_price,
+      palladium: targets.palladium / current.palladium_price,
     };
 
     res.json({
-      current_prices: current,
+      current_prices: {
+        gold: current.gold_price,
+        silver: current.silver_price,
+        platinum: current.platinum_price,
+        palladium: current.palladium_price,
+      },
       target_prices: targets,
       multipliers,
       note: 'Authenticate with an API key to see projections for your actual portfolio',

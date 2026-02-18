@@ -13,14 +13,15 @@ router.get('/', async (req, res) => {
     if (hError) throw hError;
 
     const { data: prices, error: pError } = await supabase
-      .from('spot_prices')
-      .select('gold, silver, platinum, palladium')
-      .order('updated_at', { ascending: false })
+      .from('price_log')
+      .select('gold_price, silver_price, platinum_price, palladium_price')
+      .order('timestamp', { ascending: false })
       .limit(1)
       .single();
 
     if (pError) throw pError;
 
+    const priceMap = { gold: prices.gold_price, silver: prices.silver_price, platinum: prices.platinum_price, palladium: prices.palladium_price };
     const analytics = {};
     const metals = ['gold', 'silver', 'platinum', 'palladium'];
 
@@ -28,7 +29,7 @@ router.get('/', async (req, res) => {
       const metalHoldings = holdings.filter(h => h.metal.toLowerCase() === metal);
       const totalOz = metalHoldings.reduce((sum, h) => sum + h.total_oz, 0);
       const totalCost = metalHoldings.reduce((sum, h) => sum + (h.total_cost || 0), 0);
-      const spotPrice = prices[metal] || 0;
+      const spotPrice = priceMap[metal] || 0;
       const marketValue = totalOz * spotPrice;
 
       if (totalOz > 0) {
