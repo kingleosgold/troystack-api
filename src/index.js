@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+const cron = require('node-cron');
 require('dotenv').config();
 
 const pricesRouter = require('./routes/prices');
@@ -11,14 +12,63 @@ const portfolioRouter = require('./routes/portfolio');
 const analyticsRouter = require('./routes/analytics');
 const holdingsRouter = require('./routes/holdings');
 const llmsRouter = require('./routes/llms');
+const intelligenceRouter = require('./routes/intelligence');
+const scanReceiptRouter = require('./routes/scan-receipt');
+const pushRouter = require('./routes/push');
+const stripeRouter = require('./routes/stripe');
+const { stripeWebhookHandler } = require('./routes/stripe');
+
+const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(helmet());
-app.use(cors());
-app.use(express.json());
+// Trust proxy for correct client IP detection (Railway, etc.)
+app.set('trust proxy', 1);
+
+// Security headers
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: false,
+}));
+
+// ============================================================
+// CORS — locked to stacktrackergold.com domains
+// LLM discovery endpoints allow all origins
+// ============================================================
+const ALLOWED_ORIGINS = [
+  'https://stacktrackergold.com',
+  'https://app.stacktrackergold.com',
+  'https://www.stacktrackergold.com',
+];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, server-to-server)
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'X-API-Key', 'Stripe-Signature'],
+};
+
+// LLM discovery endpoints — open CORS
+const openCors = cors();
+
+// ============================================================
+// STRIPE WEBHOOK — MUST come BEFORE express.json()
+// Needs raw body for signature verification
+// ============================================================
+app.post('/v1/webhooks/stripe', cors(corsOptions), express.raw({ type: 'application/json' }), stripeWebhookHandler);
+
+// Apply CORS and JSON parsing for everything else
+app.use(cors(corsOptions));
+app.use((req, res, next) => {
+  // Skip JSON parsing for Stripe webhook (already handled above)
+  if (req.originalUrl === '/v1/webhooks/stripe') return next();
+  express.json({ limit: '20mb' })(req, res, next);
+});
 
 // Request logging
 app.use((req, res, next) => {
@@ -28,29 +78,53 @@ app.use((req, res, next) => {
 
 // ============================================================
 // PUBLIC ENDPOINTS (no auth required)
+// Rate limit: 100 requests/min per IP
 // ============================================================
-app.use('/v1/prices', pricesRouter);
-app.use('/v1/market-intel', marketIntelRouter);
-app.use('/v1/vault-watch', vaultWatchRouter);
-app.use('/v1/speculation', speculationRouter);
+app.use('/v1/prices', publicLimiter, pricesRouter);
+app.use('/v1/market-intel', publicLimiter, marketIntelRouter);
+app.use('/v1/vault-watch', publicLimiter, vaultWatchRouter);
+app.use('/v1/speculation', publicLimiter, speculationRouter);
 
-// LLM discoverability
-app.use('/', llmsRouter);
+// LLM discoverability — open CORS, public rate limit
+app.use('/', openCors, publicLimiter, llmsRouter);
 
 // ============================================================
 // AUTHENTICATED ENDPOINTS (API key required)
+// Rate limit: 30 requests/min per user + tier-based developer limits
 // ============================================================
 const { authenticateApiKey } = require('./middleware/auth');
-app.use('/v1/portfolio', authenticateApiKey, portfolioRouter);
-app.use('/v1/analytics', authenticateApiKey, analyticsRouter);
-app.use('/v1/holdings', authenticateApiKey, holdingsRouter);
+app.use('/v1/portfolio', authenticateApiKey, authenticatedLimiter, developerLimiter, portfolioRouter);
+app.use('/v1/analytics', authenticateApiKey, authenticatedLimiter, developerLimiter, analyticsRouter);
+app.use('/v1/holdings', authenticateApiKey, authenticatedLimiter, developerLimiter, holdingsRouter);
 
-// Health check
+// ============================================================
+// NEW SERVICES — Intelligence, Daily Brief, Advisor
+// ============================================================
+app.use('/v1/intelligence', publicLimiter, intelligenceRouter);
+app.use('/v1', publicLimiter, intelligenceRouter); // daily-brief + advisor + portfolio-intelligence routes
+
+// Receipt scanner — authenticated endpoint
+app.use('/v1/scan-receipt', authenticatedLimiter, scanReceiptRouter);
+
+// Push notifications — public (mobile app sends tokens)
+app.use('/v1/push', publicLimiter, pushRouter);
+
+// Stripe billing (non-webhook routes)
+app.use('/v1/stripe', publicLimiter, stripeRouter);
+
+// ============================================================
+// HEALTH + API ROOT
+// ============================================================
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'stg-api', version: '1.0.0' });
+  res.json({
+    status: 'ok',
+    service: 'stg-api',
+    version: '1.0.0',
+    stripe: !!process.env.STRIPE_SECRET_KEY,
+    gemini: !!process.env.GEMINI_API_KEY,
+  });
 });
 
-// API root - documentation
 app.get('/', (req, res) => {
   res.json({
     name: 'Stack Tracker Gold API',
@@ -70,6 +144,24 @@ app.get('/', (req, res) => {
         'GET /v1/analytics': 'Cost basis, break-even, allocation analysis',
         'POST /v1/holdings': 'Add a purchase to portfolio',
         'GET /v1/holdings': 'List all holdings',
+      },
+      intelligence: {
+        'POST /v1/intelligence/generate': 'Trigger intelligence generation (API key required)',
+        'GET /v1/daily-brief?userId=xxx': 'Get today\'s daily brief for a user',
+        'POST /v1/daily-brief/generate': 'Generate daily brief for a user',
+        'POST /v1/advisor/chat': 'AI Stack Advisor chat',
+        'POST /v1/scan-receipt': 'Scan receipt image for holdings data',
+      },
+      push: {
+        'POST /v1/push/register': 'Register Expo push token',
+        'DELETE /v1/push/delete': 'Remove push token',
+        'POST /v1/push/price-alerts': 'Create price alert',
+        'GET /v1/push/price-alerts': 'Get price alerts',
+      },
+      billing: {
+        'POST /v1/stripe/create-checkout-session': 'Create Stripe checkout',
+        'POST /v1/stripe/verify-session': 'Verify checkout session',
+        'POST /v1/webhooks/stripe': 'Stripe webhook',
       },
       llm: {
         'GET /llms.txt': 'LLM-readable app description',
@@ -97,6 +189,112 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
+// ============================================================
+// STARTUP + CRON SCHEDULES
+// ============================================================
 app.listen(PORT, () => {
-  console.log(`Stack Tracker Gold API running on port ${PORT}`);
+  console.log(`\n🪙 Stack Tracker Gold API running on port ${PORT}`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🧠 Gemini:', process.env.GEMINI_API_KEY ? 'ENABLED' : 'DISABLED');
+  console.log('💳 Stripe:', process.env.STRIPE_SECRET_KEY ? 'ENABLED' : 'DISABLED');
+  console.log('🔒 CORS: Locked to stacktrackergold.com domains');
+  console.log('⚡ Rate Limits: Public 100/min, Auth 30/min, Dev tier-based');
+
+  // ── Intelligence cron: daily at 6:30 AM EST (11:30 UTC) ──
+  if (process.env.GEMINI_API_KEY) {
+    cron.schedule('30 11 * * *', async () => {
+      console.log(`\n🧠 [Intelligence Cron] Triggered at ${new Date().toISOString()}`);
+      try {
+        const { runIntelligenceGeneration } = require('./routes/intelligence');
+        const result = await runIntelligenceGeneration();
+        console.log(`🧠 [Intelligence Cron] Done: ${result.briefsInserted} briefs, ${result.vaultInserted}/4 vault`);
+      } catch (err) {
+        console.error(`🧠 [Intelligence Cron] Failed:`, err.message);
+      }
+    }, { timezone: 'UTC' });
+    console.log('🧠 [Intelligence Cron] Scheduled: daily at 6:30 AM EST (11:30 UTC)');
+
+    // ── Daily Brief cron: 6:35 AM EST (11:35 UTC) ──
+    cron.schedule('35 11 * * *', async () => {
+      console.log(`\n📝 [Daily Brief Cron] Triggered at ${new Date().toISOString()}`);
+      try {
+        const supabase = require('./lib/supabase');
+        const { generateDailyBrief, generatePortfolioIntelligence } = require('./routes/intelligence');
+        const { sendPush, isValidExpoPushToken } = require('./routes/push');
+
+        const { data: goldUsers, error } = await supabase
+          .from('profiles')
+          .select('id')
+          .in('subscription_tier', ['gold', 'lifetime']);
+
+        if (error || !goldUsers) {
+          console.error('📝 [Daily Brief Cron] Failed to fetch Gold users:', error?.message);
+          return;
+        }
+
+        console.log(`📝 [Daily Brief Cron] Generating briefs for ${goldUsers.length} Gold/Lifetime users`);
+        let success = 0;
+        let failed = 0;
+        let pushSent = 0;
+
+        for (const user of goldUsers) {
+          try {
+            const result = await generateDailyBrief(user.id);
+            try { await generatePortfolioIntelligence(user.id); } catch (piErr) { console.log(`🧠 [Portfolio Intelligence Cron] Skipped for ${user.id}: ${piErr.message}`); }
+            success++;
+            console.log(`📝 [Daily Brief Cron] ✅ ${success}/${goldUsers.length} — user ${user.id}`);
+
+            // Send push notification
+            if (result && result.brief && result.brief.brief_text) {
+              try {
+                const { data: notifPref } = await supabase
+                  .from('notification_preferences')
+                  .select('daily_brief')
+                  .eq('user_id', user.id)
+                  .single();
+                const briefEnabled = !notifPref || notifPref.daily_brief !== false;
+
+                if (briefEnabled) {
+                  const { data: tokenData } = await supabase
+                    .from('push_tokens')
+                    .select('expo_push_token')
+                    .eq('user_id', user.id)
+                    .order('last_active', { ascending: false })
+                    .limit(1)
+                    .single();
+
+                  if (tokenData && isValidExpoPushToken(tokenData.expo_push_token)) {
+                    const firstSentence = result.brief.brief_text.split(/[.!]\s/)[0];
+                    const body = firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence;
+                    await sendPush(tokenData.expo_push_token, {
+                      title: '☀️ Your Daily Brief is Ready',
+                      body,
+                      data: { type: 'daily_brief' },
+                      sound: 'default',
+                    });
+                    pushSent++;
+                  }
+                }
+              } catch (pushErr) {
+                console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: ${pushErr.message}`);
+              }
+            }
+          } catch (err) {
+            failed++;
+            console.error(`📝 [Daily Brief Cron] ❌ user ${user.id}: ${err.message}`);
+          }
+        }
+
+        console.log(`📝 [Daily Brief Cron] Done: ${success} success, ${failed} failed, ${pushSent} push sent out of ${goldUsers.length}`);
+      } catch (err) {
+        console.error('📝 [Daily Brief Cron] Failed:', err.message);
+      }
+    }, { timezone: 'UTC' });
+    console.log('📝 [Daily Brief Cron] Scheduled: daily at 6:35 AM EST (11:35 UTC)');
+  } else {
+    console.log('🧠 Intelligence Cron: DISABLED (no GEMINI_API_KEY)');
+    console.log('📝 Daily Brief Cron: DISABLED (no GEMINI_API_KEY)');
+  }
+
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 });
