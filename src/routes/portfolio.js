@@ -66,8 +66,6 @@ router.get('/', async (req, res) => {
       }, {}),
       item_count: holdings.length,
     });
-      item_count: holdings.length,
-    });
   } catch (err) {
     console.error('Portfolio error:', err);
     res.status(500).json({ error: 'Failed to fetch portfolio' });
