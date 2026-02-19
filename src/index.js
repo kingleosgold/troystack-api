@@ -299,5 +299,18 @@ app.listen(PORT, () => {
     console.log('📝 Daily Brief Cron: DISABLED (no GEMINI_API_KEY)');
   }
 
+  // ── COMEX XLS Scraper cron: 6:00 PM EST (23:00 UTC) ──
+  cron.schedule('0 23 * * *', async () => {
+    console.log(`\n🏦 [COMEX Cron] Triggered at ${new Date().toISOString()}`);
+    try {
+      const { scrapeComexVaultData } = require('./services/comex-scraper');
+      const result = await scrapeComexVaultData();
+      console.log(`🏦 [COMEX Cron] Done: ${result.inserted}/4 metals`);
+    } catch (err) {
+      console.error('🏦 [COMEX Cron] Failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('🏦 [COMEX Cron] Scheduled: daily at 6:00 PM EST (23:00 UTC)');
+
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 });

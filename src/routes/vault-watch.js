@@ -139,4 +139,23 @@ router.get('/history', async (req, res) => {
   }
 });
 
+// POST /v1/vault-watch/refresh — Manual trigger for COMEX XLS scrape
+router.post('/refresh', async (req, res) => {
+  try {
+    const apiKey = req.headers['x-api-key'] || req.query.api_key;
+    if (!apiKey || apiKey !== process.env.INTELLIGENCE_API_KEY) {
+      return res.status(401).json({ success: false, error: 'Invalid API key' });
+    }
+
+    console.log('🏦 [Vault Refresh] Manual COMEX scrape triggered via API');
+    const { scrapeComexVaultData } = require('../services/comex-scraper');
+    const result = await scrapeComexVaultData();
+
+    res.json({ success: result.inserted > 0, ...result });
+  } catch (error) {
+    console.error('Vault refresh error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 module.exports = router;
