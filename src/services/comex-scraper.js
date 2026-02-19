@@ -1,6 +1,14 @@
 const axios = require('axios');
 const XLSX = require('xlsx');
 const supabase = require('../lib/supabase');
+const { sendBatchPush, isValidExpoPushToken } = require('../routes/push');
+
+// Thresholds for COMEX alerts (percentage change in a single day)
+const ALERT_THRESHOLDS = {
+  registered: 2,  // 2% change
+  eligible: 5,    // 5% change
+  combined: 3,    // 3% change
+};
 
 const CME_URLS = {
   gold: 'https://www.cmegroup.com/delivery_reports/Gold_Stocks.xls',
@@ -144,6 +152,127 @@ async function getPreviousDay(metal, date) {
 }
 
 /**
+ * Check if a metal's daily changes breach any alert thresholds.
+ * Returns an array of triggered alerts with details.
+ */
+function checkThresholds(metal, today, prev) {
+  if (!prev) return [];
+
+  const alerts = [];
+  const checks = [
+    { field: 'registered', current: today.registered_oz, previous: prev.registered_oz, threshold: ALERT_THRESHOLDS.registered },
+    { field: 'eligible', current: today.eligible_oz, previous: prev.eligible_oz, threshold: ALERT_THRESHOLDS.eligible },
+    { field: 'combined', current: today.combined_oz, previous: prev.combined_oz, threshold: ALERT_THRESHOLDS.combined },
+  ];
+
+  for (const { field, current, previous, threshold } of checks) {
+    if (!previous || previous === 0) continue;
+    const change = current - previous;
+    const pct = (change / previous) * 100;
+    if (Math.abs(pct) >= threshold) {
+      alerts.push({ metal, field, change, pct, current, previous });
+    }
+  }
+
+  return alerts;
+}
+
+/**
+ * Format a number of troy ounces for display (e.g. "4.1M oz" or "125K oz").
+ */
+function formatOz(oz) {
+  const abs = Math.abs(oz);
+  if (abs >= 1_000_000) return (oz / 1_000_000).toFixed(1) + 'M oz';
+  if (abs >= 1_000) return (oz / 1_000).toFixed(0) + 'K oz';
+  return Math.round(oz).toLocaleString() + ' oz';
+}
+
+/**
+ * Send COMEX alert push notifications for triggered threshold breaches.
+ * Checks notification_preferences: comex_alerts must be true AND comex_{metal} must be true.
+ */
+async function sendComexAlerts(triggeredAlerts) {
+  if (triggeredAlerts.length === 0) return 0;
+
+  let totalSent = 0;
+
+  // Group alerts by metal
+  const alertsByMetal = {};
+  for (const alert of triggeredAlerts) {
+    if (!alertsByMetal[alert.metal]) alertsByMetal[alert.metal] = [];
+    alertsByMetal[alert.metal].push(alert);
+  }
+
+  for (const [metal, alerts] of Object.entries(alertsByMetal)) {
+    const metalCol = `comex_${metal}`;
+
+    // Query users who have comex_alerts = true AND comex_{metal} = true
+    try {
+      const { data: prefs, error: prefsErr } = await supabase
+        .from('notification_preferences')
+        .select('user_id')
+        .eq('comex_alerts', true)
+        .eq(metalCol, true);
+
+      if (prefsErr || !prefs || prefs.length === 0) {
+        console.log(`   🔕 [COMEX Alert] No users opted in for ${metal} alerts`);
+        continue;
+      }
+
+      const userIds = prefs.map(p => p.user_id);
+
+      // Get push tokens for these users (most recent token per user)
+      const { data: tokenRows, error: tokenErr } = await supabase
+        .from('push_tokens')
+        .select('expo_push_token, user_id')
+        .in('user_id', userIds)
+        .order('last_active', { ascending: false });
+
+      if (tokenErr || !tokenRows || tokenRows.length === 0) {
+        console.log(`   🔕 [COMEX Alert] No push tokens for ${metal} alert users`);
+        continue;
+      }
+
+      // Deduplicate: keep only the most recent token per user
+      const seen = new Set();
+      const tokens = [];
+      for (const row of tokenRows) {
+        if (!seen.has(row.user_id) && isValidExpoPushToken(row.expo_push_token)) {
+          seen.add(row.user_id);
+          tokens.push(row.expo_push_token);
+        }
+      }
+
+      if (tokens.length === 0) continue;
+
+      // Pick the most significant alert for the notification body
+      const biggest = alerts.reduce((a, b) => Math.abs(a.pct) > Math.abs(b.pct) ? a : b);
+      const direction = biggest.change > 0 ? 'rose' : 'dropped';
+      const metalTitle = metal.charAt(0).toUpperCase() + metal.slice(1);
+      const fieldLabel = biggest.field.charAt(0).toUpperCase() + biggest.field.slice(1);
+
+      const title = `${metalTitle} COMEX Alert`;
+      const body = `${fieldLabel} inventory ${direction} ${formatOz(Math.abs(biggest.change))} (${biggest.pct >= 0 ? '+' : ''}${biggest.pct.toFixed(1)}%) today`;
+
+      console.log(`   📢 [COMEX Alert] Sending ${metal} alert to ${tokens.length} users: ${body}`);
+
+      await sendBatchPush(tokens, {
+        title,
+        body,
+        data: { type: 'comex_alert', metal },
+        sound: 'default',
+      });
+
+      totalSent += tokens.length;
+    } catch (err) {
+      console.error(`   ❌ [COMEX Alert] Error sending ${metal} alerts:`, err.message);
+    }
+  }
+
+  return totalSent;
+}
+
+/**
  * Run the full COMEX XLS scrape: download all 3 files, parse, compute changes, upsert.
  */
 async function scrapeComexVaultData() {
@@ -227,7 +356,8 @@ async function scrapeComexVaultData() {
     console.error('   ❌ Platinum/Palladium fetch error:', err.message);
   }
 
-  // Compute daily changes and upsert
+  // Compute daily changes, upsert, and check alert thresholds
+  const triggeredAlerts = [];
   for (const metalData of allMetalData) {
     try {
       const prev = await getPreviousDay(metalData.metal, metalData.date);
@@ -272,19 +402,34 @@ async function scrapeComexVaultData() {
         : 'N/A';
       console.log(`   💾 ${metalData.metal}: upserted (reg change: ${registeredChange >= 0 ? '+' : ''}${Math.round(registeredChange).toLocaleString()} oz, ${changePct}%)`);
 
+      // Check alert thresholds using the same prev data
+      const alerts = checkThresholds(metalData.metal, metalData, prev);
+      triggeredAlerts.push(...alerts);
+      for (const a of alerts) {
+        console.log(`   ⚠️ ${a.metal} ${a.field}: ${a.pct >= 0 ? '+' : ''}${a.pct.toFixed(2)}% (threshold: ${ALERT_THRESHOLDS[a.field]}%)`);
+      }
+
     } catch (err) {
       results.errors.push(`${metalData.metal} upsert: ${err.message}`);
       console.error(`   ❌ ${metalData.metal} upsert error:`, err.message);
     }
   }
 
+  let pushSent = 0;
+  if (triggeredAlerts.length > 0) {
+    console.log(`\n📢 [COMEX Scraper] ${triggeredAlerts.length} threshold(s) breached, sending alerts...`);
+    pushSent = await sendComexAlerts(triggeredAlerts);
+  } else {
+    console.log('\n📢 [COMEX Scraper] No significant vault changes today');
+  }
+
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  console.log(`\n🏦 [COMEX Scraper] Done: ${results.inserted}/4 metals upserted in ${elapsed}s`);
+  console.log(`\n🏦 [COMEX Scraper] Done: ${results.inserted}/4 metals upserted, ${pushSent} push sent in ${elapsed}s`);
   if (results.errors.length > 0) {
     console.log(`   Errors: ${results.errors.join('; ')}`);
   }
 
-  return { ...results, elapsed };
+  return { ...results, elapsed, pushSent };
 }
 
 module.exports = { scrapeComexVaultData };

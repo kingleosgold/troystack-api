@@ -359,25 +359,25 @@ router.get('/notification-preferences', async (req, res) => {
 
     const { data, error } = await supabase
       .from('notification_preferences')
-      .select('daily_brief, price_alerts, breaking_news')
+      .select('daily_brief, price_alerts, breaking_news, comex_alerts, comex_gold, comex_silver, comex_platinum, comex_palladium')
       .eq('user_id', userId)
       .single();
 
     if (error || !data) {
-      return res.json({ daily_brief: true, price_alerts: true, breaking_news: true });
+      return res.json({ daily_brief: true, price_alerts: true, breaking_news: true, comex_alerts: true, comex_gold: true, comex_silver: true, comex_platinum: true, comex_palladium: true });
     }
 
     res.json(data);
   } catch (error) {
     console.error('❌ [Notification Prefs] Get error:', error.message);
-    res.json({ daily_brief: true, price_alerts: true, breaking_news: true });
+    res.json({ daily_brief: true, price_alerts: true, breaking_news: true, comex_alerts: true, comex_gold: true, comex_silver: true, comex_platinum: true, comex_palladium: true });
   }
 });
 
 // POST /v1/push/notification-preferences
 router.post('/notification-preferences', async (req, res) => {
   try {
-    const { userId, daily_brief, price_alerts, breaking_news } = req.body;
+    const { userId, daily_brief, price_alerts, breaking_news, comex_alerts, comex_gold, comex_silver, comex_platinum, comex_palladium } = req.body;
     if (!userId || !isUUID(userId)) {
       return res.status(400).json({ error: 'Valid userId is required' });
     }
@@ -387,6 +387,11 @@ router.post('/notification-preferences', async (req, res) => {
       daily_brief: daily_brief !== false,
       price_alerts: price_alerts !== false,
       breaking_news: breaking_news !== false,
+      comex_alerts: comex_alerts !== false,
+      comex_gold: comex_gold !== false,
+      comex_silver: comex_silver !== false,
+      comex_platinum: comex_platinum !== false,
+      comex_palladium: comex_palladium !== false,
     };
 
     const { error } = await supabase
@@ -398,7 +403,7 @@ router.post('/notification-preferences', async (req, res) => {
       return res.status(500).json({ error: error.message });
     }
 
-    console.log(`🔔 [Notification Prefs] Saved for ${userId}: brief=${prefs.daily_brief}, alerts=${prefs.price_alerts}, breaking=${prefs.breaking_news}`);
+    console.log(`🔔 [Notification Prefs] Saved for ${userId}: brief=${prefs.daily_brief}, alerts=${prefs.price_alerts}, breaking=${prefs.breaking_news}, comex=${prefs.comex_alerts}`);
     res.json({ success: true, ...prefs });
   } catch (error) {
     console.error('❌ [Notification Prefs] Save error:', error.message);
