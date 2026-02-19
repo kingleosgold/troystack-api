@@ -112,6 +112,9 @@ app.use('/v1/push', publicLimiter, pushRouter);
 // Stripe billing (non-webhook routes)
 app.use('/v1/stripe', publicLimiter, stripeRouter);
 
+// Subscription sync (GET /v1/sync-subscription)
+app.use('/v1', publicLimiter, stripeRouter);
+
 // ============================================================
 // HEALTH + API ROOT
 // ============================================================

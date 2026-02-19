@@ -383,5 +383,36 @@ router.post('/customer-portal', async (req, res) => {
   }
 });
 
+// GET /sync-subscription?user_id=xxx — mounted at /v1 in index.js
+router.get('/sync-subscription', async (req, res) => {
+  try {
+    const { user_id } = req.query;
+
+    if (!user_id || !isUUID(user_id)) {
+      return res.status(400).json({ error: 'Valid user_id is required' });
+    }
+
+    const { data: profile, error } = await supabase
+      .from('profiles')
+      .select('subscription_tier, subscription_status')
+      .eq('id', user_id)
+      .single();
+
+    if (error || !profile) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    return res.json({
+      user_id,
+      subscription_tier: profile.subscription_tier || 'free',
+      subscription_status: profile.subscription_status || null,
+    });
+
+  } catch (error) {
+    console.error('❌ [Sync Subscription] Error:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch subscription status' });
+  }
+});
+
 module.exports = router;
 module.exports.stripeWebhookHandler = stripeWebhookHandler;
