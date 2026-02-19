@@ -15,6 +15,7 @@ const llmsRouter = require('./routes/llms');
 const intelligenceRouter = require('./routes/intelligence');
 const scanReceiptRouter = require('./routes/scan-receipt');
 const pushRouter = require('./routes/push');
+const legalRouter = require('./routes/legal');
 const stripeRouter = require('./routes/stripe');
 const { stripeWebhookHandler } = require('./routes/stripe');
 
@@ -114,6 +115,9 @@ app.use('/v1/stripe', publicLimiter, stripeRouter);
 
 // Subscription sync (GET /v1/sync-subscription)
 app.use('/v1', publicLimiter, stripeRouter);
+
+// Legal pages — open CORS, public
+app.use('/', openCors, legalRouter);
 
 // ============================================================
 // HEALTH + API ROOT
