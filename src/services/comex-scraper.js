@@ -26,25 +26,6 @@ async function fetchAndParseXLS(url) {
 }
 
 /**
- * Extract the activity date from rows.
- * Looks for "Activity Date: M/DD/YYYY" pattern.
- */
-function extractActivityDate(rows) {
-  for (const row of rows) {
-    for (const cell of row) {
-      if (typeof cell === 'string' && cell.includes('Activity Date:')) {
-        const match = cell.match(/Activity Date:\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-        if (match) {
-          const [, month, day, year] = match;
-          return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-        }
-      }
-    }
-  }
-  return null;
-}
-
-/**
  * Extract totals from a section of rows.
  * Looks for TOTAL REGISTERED, TOTAL ELIGIBLE, COMBINED TOTAL.
  * Column index 7 = "TOTAL TODAY".
@@ -73,18 +54,24 @@ function extractTotals(rows, startRow = 0) {
 }
 
 /**
+ * Get today's date as YYYY-MM-DD in UTC.
+ */
+function getTodayUTC() {
+  const now = new Date();
+  return now.toISOString().split('T')[0];
+}
+
+/**
  * Parse gold or silver XLS (single metal per file).
+ * Uses today's date — the report represents the current vault state.
  */
 function parseSingleMetalXLS(rows, metalName) {
-  const date = extractActivityDate(rows);
-  if (!date) return null;
-
   const totals = extractTotals(rows);
   if (totals.registered === null) return null;
 
   return {
     metal: metalName,
-    date,
+    date: getTodayUTC(),
     registered_oz: totals.registered,
     eligible_oz: totals.eligible || 0,
     combined_oz: totals.combined || (totals.registered + (totals.eligible || 0)),
@@ -96,8 +83,7 @@ function parseSingleMetalXLS(rows, metalName) {
  * Platinum section starts first, palladium section starts at "PALLADIUM" row.
  */
 function parsePlatPalXLS(rows) {
-  const date = extractActivityDate(rows);
-  if (!date) return [];
+  const date = getTodayUTC();
 
   const results = [];
 
@@ -165,6 +151,26 @@ async function scrapeComexVaultData() {
   const results = { inserted: 0, errors: [], metals: [] };
 
   console.log('\n🏦 [COMEX Scraper] Starting XLS vault data scrape...');
+
+  // Clean up bad Gemini-generated rows (eligible_oz = 0 with real registered data)
+  try {
+    const { data: badRows, error: cleanErr } = await supabase
+      .from('vault_data')
+      .delete()
+      .eq('metal', 'silver')
+      .eq('source', 'comex')
+      .eq('eligible_oz', 0)
+      .gt('registered_oz', 0)
+      .select('date');
+
+    if (cleanErr) {
+      console.log(`   ⚠️ Cleanup query error: ${cleanErr.message}`);
+    } else if (badRows && badRows.length > 0) {
+      console.log(`   🧹 Cleaned up ${badRows.length} bad silver rows (eligible_oz=0)`);
+    }
+  } catch (err) {
+    console.log(`   ⚠️ Cleanup skipped: ${err.message}`);
+  }
 
   // Collect parsed data from all 3 files
   const allMetalData = [];
