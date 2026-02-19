@@ -17,7 +17,7 @@ npm run dev
 2. Connect repo in Railway dashboard
 3. Set environment variables:
    - `SUPABASE_URL`
-   - `SUPABASE_SERVICE_KEY`
+   - `SUPABASE_SERVICE_ROLE_KEY`
    - `PORT` (Railway sets automatically)
 4. Deploy
 
