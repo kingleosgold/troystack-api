@@ -18,6 +18,9 @@ const pushRouter = require('./routes/push');
 const legalRouter = require('./routes/legal');
 const stripeRouter = require('./routes/stripe');
 const { stripeWebhookHandler } = require('./routes/stripe');
+const widgetRouter = require('./routes/widget');
+const snapshotsRouter = require('./routes/snapshots');
+const scanUsageRouter = require('./routes/scan-usage');
 
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
 
@@ -115,6 +118,15 @@ app.use('/v1/stripe', publicLimiter, stripeRouter);
 
 // Subscription sync (GET /v1/sync-subscription)
 app.use('/v1', publicLimiter, stripeRouter);
+
+// Widget data + sparklines — public (iOS widget fetches directly)
+app.use('/v1', publicLimiter, widgetRouter);
+
+// Portfolio snapshots — public (mobile app saves/reads)
+app.use('/v1/snapshots', publicLimiter, snapshotsRouter);
+
+// Scan usage tracking — public (mobile app checks limits)
+app.use('/v1', publicLimiter, scanUsageRouter);
 
 // Legal pages — open CORS, public
 app.use('/', openCors, legalRouter);
