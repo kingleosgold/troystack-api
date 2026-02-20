@@ -1,43 +1,27 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../lib/supabase');
+const { getSpotPrices } = require('../services/price-fetcher');
 
 // GET /v1/prices - Live spot prices for all metals
 router.get('/', async (req, res) => {
   try {
-    // Get latest price entry
-    const { data: latest, error: latestErr } = await supabase
-      .from('price_log')
-      .select('id, timestamp, gold_price, silver_price, platinum_price, palladium_price, source, created_at')
-      .order('timestamp', { ascending: false })
-      .limit(1)
-      .single();
-
-    if (latestErr) throw latestErr;
-
-    // Get price from ~24h ago for daily change
-    const yesterday = new Date(latest.timestamp);
-    yesterday.setDate(yesterday.getDate() - 1);
-
-    const { data: prev } = await supabase
-      .from('price_log')
-      .select('gold_price, silver_price, platinum_price, palladium_price')
-      .lte('timestamp', yesterday.toISOString())
-      .order('timestamp', { ascending: false })
-      .limit(1)
-      .single();
-
-    const calcChange = (current, previous) => previous ? Math.round(((current - previous) / previous) * 10000) / 100 : 0;
+    const data = await getSpotPrices();
+    const { prices, change, timestamp, source, cacheAgeMinutes, marketsClosed } = data;
 
     res.json({
-      timestamp: latest.timestamp,
+      success: true,
+      timestamp,
       prices: {
-        gold: { symbol: 'Au', price: latest.gold_price, change_pct: calcChange(latest.gold_price, prev?.gold_price), unit: 'USD/oz' },
-        silver: { symbol: 'Ag', price: latest.silver_price, change_pct: calcChange(latest.silver_price, prev?.silver_price), unit: 'USD/oz' },
-        platinum: { symbol: 'Pt', price: latest.platinum_price, change_pct: calcChange(latest.platinum_price, prev?.platinum_price), unit: 'USD/oz' },
-        palladium: { symbol: 'Pd', price: latest.palladium_price, change_pct: calcChange(latest.palladium_price, prev?.palladium_price), unit: 'USD/oz' },
+        gold: { symbol: 'Au', price: prices.gold, change_pct: change.gold?.percent || 0, unit: 'USD/oz' },
+        silver: { symbol: 'Ag', price: prices.silver, change_pct: change.silver?.percent || 0, unit: 'USD/oz' },
+        platinum: { symbol: 'Pt', price: prices.platinum, change_pct: change.platinum?.percent || 0, unit: 'USD/oz' },
+        palladium: { symbol: 'Pd', price: prices.palladium, change_pct: change.palladium?.percent || 0, unit: 'USD/oz' },
       },
-      source: latest.source,
+      source,
+      cacheAgeMinutes,
+      marketsClosed,
+      change,
     });
   } catch (err) {
     console.error('Prices error:', err);

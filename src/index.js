@@ -22,6 +22,7 @@ const widgetRouter = require('./routes/widget');
 const snapshotsRouter = require('./routes/snapshots');
 const scanUsageRouter = require('./routes/scan-usage');
 
+const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
 
 const app = express();
@@ -327,6 +328,26 @@ app.listen(PORT, () => {
     }
   }, { timezone: 'UTC' });
   console.log('🏦 [COMEX Cron] Scheduled: daily at 6:00 PM EST (23:00 UTC)');
+
+  // ── Price Fetcher: init on startup + 15-minute price_log cron ──
+  initPriceFetcher().then(() => {
+    console.log('💰 [Price Fetcher] Initialized (cache warmed, Friday close loaded)');
+  }).catch(err => {
+    console.error('💰 [Price Fetcher] Init error:', err.message);
+  });
+
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const result = await fetchLiveSpotPrices();
+      if (result && result.prices) {
+        await logPriceToSupabase(result);
+        console.log(`💰 [Price Log] ${new Date().toISOString()} — ${result.source} — Au:$${result.prices.gold} Ag:$${result.prices.silver}`);
+      }
+    } catch (err) {
+      console.error('💰 [Price Log Cron] Error:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('💰 [Price Log Cron] Scheduled: every 15 minutes');
 
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 });
