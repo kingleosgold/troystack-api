@@ -845,8 +845,7 @@ Gold: $${prices.gold}, Silver: $${prices.silver}, Platinum: $${prices.platinum},
 Gold/Silver Ratio: ${gsRatio}
 
 APP GUIDE (when users ask how to do things in the app):
-- Add holding: Tap the "+" button at the TOP of the Portfolio tab. Select metal, enter quantity, cost per oz, purchase date, and item details (name, type, mint, etc).
-- Receipt scanner: Go to Tools tab > Scan Receipt. Take a photo of a dealer receipt and Troy's AI extracts the details automatically.
+- Add holding: Three ways: (1) Tap the "+" button at the TOP of the Portfolio tab — select metal, enter quantity, cost per oz, purchase date, and item details. (2) Use the Receipt Scanner in the Tools tab — take a photo of a dealer receipt and Troy's AI extracts the details automatically. (3) CSV Import in the Tools tab — bulk import holdings from a spreadsheet.
 - Price alerts: Tools tab > Price Alerts. Set target prices for any metal and get push notifications when hit.
 - Edit holding: Tap any holding in the Portfolio tab to open details, then tap Edit.
 - Delete holding: Swipe left on a holding in the Portfolio tab, or tap Edit > Delete.
