@@ -2,37 +2,86 @@ const express = require('express');
 const router = express.Router();
 const supabase = require('../lib/supabase');
 
-// GET /v1/market-intel - Latest news headlines
+// GET /v1/market-intel - Latest news headlines (from both intelligence_briefs and breaking_news)
 router.get('/', async (req, res) => {
   try {
-    const { limit = 20, metal, severity } = req.query;
+    const { limit = 20, metal, category } = req.query;
+    const maxResults = Math.min(parseInt(limit) || 20, 50);
 
-    let query = supabase
-      .from('breaking_news')
-      .select('id, title, body, metal, severity, created_at')
-      .order('created_at', { ascending: false })
-      .limit(Math.min(parseInt(limit), 50));
+    const articles = [];
 
-    if (metal) {
-      query = query.eq('metal', metal);
+    // Fetch from intelligence_briefs (Gemini-generated news)
+    try {
+      let briefsQuery = supabase
+        .from('intelligence_briefs')
+        .select('id, date, category, title, summary, source, source_url, relevance_score, created_at')
+        .order('created_at', { ascending: false })
+        .limit(maxResults);
+
+      if (category) {
+        briefsQuery = briefsQuery.eq('category', category);
+      }
+
+      const { data: briefs, error: briefsErr } = await briefsQuery;
+
+      if (!briefsErr && briefs) {
+        for (const b of briefs) {
+          articles.push({
+            id: b.id,
+            title: b.title,
+            summary: b.summary,
+            category: b.category,
+            source: b.source || null,
+            source_url: b.source_url || null,
+            relevance_score: b.relevance_score || 50,
+            type: 'intelligence',
+            published_at: b.created_at,
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Intelligence briefs fetch error:', err.message);
     }
-    if (severity) {
-      query = query.eq('severity', severity);
+
+    // Fetch from breaking_news (COMEX alerts, manual alerts)
+    try {
+      let newsQuery = supabase
+        .from('breaking_news')
+        .select('id, title, body, metal, severity, created_at')
+        .order('created_at', { ascending: false })
+        .limit(maxResults);
+
+      if (metal) {
+        newsQuery = newsQuery.eq('metal', metal);
+      }
+
+      const { data: news, error: newsErr } = await newsQuery;
+
+      if (!newsErr && news) {
+        for (const n of news) {
+          articles.push({
+            id: n.id,
+            title: n.title,
+            summary: n.body,
+            category: 'breaking_news',
+            metal: n.metal || null,
+            severity: n.severity || null,
+            type: 'alert',
+            published_at: n.created_at,
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Breaking news fetch error:', err.message);
     }
 
-    const { data, error } = await query;
-    if (error) throw error;
+    // Sort combined results by date, newest first, and cap
+    articles.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
+    const capped = articles.slice(0, maxResults);
 
     res.json({
-      count: data.length,
-      articles: data.map(a => ({
-        id: a.id,
-        title: a.title,
-        summary: a.body,
-        metal: a.metal,
-        severity: a.severity,
-        published_at: a.created_at,
-      })),
+      count: capped.length,
+      articles: capped,
     });
   } catch (err) {
     console.error('Market intel error:', err);
@@ -44,8 +93,7 @@ router.get('/', async (req, res) => {
 router.get('/categories', async (req, res) => {
   res.json({
     categories: [
-      'BREAKING', 'SUPPLY_DEMAND', 'CENTRAL_BANK', 'POLICY',
-      'MINING', 'INVESTMENT', 'GEOPOLITICAL', 'ANALYSIS'
+      'market_brief', 'breaking_news', 'policy', 'supply_demand', 'analysis',
     ]
   });
 });

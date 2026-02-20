@@ -406,7 +406,7 @@ Gold/Silver Ratio: ${prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1
   const geminiResp = await axios.post(geminiUrl, {
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
     system_instruction: { parts: [{ text: systemPrompt }] },
-    generationConfig: { temperature: 0.7, maxOutputTokens: 1024, responseMimeType: 'application/json' },
+    generationConfig: { temperature: 0.7, maxOutputTokens: 4096, responseMimeType: 'application/json' },
   }, {
     headers: { 'Content-Type': 'application/json' },
     timeout: 30000,
