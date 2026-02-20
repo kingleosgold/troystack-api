@@ -21,7 +21,7 @@ router.post('/', async (req, res) => {
       .from('portfolio_snapshots')
       .upsert({
         user_id: userId,
-        date: today,
+        snapshot_date: today,
         total_value: totalValue || 0,
         gold_value: goldValue || 0,
         silver_value: silverValue || 0,
@@ -36,14 +36,14 @@ router.post('/', async (req, res) => {
         platinum_spot: platinumSpot || 0,
         palladium_spot: palladiumSpot || 0,
       }, {
-        onConflict: 'user_id,date',
+        onConflict: 'user_id,snapshot_date',
       })
       .select()
       .single();
 
     if (error) throw error;
 
-    res.json({ success: true, snapshot: { date: data.date } });
+    res.json({ success: true, snapshot: { date: data.snapshot_date } });
   } catch (err) {
     console.error('Snapshot save error:', err);
     res.status(500).json({ error: 'Failed to save snapshot' });
@@ -74,12 +74,12 @@ router.get('/:userId', async (req, res) => {
 
     let query = supabase
       .from('portfolio_snapshots')
-      .select('date, total_value, gold_value, silver_value, platinum_value, palladium_value, gold_oz, silver_oz, platinum_oz, palladium_oz, gold_spot, silver_spot, platinum_spot, palladium_spot')
+      .select('snapshot_date, total_value, gold_value, silver_value, platinum_value, palladium_value, gold_oz, silver_oz, platinum_oz, palladium_oz, gold_spot, silver_spot, platinum_spot, palladium_spot')
       .eq('user_id', userId)
-      .order('date', { ascending: true });
+      .order('snapshot_date', { ascending: true });
 
     if (since) {
-      query = query.gte('date', since.toISOString().split('T')[0]);
+      query = query.gte('snapshot_date', since.toISOString().split('T')[0]);
     }
 
     const { data, error } = await query;
