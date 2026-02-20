@@ -86,10 +86,16 @@ router.get('/:userId', async (req, res) => {
 
     if (error) throw error;
 
+    // Map snapshot_date to date for frontend compatibility
+    const snapshots = (data || []).map(s => ({
+      ...s,
+      date: s.snapshot_date,
+    }));
+
     res.json({
       success: true,
-      snapshots: data || [],
-      count: (data || []).length,
+      snapshots,
+      count: snapshots.length,
       range,
     });
   } catch (err) {

@@ -10,34 +10,46 @@ router.get('/', async (req, res) => {
   try {
     const { metal, days } = req.query;
 
-    // If days param is provided, return history
+    // If days param is provided, return history grouped by metal (matches old backend shape)
     if (days) {
       const numDays = Math.min(Math.max(parseInt(days) || 30, 1), 365);
       const since = new Date();
       since.setDate(since.getDate() - numDays);
 
-      let query = supabase
-        .from('vault_data')
-        .select(ALL_FIELDS)
-        .eq('source', 'comex')
-        .gte('date', since.toISOString().split('T')[0])
-        .order('date', { ascending: true });
-
-      if (metal) {
-        if (!VALID_METALS.includes(metal)) {
-          return res.status(400).json({ error: `Invalid metal. Use: ${VALID_METALS.join(', ')}` });
-        }
-        query = query.eq('metal', metal);
+      if (metal && !VALID_METALS.includes(metal)) {
+        return res.status(400).json({ error: `Invalid metal. Use: ${VALID_METALS.join(', ')}` });
       }
 
-      const { data, error } = await query;
-      if (error) throw error;
+      const metals = metal ? [metal] : VALID_METALS;
+      const grouped = {};
+
+      for (const m of metals) {
+        const { data: rows, error } = await supabase
+          .from('vault_data')
+          .select(ALL_FIELDS)
+          .eq('metal', m)
+          .eq('source', 'comex')
+          .gte('date', since.toISOString().split('T')[0])
+          .order('date', { ascending: true });
+
+        if (error) throw error;
+
+        grouped[m] = (rows || []).map(r => ({
+          date: r.date,
+          registered_oz: r.registered_oz,
+          eligible_oz: r.eligible_oz,
+          combined_oz: r.combined_oz,
+          registered_change_oz: r.registered_change_oz,
+          eligible_change_oz: r.eligible_change_oz,
+          oversubscribed_ratio: parseFloat(r.oversubscribed_ratio) || 0,
+        }));
+      }
 
       return res.json({
-        metal: metal || 'all',
+        success: true,
+        source: 'comex',
         days: numDays,
-        data_points: data.length,
-        history: data,
+        data: grouped,
       });
     }
 
