@@ -93,8 +93,8 @@ router.get('/sparkline-24h', async (req, res) => {
 
     if (error) throw error;
 
-    // Sample to ~24 points
-    const targetPoints = 24;
+    // Sample to ~96 points (one per 15 min over 24h) for smooth sparklines
+    const targetPoints = 96;
     const sample = (arr, col) => {
       if (!arr || arr.length === 0) return [];
       if (arr.length <= targetPoints) return arr.map(d => d[col]).filter(v => v > 0);

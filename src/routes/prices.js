@@ -137,7 +137,7 @@ router.get('/', async (req, res) => {
 router.get('/history', async (req, res) => {
   try {
     const { metal = 'gold', range = '1Y', maxPoints = '60' } = req.query;
-    const maxPts = Math.min(parseInt(maxPoints) || 60, 200);
+    const maxPts = Math.min(parseInt(maxPoints) || 60, 1000);
 
     const validMetals = ['gold', 'silver', 'platinum', 'palladium'];
     const validRanges = ['1M', '3M', '6M', '1Y', '5Y', 'ALL'];
