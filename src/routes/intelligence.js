@@ -294,7 +294,7 @@ Write a personalized briefing covering: 1) How today's market moves affect their
   const geminiResp = await axios.post(geminiUrl, {
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
     system_instruction: { parts: [{ text: systemPrompt }] },
-    generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+    generationConfig: { temperature: 0.7, maxOutputTokens: 4096 },
   }, {
     headers: { 'Content-Type': 'application/json' },
     timeout: 30000,
