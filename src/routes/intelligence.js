@@ -842,7 +842,19 @@ ${holdingsText}
 
 CURRENT SPOT:
 Gold: $${prices.gold}, Silver: $${prices.silver}, Platinum: $${prices.platinum}, Palladium: $${prices.palladium}
-Gold/Silver Ratio: ${gsRatio}`;
+Gold/Silver Ratio: ${gsRatio}
+
+APP GUIDE (when users ask how to do things in the app):
+- Add holding: Tap the "+" button at the TOP of the Portfolio tab. Select metal, enter quantity, cost per oz, purchase date, and item details (name, type, mint, etc).
+- Receipt scanner: Go to Tools tab > Scan Receipt. Take a photo of a dealer receipt and Troy's AI extracts the details automatically.
+- Price alerts: Tools tab > Price Alerts. Set target prices for any metal and get push notifications when hit.
+- Edit holding: Tap any holding in the Portfolio tab to open details, then tap Edit.
+- Delete holding: Swipe left on a holding in the Portfolio tab, or tap Edit > Delete.
+- COMEX Vault Watch: Scroll down on the Today tab to see registered/eligible inventory data from CME Group.
+- Market Intelligence: Today tab shows curated market news and COMEX alerts.
+- Analytics: Analytics tab shows portfolio value history, spot price charts, cost basis analysis, and allocation breakdown.
+- Settings: Manage notifications, subscription, and account from the Settings tab (gear icon).
+- Troy: Tap the gold coin button on any tab to talk to Troy.`;
 
     // Build conversation for Gemini
     const contents = [];
