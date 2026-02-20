@@ -136,11 +136,16 @@ router.get('/', async (req, res) => {
 
 router.get('/history', async (req, res) => {
   try {
-    const { range = '1Y', maxPoints = '60' } = req.query;
+    const { metal = 'gold', range = '1Y', maxPoints = '60' } = req.query;
     const maxPts = Math.min(parseInt(maxPoints) || 60, 200);
 
+    const validMetals = ['gold', 'silver', 'platinum', 'palladium'];
     const validRanges = ['1M', '3M', '6M', '1Y', '5Y', 'ALL'];
     const rangeUpper = range.toUpperCase();
+
+    if (!validMetals.includes(metal)) {
+      return res.status(400).json({ error: `Invalid metal. Use: ${validMetals.join(', ')}` });
+    }
 
     if (!validRanges.includes(rangeUpper)) {
       return res.status(400).json({ error: `Invalid range. Use: ${validRanges.join(', ')}` });
@@ -310,9 +315,13 @@ router.get('/history', async (req, res) => {
 
     res.json({
       success: true,
+      metal,
       range: rangeUpper,
+      unit: 'USD/oz',
       totalPoints: allPoints.length,
       sampledPoints: sampled.length,
+      data_points: sampled.length,
+      prices: sampled.map(pt => ({ date: pt.date, price: pt[metal] || 0 })),
       data: sampled,
     });
   } catch (err) {
