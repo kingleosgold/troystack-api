@@ -279,7 +279,7 @@ Use plain text, no markdown headers or bullet points. Do NOT start with "Good mo
 
   const userPrompt = `Write today's Troy's Take briefing (${today}).
 
-PORTFOLIO:
+THE STACK:
 Total Value: $${totalValue.toFixed(2)} | Cost Basis: $${totalCost.toFixed(2)} | ${totalValue >= totalCost ? 'Gain' : 'Loss'}: $${Math.abs(totalValue - totalCost).toFixed(2)}
 Holdings: ${metalSummary || 'No holdings yet'}
 
@@ -378,7 +378,7 @@ async function generatePortfolioIntelligence(userId) {
       const pct = totalValue > 0 ? ((val / totalValue) * 100).toFixed(1) : '0';
       const gain = val - v.cost;
       const gainPct = v.cost > 0 ? ((gain / v.cost) * 100).toFixed(1) : 'N/A';
-      return `${m.charAt(0).toUpperCase() + m.slice(1)}: ${v.oz.toFixed(2)} oz, $${val.toFixed(0)} (${pct}% of portfolio), cost basis $${v.cost.toFixed(0)}, ${gain >= 0 ? '+' : ''}$${gain.toFixed(0)} (${gainPct}%)`;
+      return `${m.charAt(0).toUpperCase() + m.slice(1)}: ${v.oz.toFixed(2)} oz, $${val.toFixed(0)} (${pct}% of stack), cost basis $${v.cost.toFixed(0)}, ${gain >= 0 ? '+' : ''}$${gain.toFixed(0)} (${gainPct}%)`;
     }).join('\n');
 
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -395,9 +395,9 @@ Return a JSON object with exactly three keys: "portfolio", "costBasis", and "pur
 
 Return ONLY valid JSON, no other text.`;
 
-  const userPrompt = `Analyze this precious metals portfolio (${today}).
+  const userPrompt = `Analyze this precious metals stack (${today}).
 
-PORTFOLIO OVERVIEW:
+STACK OVERVIEW:
 Total Value: $${totalValue.toFixed(0)} | Total Cost: $${totalCost.toFixed(0)} | ${totalValue >= totalCost ? 'Gain' : 'Loss'}: $${Math.abs(totalValue - totalCost).toFixed(0)} (${totalCost > 0 ? ((totalValue - totalCost) / totalCost * 100).toFixed(1) : '0'}%)
 Items: ${userHoldings.length}
 
@@ -852,7 +852,7 @@ APP GUIDE (when users ask how to do things in the app):
 - Delete holding: Swipe left on a holding in the Portfolio tab, or tap Edit > Delete.
 - COMEX Vault Watch: Scroll down on the Today tab to see registered/eligible inventory data from CME Group.
 - Market Intelligence: Today tab shows curated market news and COMEX alerts.
-- Analytics: Analytics tab shows portfolio value history, spot price charts, cost basis analysis, and allocation breakdown.
+- Analytics: Analytics tab shows stack value history, spot price charts, cost basis analysis, and allocation breakdown.
 - Settings: Manage notifications, subscription, and account from the Settings tab (gear icon).
 - Troy: Tap the gold coin button on any tab to talk to Troy.`;
 
