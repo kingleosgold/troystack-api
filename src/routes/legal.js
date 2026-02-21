@@ -109,11 +109,11 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 <body>
   <div class="container">
     <h1>&#x1FA99; Privacy Policy</h1>
-    <p class="tagline">Stack Tracker Gold - Privacy-First Precious Metals Portfolio</p>
+    <p class="tagline">Stack Tracker Gold - Privacy-First Precious Metals Stack Tracker</p>
     <p class="last-updated">Last Updated: February 17, 2026</p>
 
     <div class="summary">
-      <strong>TL;DR:</strong> Your portfolio data is stored on your device by default. If you create an account, your data is encrypted and stored securely in Supabase (our cloud database) for cross-device sync. AI features send portfolio data to Google Gemini for analysis &mdash; this data is not shared beyond the AI provider. We never sell or share your data with advertisers. Receipt images are deleted immediately after processing.
+      <strong>TL;DR:</strong> Your stack data is stored on your device by default. If you create an account, your data is encrypted and stored securely in Supabase (our cloud database) for cross-device sync. AI features send stack data to Google Gemini for analysis &mdash; this data is not shared beyond the AI provider. We never sell or share your data with advertisers. Receipt images are deleted immediately after processing.
     </div>
 
     <h2>Our Privacy Principles</h2>
@@ -121,21 +121,21 @@ const PRIVACY_HTML = `<!DOCTYPE html>
     <div class="principle">
       <h3><span class="icon">&#x1F4F1;</span> Local-First Data Storage</h3>
       <p>
-        By default, all your portfolio data&mdash;your precious metals holdings, purchase history, and preferences&mdash;is stored on your device using encrypted local storage. You can use Stack Tracker Gold without an account, and your data stays entirely on your device.
+        By default, all your stack data&mdash;your precious metals holdings, purchase history, and preferences&mdash;is stored on your device using encrypted local storage. You can use Stack Tracker Gold without an account, and your data stays entirely on your device.
       </p>
     </div>
 
     <div class="principle">
       <h3><span class="icon">&#x2601;&#xFE0F;</span> Optional Cloud Sync</h3>
       <p>
-        Gold and Lifetime subscribers can optionally create an account and enable cloud sync. When enabled, your portfolio data is encrypted and stored on our secure servers to sync across your devices. Cloud sync is entirely optional&mdash;you can use all features without it. You can delete your cloud account and all associated data at any time from the app settings.
+        Gold and Lifetime subscribers can optionally create an account and enable cloud sync. When enabled, your stack data is encrypted and stored on our secure servers to sync across your devices. Cloud sync is entirely optional&mdash;you can use all features without it. You can delete your cloud account and all associated data at any time from the app settings.
       </p>
     </div>
 
     <div class="principle">
       <h3><span class="icon">&#x1F916;</span> AI-Generated Content</h3>
       <p>
-        Features like <strong>Daily Brief</strong> and <strong>Portfolio Intelligence</strong> use AI to generate market analysis and portfolio insights. To provide these features, your portfolio data (holdings, values, and metal allocations) is sent to the <strong>Google Gemini API</strong> for analysis. This data is used solely for generating your personalized insights and is <strong>not shared with third parties beyond the AI provider</strong> for analysis purposes. AI-generated content is for informational purposes only and does not constitute financial advice.
+        Features like <strong>Daily Brief</strong> and <strong>Troy's Analysis</strong> use AI to generate market analysis and stack insights. To provide these features, your stack data (holdings, values, and metal allocations) is sent to the <strong>Google Gemini API</strong> for analysis. This data is used solely for generating your personalized insights and is <strong>not shared with third parties beyond the AI provider</strong> for analysis purposes. AI-generated content is for informational purposes only and does not constitute financial advice.
       </p>
     </div>
 
@@ -161,9 +161,9 @@ const PRIVACY_HTML = `<!DOCTYPE html>
     </div>
 
     <div class="principle">
-      <h3><span class="icon">&#x1F4CA;</span> Portfolio Snapshots</h3>
+      <h3><span class="icon">&#x1F4CA;</span> Stack Snapshots</h3>
       <p>
-        To power analytics charts and historical tracking, we store daily portfolio value snapshots on our servers. These snapshots contain aggregate values only (total portfolio value, metal totals) and are tied to your anonymous user ID. They do not contain individual item details.
+        To power analytics charts and historical tracking, we store daily stack value snapshots on our servers. These snapshots contain aggregate values only (total stack value, metal totals) and are tied to your anonymous user ID. They do not contain individual item details.
       </p>
     </div>
 
@@ -189,7 +189,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
       <p>
         <strong>MetalPriceAPI</strong> &amp; <strong>GoldAPI.io</strong> &mdash; Live spot prices. These requests contain no personal data.<br>
         <strong>RevenueCat</strong> &mdash; Subscription management. Receives an anonymous user ID only.<br>
-        <strong>Supabase</strong> &mdash; Cloud database for account sync and portfolio snapshots. Data is stored securely with row-level security.<br>
+        <strong>Supabase</strong> &mdash; Cloud database for account sync and stack snapshots. Data is stored securely with row-level security.<br>
         <strong>Expo</strong> &mdash; Push notifications for price alerts. Receives only a device push token.<br>
         <strong>Apple App Store</strong> &mdash; Payment processing. We never see your payment details.
       </p>
@@ -200,12 +200,12 @@ const PRIVACY_HTML = `<!DOCTYPE html>
       <h3><span class="icon">&#x1F4CB;</span> What We Store</h3>
       <p>
         &#x2705; Anonymous user ID (for subscription and sync features)<br>
-        &#x2705; Portfolio snapshots for analytics (aggregate values only)<br>
-        &#x2705; Cloud sync data if you opt in (encrypted portfolio data)<br>
+        &#x2705; Stack snapshots for analytics (aggregate values only)<br>
+        &#x2705; Cloud sync data if you opt in (encrypted stack data)<br>
         &#x2705; Price alert preferences (target prices and notification settings)<br>
         &#x2705; Expo push token (for delivering push notifications to your device)<br>
         &#x2705; Notification preferences (which alerts you've enabled/disabled)<br>
-        &#x2705; AI-processed portfolio summaries (sent to Google Gemini for analysis, not stored permanently)
+        &#x2705; AI-processed stack summaries (sent to Google Gemini for analysis, not stored permanently)
       </p>
     </div>
 
@@ -345,7 +345,7 @@ const TERMS_HTML = `<!DOCTYPE html>
 <body>
   <div class="container">
     <h1>&#x1F4DC; Terms of Use</h1>
-    <p class="tagline">Stack Tracker Gold - Privacy-First Precious Metals Portfolio</p>
+    <p class="tagline">Stack Tracker Gold - Privacy-First Precious Metals Stack Tracker</p>
     <p class="last-updated">Last Updated: February 17, 2026</p>
 
     <div class="summary">
@@ -359,23 +359,23 @@ const TERMS_HTML = `<!DOCTYPE html>
 
     <h2>2. Description of Service</h2>
     <p>
-      Stack Tracker Gold is a personal portfolio tracking application for precious metals enthusiasts. The App allows you to:
+      Stack Tracker Gold is a personal stack tracking application for precious metals enthusiasts. The App allows you to:
     </p>
     <ul>
       <li>Track your gold, silver, platinum, and palladium holdings</li>
       <li>Scan receipts using AI-powered image recognition</li>
       <li>View live spot prices for precious metals</li>
       <li>View COMEX warehouse inventory data (Vault Watch)</li>
-      <li>Receive AI-generated market analysis and portfolio insights</li>
+      <li>Receive AI-generated market analysis and stack insights</li>
       <li>Receive push notifications for price alerts, daily briefs, and breaking news</li>
-      <li>Export your portfolio data in various formats</li>
+      <li>Export your stack data in various formats</li>
     </ul>
 
     <h2>3. User Responsibilities</h2>
     <p>You agree to:</p>
     <ul>
       <li>Use the App only for lawful purposes</li>
-      <li>Verify the accuracy of all portfolio data, including AI-scanned receipt results &mdash; you are solely responsible for ensuring your holdings data is correct</li>
+      <li>Verify the accuracy of all stack data, including AI-scanned receipt results &mdash; you are solely responsible for ensuring your holdings data is correct</li>
       <li>Not attempt to reverse engineer, modify, or exploit the App</li>
       <li>Not use the App to store or process illegal content</li>
       <li>Maintain the security of your device and account credentials</li>
@@ -383,17 +383,17 @@ const TERMS_HTML = `<!DOCTYPE html>
 
     <h2>4. Data and Privacy</h2>
     <p>
-      Your portfolio data is stored locally on your device by default. If you create an account and enable cloud sync, your data is encrypted and stored on our servers. Receipt images are deleted immediately after AI processing. For full details, please review our <a href="/privacy">Privacy Policy</a>.
+      Your stack data is stored locally on your device by default. If you create an account and enable cloud sync, your data is encrypted and stored on our servers. Receipt images are deleted immediately after AI processing. For full details, please review our <a href="/privacy">Privacy Policy</a>.
     </p>
 
     <h2>5. AI-Generated Content</h2>
     <p>
-      The App includes features powered by artificial intelligence, including Daily Brief, Portfolio Intelligence, and Market Intelligence. By using these features, you acknowledge and agree that:
+      The App includes features powered by artificial intelligence, including Daily Brief, Troy's Analysis, and Market Intelligence. By using these features, you acknowledge and agree that:
     </p>
     <ul>
       <li><strong>Not financial advice:</strong> All AI-generated content is for informational and educational purposes only. It does not constitute financial advice, investment recommendations, or any form of professional guidance.</li>
       <li><strong>No guarantee of accuracy:</strong> AI-generated analysis, summaries, and insights may contain errors, inaccuracies, or outdated information. You should not rely solely on AI content for investment decisions.</li>
-      <li><strong>Data processing:</strong> To generate personalized insights, your portfolio data (holdings, values, allocations) is sent to third-party AI providers (Google Gemini) for processing. This data is used solely for generating your insights and is not shared beyond the AI provider.</li>
+      <li><strong>Data processing:</strong> To generate personalized insights, your stack data (holdings, values, allocations) is sent to third-party AI providers (Google Gemini) for processing. This data is used solely for generating your insights and is not shared beyond the AI provider.</li>
       <li><strong>Your responsibility:</strong> You are solely responsible for any investment or financial decisions you make. Always consult qualified financial professionals before making significant financial decisions.</li>
     </ul>
 
@@ -436,9 +436,9 @@ const TERMS_HTML = `<!DOCTYPE html>
     <ul>
       <li><strong>Spot prices</strong> are sourced from third-party APIs (MetalPriceAPI, GoldAPI) and may be delayed, inaccurate, or temporarily unavailable</li>
       <li><strong>COMEX warehouse data</strong> is sourced from CME Group and may not reflect real-time inventory changes</li>
-      <li><strong>AI-generated analysis</strong> (Daily Brief, Portfolio Intelligence, Market Intelligence) may contain errors and should not be relied upon as the sole basis for any decision</li>
+      <li><strong>AI-generated analysis</strong> (Daily Brief, Troy's Analysis, Market Intelligence) may contain errors and should not be relied upon as the sole basis for any decision</li>
       <li><strong>Receipt scanning</strong> uses AI vision which may misread digits, prices, or quantities &mdash; always verify scanned data before saving</li>
-      <li><strong>Portfolio valuations</strong> are estimates based on available spot price data and may not reflect the actual market or resale value of your holdings</li>
+      <li><strong>Stack valuations</strong> are estimates based on available spot price data and may not reflect the actual market or resale value of your holdings</li>
     </ul>
 
     <h2>9. Disclaimer of Warranties</h2>

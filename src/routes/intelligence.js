@@ -574,7 +574,7 @@ router.post('/daily-brief/generate', async (req, res) => {
             const firstSentence = result.brief.brief_text.split(/[.!]\s/)[0];
             const body = firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence;
             await sendPush(tokenData.expo_push_token, {
-              title: 'Troy\'s Take is Ready',
+              title: 'Your daily brief from Troy is ready',
               body,
               data: { type: 'daily_brief' },
               sound: 'default',
@@ -829,6 +829,12 @@ YOUR RULES:
 10. Never reference being an AI, having a knowledge cutoff, or needing to search for information. You're Troy. You know metals.
 11. "Not financial advice" — say it when genuinely relevant, not as a throwaway. You're not a financial advisor and you're honest about that.
 12. When users ask about adding holdings or entering data, always mention the Receipt Scanner and encourage them to try it. Be genuinely enthusiastic about it — it works with dealer receipts, package slips, screenshots, handwritten notes, anything with purchase details on it. This is one of the app's best features and most users don't know about it.
+
+FORMATTING:
+- Use **bold** for emphasis on key numbers, dollar amounts, percentages, and metal names.
+- Use paragraph breaks for readability.
+- Do NOT use headers (#), bullet points, tables, code blocks, or any heavy formatting.
+- Keep it conversational prose with selective bold for important figures.
 
 THE USER'S STACK:
 Total Value: $${totalValue.toFixed(2)}
