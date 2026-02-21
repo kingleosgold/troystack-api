@@ -8,7 +8,7 @@ const supabase = require('../lib/supabase');
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 let spotPriceCache = {
-  prices: { gold: 5100, silver: 107, platinum: 2700, palladium: 2000 },
+  prices: { gold: 5100, silver: 107, platinum: 2150, palladium: 1750 },
   lastUpdated: null,
   source: 'static-fallback',
   change: { gold: {}, silver: {}, platinum: {}, palladium: {}, source: 'unavailable' },
@@ -198,6 +198,32 @@ function getFridayClose() {
 }
 
 // ============================================
+// LAST KNOWN Pt/Pd FROM PRICE_LOG
+// ============================================
+
+let lastKnownPtPd = { platinum: 2150, palladium: 1750 };
+
+async function getLastKnownPtPd() {
+  try {
+    const { data, error } = await supabase
+      .from('price_log')
+      .select('platinum_price, palladium_price')
+      .gt('platinum_price', 0)
+      .order('timestamp', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (!error && data) {
+      if (data.platinum_price > 0) lastKnownPtPd.platinum = parseFloat(data.platinum_price);
+      if (data.palladium_price > 0) lastKnownPtPd.palladium = parseFloat(data.palladium_price);
+    }
+  } catch (err) {
+    console.log('   Could not fetch last Pt/Pd from price_log:', err.message);
+  }
+  return lastKnownPtPd;
+}
+
+// ============================================
 // PRICE FETCHING: PRIORITY CHAIN
 // ============================================
 
@@ -253,30 +279,15 @@ async function fetchFromGoldAPI() {
     throw new Error('GoldAPI returned no price data');
   }
 
-  // GoldAPI provides change data directly
-  const change = {
-    gold: {
-      amount: goldRes.data.ch ? Math.round(goldRes.data.ch * 100) / 100 : null,
-      percent: goldRes.data.chp ? Math.round(goldRes.data.chp * 100) / 100 : null,
-      prevClose: goldRes.data.prev_close_price ? Math.round(goldRes.data.prev_close_price * 100) / 100 : null,
-    },
-    silver: {
-      amount: silverRes.data.ch ? Math.round(silverRes.data.ch * 100) / 100 : null,
-      percent: silverRes.data.chp ? Math.round(silverRes.data.chp * 100) / 100 : null,
-      prevClose: silverRes.data.prev_close_price ? Math.round(silverRes.data.prev_close_price * 100) / 100 : null,
-    },
-    platinum: {},
-    palladium: {},
-    source: 'goldapi-io',
-  };
+  // Use last known Pt/Pd from price_log (GoldAPI only covers Au/Ag)
+  const ptpd = await getLastKnownPtPd();
 
   return {
     gold: Math.round(goldRes.data.price * 100) / 100,
     silver: Math.round(silverRes.data.price * 100) / 100,
-    platinum: 2700,
-    palladium: 2000,
+    platinum: ptpd.platinum,
+    palladium: ptpd.palladium,
     source: 'goldapi-io',
-    change,
   };
 }
 
@@ -325,17 +336,14 @@ async function fetchLiveSpotPrices() {
     if (!fetched) {
       console.log('   All APIs failed, no cache — using static fallback');
       fetched = {
-        gold: 5100, silver: 107, platinum: 2700, palladium: 2000,
+        gold: 5100, silver: 107, platinum: 2150, palladium: 1750,
         source: 'static-fallback',
       };
     }
 
-    // Calculate change data (if not provided by GoldAPI)
-    let changeData = fetched.change || null;
-    if (!changeData || changeData.source !== 'goldapi-io') {
-      const yesterday = await getYesterdayPrices();
-      changeData = calculateChanges(fetched, yesterday);
-    }
+    // Always self-calculate change from last trading day's price_log entry
+    const yesterday = await getYesterdayPrices();
+    const changeData = calculateChanges(fetched, yesterday);
 
     // Save for tomorrow's change calc
     savePreviousDayPrices(fetched.gold, fetched.silver, fetched.platinum, fetched.palladium);
@@ -383,7 +391,7 @@ async function fetchLiveSpotPrices() {
       return spotPriceCache;
     }
 
-    spotPriceCache.prices = { gold: 5100, silver: 107, platinum: 2700, palladium: 2000 };
+    spotPriceCache.prices = { gold: 5100, silver: 107, platinum: 2150, palladium: 1750 };
     spotPriceCache.lastUpdated = new Date();
     spotPriceCache.source = 'static-fallback';
     return spotPriceCache;
@@ -499,6 +507,7 @@ function getCachedPrices() {
  */
 async function initPriceFetcher() {
   await loadFridayClose();
+  await getLastKnownPtPd();
   await fetchLiveSpotPrices();
   console.log('💰 [Price Fetcher] Initialized');
 }

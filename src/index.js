@@ -22,7 +22,7 @@ const widgetRouter = require('./routes/widget');
 const snapshotsRouter = require('./routes/snapshots');
 const scanUsageRouter = require('./routes/scan-usage');
 
-const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase } = require('./services/price-fetcher');
+const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase, areMarketsClosed } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
 
 const app = express();
@@ -337,6 +337,10 @@ app.listen(PORT, () => {
   });
 
   cron.schedule('*/15 * * * *', async () => {
+    if (areMarketsClosed()) {
+      console.log(`💰 [Price Log Cron] ${new Date().toISOString()} — Markets closed, skipping`);
+      return;
+    }
     try {
       const result = await fetchLiveSpotPrices();
       if (result && result.prices) {
