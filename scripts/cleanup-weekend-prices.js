@@ -12,19 +12,17 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+const etFmt = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  weekday: 'short',
+  hour: 'numeric',
+  hourCycle: 'h23',
+});
+
 function isDuringMarketClose(isoTimestamp) {
   const date = new Date(isoTimestamp);
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    hour12: false,
-    weekday: 'short',
-    hour: 'numeric',
-    minute: 'numeric',
-  });
   const parts = {};
-  for (const p of fmt.formatToParts(date)) {
-    parts[p.type] = p.value;
-  }
+  for (const p of etFmt.formatToParts(date)) parts[p.type] = p.value;
 
   const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
   const day = dayMap[parts.weekday];
