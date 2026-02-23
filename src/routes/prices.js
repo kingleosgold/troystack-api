@@ -3,7 +3,12 @@ const path = require('path');
 const fs = require('fs');
 const router = express.Router();
 const supabase = require('../lib/supabase');
+const axios = require('axios');
 const { getSpotPrices, getCachedPrices } = require('../services/price-fetcher');
+const {
+  fetchAllETFs, getRatioForDate,
+  slvToSpotSilver, gldToSpotGold, ppltToSpotPlatinum, pallToSpotPalladium,
+} = require('../services/etf-prices');
 
 // ============================================
 // HISTORICAL DATA — loaded at require() time
@@ -333,7 +338,7 @@ router.get('/history', async (req, res) => {
 // ============================================
 // GET /v1/historical-spot — Single date spot price lookup
 // Used by Add/Edit Purchase to get "Spot at Purchase"
-// Tiers: price_log → historicalData (monthly) → unavailable
+// Tiers: price_log → ETF (Yahoo Finance) → MetalPriceAPI → historicalData (monthly) → unavailable
 // ============================================
 
 router.get('/historical-spot', async (req, res) => {
@@ -450,7 +455,62 @@ router.get('/historical-spot', async (req, res) => {
         }
       }
 
-      // Fallback to monthly MacroTrends data
+      // ── TIER 3: Yahoo Finance ETF-derived spot prices ──
+      if (!goldPrice) {
+        try {
+          const [etfData, ratios] = await Promise.all([
+            fetchAllETFs(normalizedDate),
+            getRatioForDate(normalizedDate),
+          ]);
+
+          if (etfData.gld) {
+            goldPrice = Math.round(gldToSpotGold(etfData.gld.close, ratios.gld_ratio) * 100) / 100;
+          }
+          if (etfData.slv) {
+            silverPrice = Math.round(slvToSpotSilver(etfData.slv.close, ratios.slv_ratio) * 100) / 100;
+          }
+          if (etfData.pplt) {
+            platinumPrice = Math.round(ppltToSpotPlatinum(etfData.pplt.close, ratios.pplt_ratio) * 100) / 100;
+          }
+          if (etfData.pall) {
+            palladiumPrice = Math.round(pallToSpotPalladium(etfData.pall.close, ratios.pall_ratio) * 100) / 100;
+          }
+
+          if (goldPrice) {
+            granularity = 'daily_etf';
+            source = 'yahoo-finance-etf';
+          }
+        } catch (etfErr) {
+          console.error('ETF lookup error:', etfErr.message);
+        }
+      }
+
+      // ── TIER 4: MetalPriceAPI historical ──
+      if (!goldPrice) {
+        const METAL_API_KEY = process.env.METAL_PRICE_API_KEY;
+        if (METAL_API_KEY) {
+          try {
+            const apiRes = await axios.get(
+              `https://api.metalpriceapi.com/v1/${normalizedDate}`,
+              {
+                params: { api_key: METAL_API_KEY, base: 'USD', currencies: 'XAU,XAG' },
+                timeout: 10000,
+              }
+            );
+            const apiData = apiRes.data;
+            if (apiData.success && apiData.rates && apiData.rates.XAU && apiData.rates.XAG) {
+              goldPrice = Math.round((1 / apiData.rates.XAU) * 100) / 100;
+              silverPrice = Math.round((1 / apiData.rates.XAG) * 100) / 100;
+              granularity = 'daily';
+              source = 'metalpriceapi';
+            }
+          } catch (apiErr) {
+            console.error('MetalPriceAPI historical error:', apiErr.message);
+          }
+        }
+      }
+
+      // ── TIER 5: Monthly MacroTrends fallback ──
       if (!goldPrice) {
         const gp = historicalData.gold[normalizedDate];
         const sp = historicalData.silver[normalizedDate];
