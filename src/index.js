@@ -86,6 +86,7 @@ app.use((req, res, next) => {
 // Rate limit: 100 requests/min per IP
 // ============================================================
 app.use('/v1/prices', publicLimiter, pricesRouter);
+app.use('/v1', publicLimiter, pricesRouter); // historical-spot route
 app.use('/v1/market-intel', publicLimiter, marketIntelRouter);
 app.use('/v1/vault-watch', publicLimiter, vaultWatchRouter);
 app.use('/v1/speculation', publicLimiter, speculationRouter);

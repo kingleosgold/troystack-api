@@ -330,4 +330,181 @@ router.get('/history', async (req, res) => {
   }
 });
 
+// ============================================
+// GET /v1/historical-spot — Single date spot price lookup
+// Used by Add/Edit Purchase to get "Spot at Purchase"
+// Tiers: price_log → historicalData (monthly) → unavailable
+// ============================================
+
+router.get('/historical-spot', async (req, res) => {
+  try {
+    const { date, time, metal } = req.query;
+
+    if (!date) {
+      return res.status(400).json({ success: false, error: 'Date is required (YYYY-MM-DD)' });
+    }
+
+    const normalizedDate = date.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDate)) {
+      return res.status(400).json({ success: false, error: 'Date must be in YYYY-MM-DD format' });
+    }
+
+    if (time && !/^\d{2}:\d{2}$/.test(time)) {
+      return res.status(400).json({ success: false, error: 'Time must be in HH:MM format' });
+    }
+
+    const requestedDate = new Date(normalizedDate + 'T00:00:00');
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // Future dates → return current spot
+    if (requestedDate > today) {
+      const cached = getCachedPrices();
+      return res.json({
+        success: true,
+        date: normalizedDate,
+        time: time || null,
+        gold: cached.gold,
+        silver: cached.silver,
+        platinum: cached.platinum || null,
+        palladium: cached.palladium || null,
+        granularity: 'current',
+        source: 'current-spot',
+        note: 'Future date requested, using current spot price',
+      });
+    }
+
+    const year = requestedDate.getFullYear();
+    let goldPrice, silverPrice, platinumPrice, palladiumPrice, granularity, source;
+    let note = null;
+
+    // ── TIER 1: Pre-April 2006 — monthly MacroTrends data only ──
+    if (year < 2006 || (year === 2006 && requestedDate.getMonth() < 3)) {
+      const gp = historicalData.gold[normalizedDate];
+      const sp = historicalData.silver[normalizedDate];
+
+      if (gp && sp) {
+        goldPrice = gp;
+        silverPrice = sp;
+        granularity = 'monthly';
+        source = 'macrotrends';
+        note = 'Pre-2006 data uses monthly averages. Adjust manually if you know the exact price.';
+      } else {
+        return res.json({
+          success: true, date: normalizedDate, gold: null, silver: null,
+          price: null, granularity: 'none', source: 'unavailable',
+          note: 'Historical price not available for this date',
+        });
+      }
+    }
+    // ── TIER 2+: April 2006 to present ──
+    else {
+      // Check price_log for exact or closest match
+      const dayStart = `${normalizedDate}T00:00:00.000Z`;
+      const dayEnd = `${normalizedDate}T23:59:59.999Z`;
+
+      if (time) {
+        // Time-specific: ±5 minute window
+        const ts = new Date(`${normalizedDate}T${time}:00Z`);
+        const windowStart = new Date(ts.getTime() - 5 * 60 * 1000).toISOString();
+        const windowEnd = new Date(ts.getTime() + 5 * 60 * 1000).toISOString();
+
+        const { data } = await supabase
+          .from('price_log')
+          .select('gold_price, silver_price, platinum_price, palladium_price')
+          .gte('timestamp', windowStart)
+          .lte('timestamp', windowEnd)
+          .order('timestamp')
+          .limit(1)
+          .single();
+
+        if (data && data.gold_price > 0) {
+          goldPrice = parseFloat(data.gold_price);
+          silverPrice = parseFloat(data.silver_price);
+          platinumPrice = data.platinum_price ? parseFloat(data.platinum_price) : null;
+          palladiumPrice = data.palladium_price ? parseFloat(data.palladium_price) : null;
+          granularity = 'minute';
+          source = 'price_log';
+        }
+      }
+
+      if (!goldPrice) {
+        // Day-level: find closest row on that date
+        const { data: rows } = await supabase
+          .from('price_log')
+          .select('gold_price, silver_price, platinum_price, palladium_price')
+          .gte('timestamp', dayStart)
+          .lte('timestamp', dayEnd)
+          .gt('gold_price', 0)
+          .order('timestamp')
+          .limit(1);
+
+        if (rows && rows.length > 0) {
+          const row = rows[0];
+          goldPrice = parseFloat(row.gold_price);
+          silverPrice = parseFloat(row.silver_price);
+          platinumPrice = row.platinum_price ? parseFloat(row.platinum_price) : null;
+          palladiumPrice = row.palladium_price ? parseFloat(row.palladium_price) : null;
+          granularity = 'logged_daily';
+          source = 'price_log';
+        }
+      }
+
+      // Fallback to monthly MacroTrends data
+      if (!goldPrice) {
+        const gp = historicalData.gold[normalizedDate];
+        const sp = historicalData.silver[normalizedDate];
+
+        if (gp && sp) {
+          goldPrice = gp;
+          silverPrice = sp;
+          granularity = 'monthly_fallback';
+          source = 'macrotrends';
+          note = 'Using monthly average. Adjust manually if you know the exact price.';
+        }
+      }
+
+      // No data found
+      if (!goldPrice) {
+        return res.json({
+          success: true, date: normalizedDate, gold: null, silver: null,
+          price: null, granularity: 'none', source: 'unavailable',
+          note: 'Historical price not available for this date',
+        });
+      }
+    }
+
+    // Round
+    goldPrice = Math.round(goldPrice * 100) / 100;
+    silverPrice = Math.round(silverPrice * 100) / 100;
+    if (platinumPrice) platinumPrice = Math.round(platinumPrice * 100) / 100;
+    if (palladiumPrice) palladiumPrice = Math.round(palladiumPrice * 100) / 100;
+
+    const response = {
+      success: true,
+      date: normalizedDate,
+      time: time || null,
+      gold: goldPrice,
+      silver: silverPrice,
+      platinum: platinumPrice || null,
+      palladium: palladiumPrice || null,
+      granularity,
+      source,
+    };
+
+    if (note) response.note = note;
+
+    // If specific metal requested, include .price for backwards compat
+    if (['gold', 'silver', 'platinum', 'palladium'].includes(metal)) {
+      response.metal = metal;
+      response.price = response[metal];
+    }
+
+    res.json(response);
+  } catch (err) {
+    console.error('Historical spot error:', err);
+    res.status(500).json({ success: false, error: 'Failed to lookup historical price' });
+  }
+});
+
 module.exports = router;
