@@ -482,6 +482,42 @@ const TERMS_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
+router.get('/api/privacy', (req, res) => {
+  res.json({
+    version: '2.0.0',
+    lastUpdated: '2026-01-28',
+    summary: 'Your data is stored on your device by default. Cloud sync is optional and encrypted. We never sell or share your data.',
+    principles: [
+      {
+        title: 'Memory-Only Image Processing',
+        description: 'Receipt images are processed entirely in RAM and never written to disk.',
+        technical: 'Images held in RAM only during API call, garbage collected immediately after response.',
+      },
+      {
+        title: 'No Account Required',
+        description: 'Use the app fully without creating an account. Your data stays on your device.',
+        technical: 'Local-first architecture with optional encrypted sync.',
+      },
+      {
+        title: 'End-to-End Encryption',
+        description: 'If you choose to backup/sync, your data is encrypted on your device before transmission.',
+        technical: 'AES-256-GCM encryption with user-held keys. Server stores only ciphertext.',
+      },
+      {
+        title: 'No Tracking',
+        description: 'No analytics, no third-party SDKs, no advertising. We do not track your usage.',
+        technical: 'No Google Analytics, Facebook SDK, or similar. No device fingerprinting.',
+      },
+      {
+        title: 'Your Data, Your Control',
+        description: 'Export all your data anytime. Delete everything with one tap.',
+        technical: 'Full JSON/CSV export, complete local deletion, server backup deletion via API.',
+      },
+    ],
+    contact: 'privacy@stacktrackerpro.com',
+  });
+});
+
 router.get('/privacy', (req, res) => {
   res.type('html').send(PRIVACY_HTML);
 });

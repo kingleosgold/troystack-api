@@ -411,6 +411,89 @@ router.post('/notification-preferences', async (req, res) => {
   }
 });
 
+// ============================================
+// POST /breaking-news — Admin: send breaking news push to all users
+// Requires X-API-Key matching INTELLIGENCE_API_KEY
+// ============================================
+
+router.post('/breaking-news', async (req, res) => {
+  try {
+    const apiKey = req.headers['x-api-key'] || req.query.api_key;
+    if (!apiKey || apiKey !== process.env.INTELLIGENCE_API_KEY) {
+      return res.status(401).json({ success: false, error: 'Invalid API key' });
+    }
+
+    const { title, body, metal, severity } = req.body;
+    if (!title || !body) {
+      return res.status(400).json({ success: false, error: 'title and body are required' });
+    }
+
+    // Insert breaking news record
+    const { data: newsRecord, error: insertError } = await supabase
+      .from('breaking_news')
+      .insert({ title, body, metal: metal || null, severity: severity || 'info' })
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error('[Breaking News] Insert error:', insertError.message);
+      return res.status(500).json({ success: false, error: insertError.message });
+    }
+
+    // Get all push tokens
+    const { data: tokens, error: tokenError } = await supabase
+      .from('push_tokens')
+      .select('expo_push_token, user_id')
+      .order('last_active', { ascending: false });
+
+    if (tokenError || !tokens) {
+      return res.json({ success: true, newsId: newsRecord.id, pushSent: 0, error: 'Failed to fetch tokens' });
+    }
+
+    // Filter out users who disabled breaking_news notifications
+    const { data: disabledPrefs } = await supabase
+      .from('notification_preferences')
+      .select('user_id')
+      .eq('breaking_news', false);
+
+    const disabledUserIds = new Set((disabledPrefs || []).map(p => p.user_id));
+
+    // Deduplicate by user_id (most recent token per user)
+    const seenUsers = new Set();
+    const validTokens = [];
+    for (const t of tokens) {
+      if (!isValidExpoPushToken(t.expo_push_token)) continue;
+      if (t.user_id && disabledUserIds.has(t.user_id)) continue;
+      const key = t.user_id || t.expo_push_token;
+      if (seenUsers.has(key)) continue;
+      seenUsers.add(key);
+      validTokens.push(t.expo_push_token);
+    }
+
+    // Send batch push notifications
+    let pushSent = 0;
+    if (validTokens.length > 0) {
+      try {
+        const results = await sendBatchPush(validTokens, {
+          title,
+          body,
+          data: { type: 'breaking_news', newsId: newsRecord.id },
+          sound: 'default',
+        });
+        pushSent = results.filter(r => r.success).length;
+      } catch (batchErr) {
+        console.error('[Breaking News] Batch push error:', batchErr.message);
+      }
+    }
+
+    console.log(`[Breaking News] Created: "${title}" — pushed to ${pushSent}/${validTokens.length} devices`);
+    res.json({ success: true, newsId: newsRecord.id, pushSent, totalTargeted: validTokens.length });
+  } catch (error) {
+    console.error('[Breaking News] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Export helper functions for inter-module use (intelligence.js needs these)
 module.exports = router;
 module.exports.sendPush = sendPush;

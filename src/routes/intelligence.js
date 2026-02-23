@@ -906,6 +906,36 @@ APP GUIDE (when users ask how to do things in the app):
   }
 });
 
+// POST /v1/portfolio-intelligence/generate — Manual trigger
+router.post('/portfolio-intelligence/generate', async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId || !isUUID(userId)) {
+      return res.status(400).json({ error: 'Valid userId is required' });
+    }
+
+    const result = await generatePortfolioIntelligence(userId);
+    if (!result) {
+      return res.json({ success: true, intelligence: null, message: 'No holdings found' });
+    }
+
+    return res.json({
+      success: true,
+      intelligence: {
+        text: result.portfolio,
+        costBasis: result.costBasis,
+        purchaseStats: result.purchaseStats,
+        date: result.date,
+      },
+    });
+
+  } catch (error) {
+    console.error('[Portfolio Intelligence] Generate error:', error.message);
+    return res.status(500).json({ error: error.message || 'Failed to generate portfolio intelligence' });
+  }
+});
+
 // Export functions for cron jobs and inter-module use
 module.exports = router;
 module.exports.runIntelligenceGeneration = runIntelligenceGeneration;

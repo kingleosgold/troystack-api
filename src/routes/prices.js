@@ -567,4 +567,101 @@ router.get('/historical-spot', async (req, res) => {
   }
 });
 
+// ============================================
+// POST /v1/historical-spot-batch — Batch lookup (up to 100 dates)
+// ============================================
+
+router.post('/historical-spot-batch', async (req, res) => {
+  try {
+    const { dates } = req.body;
+
+    if (!dates || !Array.isArray(dates) || dates.length === 0) {
+      return res.status(400).json({ success: false, error: 'dates array is required' });
+    }
+
+    if (dates.length > 100) {
+      return res.status(400).json({ success: false, error: 'Maximum 100 dates per batch request' });
+    }
+
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const cached = getCachedPrices();
+
+    const results = {};
+    let fromPriceLog = 0;
+    let fromMacrotrends = 0;
+    let fromCurrentSpot = 0;
+
+    for (const date of dates) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        results[date] = { success: false, error: 'Invalid date format' };
+        continue;
+      }
+
+      // Today or future → current spot
+      if (date >= todayStr) {
+        results[date] = { success: true, gold: cached.gold, silver: cached.silver, source: 'current-spot' };
+        fromCurrentSpot++;
+        continue;
+      }
+
+      // Try price_log for post-April 2006 dates
+      const requestedDate = new Date(date + 'T12:00:00');
+      const year = requestedDate.getFullYear();
+
+      if (year >= 2006 && !(year === 2006 && requestedDate.getMonth() < 3)) {
+        try {
+          const dayStart = `${date}T00:00:00.000Z`;
+          const dayEnd = `${date}T23:59:59.999Z`;
+          const { data: rows } = await supabase
+            .from('price_log')
+            .select('gold_price, silver_price')
+            .gte('timestamp', dayStart)
+            .lte('timestamp', dayEnd)
+            .gt('gold_price', 0)
+            .order('timestamp')
+            .limit(1);
+
+          if (rows && rows.length > 0) {
+            results[date] = {
+              success: true,
+              gold: Math.round(parseFloat(rows[0].gold_price) * 100) / 100,
+              silver: Math.round(parseFloat(rows[0].silver_price) * 100) / 100,
+              source: 'price_log',
+            };
+            fromPriceLog++;
+            continue;
+          }
+        } catch (e) { /* fall through */ }
+      }
+
+      // MacroTrends monthly fallback
+      const gp = historicalData.gold[date];
+      const sp = historicalData.silver[date];
+
+      if (gp && sp) {
+        results[date] = { success: true, gold: gp, silver: sp, source: 'macrotrends' };
+        fromMacrotrends++;
+        continue;
+      }
+
+      // Final fallback: current spot
+      results[date] = {
+        success: true,
+        gold: cached.gold,
+        silver: cached.silver,
+        source: 'current-spot-fallback',
+        note: 'Historical data not available, using current spot',
+      };
+      fromCurrentSpot++;
+    }
+
+    res.json({ success: true, count: dates.length, results });
+
+  } catch (error) {
+    console.error('Batch historical spot error:', error);
+    res.status(500).json({ success: false, error: 'Failed to lookup historical prices' });
+  }
+});
+
 module.exports = router;
