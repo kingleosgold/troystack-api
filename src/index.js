@@ -17,7 +17,7 @@ const scanReceiptRouter = require('./routes/scan-receipt');
 const pushRouter = require('./routes/push');
 const legalRouter = require('./routes/legal');
 const stripeRouter = require('./routes/stripe');
-const { stripeWebhookHandler } = require('./routes/stripe');
+const { stripeWebhookHandler, revenueCatWebhookHandler } = require('./routes/stripe');
 const widgetRouter = require('./routes/widget');
 const snapshotsRouter = require('./routes/snapshots');
 const scanUsageRouter = require('./routes/scan-usage');
@@ -114,6 +114,9 @@ app.use('/v1/scan-receipt', authenticatedLimiter, scanReceiptRouter);
 
 // Push notifications — public (mobile app sends tokens)
 app.use('/v1/push', publicLimiter, pushRouter);
+
+// RevenueCat webhook — iOS subscription events (needs JSON body, so goes after express.json)
+app.post('/v1/webhooks/revenuecat', revenueCatWebhookHandler);
 
 // Stripe billing (non-webhook routes)
 app.use('/v1/stripe', publicLimiter, stripeRouter);

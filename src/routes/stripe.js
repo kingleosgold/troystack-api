@@ -414,5 +414,115 @@ router.get('/sync-subscription', async (req, res) => {
   }
 });
 
+// ============================================
+// REVENUECAT WEBHOOK — iOS subscription events
+// Always returns 200 to prevent RevenueCat retries
+// ============================================
+
+const REVENUECAT_WEBHOOK_SECRET = process.env.REVENUECAT_WEBHOOK_SECRET;
+
+function mapProductToTier(productId) {
+  if (!productId) return 'free';
+  const pid = productId.toLowerCase();
+  if (pid.includes('lifetime')) return 'lifetime';
+  if (pid.includes('gold') || pid.includes('premium') || pid.includes('yearly') || pid.includes('monthly')) return 'gold';
+  return 'free';
+}
+
+async function revenueCatWebhookHandler(req, res) {
+  try {
+    // Verify webhook secret
+    if (REVENUECAT_WEBHOOK_SECRET) {
+      const authHeader = req.headers['authorization'] || '';
+      const token = authHeader.replace(/^Bearer\s+/i, '');
+      if (token !== REVENUECAT_WEBHOOK_SECRET) {
+        console.warn('[RevenueCat Webhook] Invalid authorization token');
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+    }
+
+    const event = req.body?.event || req.body;
+    const eventType = event?.type;
+    const appUserId = event?.app_user_id;
+    const productId = event?.product_id;
+    const expirationMs = event?.expiration_at_ms;
+
+    console.log(`[RevenueCat Webhook] Event: ${eventType}, user: ${appUserId}, product: ${productId}`);
+
+    // Skip anonymous users
+    if (!appUserId || appUserId.startsWith('$RCAnonymousID:')) {
+      return res.status(200).json({ success: true, skipped: true, reason: 'anonymous_user' });
+    }
+
+    // Validate UUID
+    if (!isUUID(appUserId)) {
+      return res.status(200).json({ success: true, skipped: true, reason: 'non_uuid_user' });
+    }
+
+    const tier = mapProductToTier(productId);
+    const expirationDate = expirationMs ? new Date(expirationMs).toISOString() : null;
+
+    switch (eventType) {
+      case 'INITIAL_PURCHASE':
+      case 'RENEWAL':
+      case 'PRODUCT_CHANGE': {
+        console.log(`  Setting tier=${tier}, expires=${expirationDate}`);
+        const { error } = await supabase
+          .from('profiles')
+          .update({
+            subscription_tier: tier,
+            subscription_expires_at: expirationDate,
+          })
+          .eq('id', appUserId);
+
+        if (error) console.error('  Supabase update failed:', error.message);
+        break;
+      }
+
+      case 'CANCELLATION': {
+        // Keep access until expiration — only update expiry date
+        console.log(`  Cancellation — keeping tier, setting expiry=${expirationDate}`);
+        const { error } = await supabase
+          .from('profiles')
+          .update({ subscription_expires_at: expirationDate })
+          .eq('id', appUserId);
+
+        if (error) console.error('  Supabase update failed:', error.message);
+        break;
+      }
+
+      case 'EXPIRATION': {
+        console.log('  Subscription expired — downgrading to free');
+        const { error } = await supabase
+          .from('profiles')
+          .update({
+            subscription_tier: 'free',
+            subscription_expires_at: null,
+          })
+          .eq('id', appUserId);
+
+        if (error) console.error('  Supabase update failed:', error.message);
+        break;
+      }
+
+      case 'BILLING_ISSUE_DETECTED': {
+        console.log('  Billing issue detected — no tier change (grace period)');
+        break;
+      }
+
+      default:
+        console.log(`  Unhandled event type: ${eventType}`);
+    }
+
+    return res.status(200).json({ success: true, processed: true });
+
+  } catch (error) {
+    console.error('[RevenueCat Webhook] Error:', error.message);
+    // Still return 200 to prevent retries
+    return res.status(200).json({ success: false, error: error.message });
+  }
+}
+
 module.exports = router;
 module.exports.stripeWebhookHandler = stripeWebhookHandler;
+module.exports.revenueCatWebhookHandler = revenueCatWebhookHandler;
