@@ -311,6 +311,10 @@ app.listen(PORT, () => {
             failed++;
             console.error(`📝 [Daily Brief Cron] ❌ user ${user.id}: ${err.message}`);
           }
+          // 2s delay between users to avoid Expo rate limits
+          if (goldUsers.indexOf(user) < goldUsers.length - 1) {
+            await new Promise(r => setTimeout(r, 2000));
+          }
         }
 
         console.log(`📝 [Daily Brief Cron] Done: ${success} success, ${failed} failed, ${pushSent} push sent out of ${goldUsers.length}`);
