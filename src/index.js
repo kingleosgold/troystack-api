@@ -295,7 +295,7 @@ app.listen(PORT, () => {
                     const firstSentence = result.brief.brief_text.split(/[.!]\s/)[0];
                     const body = firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence;
                     await sendPush(tokenData.expo_push_token, {
-                      title: 'Your daily brief from Troy is ready',
+                      title: '☀️ Your daily brief from Troy is ready',
                       body,
                       data: { type: 'daily_brief' },
                       sound: 'default',
