@@ -8,7 +8,7 @@ const supabase = require('../lib/supabase');
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 let spotPriceCache = {
-  prices: { gold: 5100, silver: 107, platinum: 2150, palladium: 1750 },
+  prices: { gold: 5150, silver: 87, platinum: 2170, palladium: 1780 },
   lastUpdated: null,
   source: 'static-fallback',
   change: { gold: {}, silver: {}, platinum: {}, palladium: {}, source: 'unavailable' },
@@ -333,7 +333,7 @@ async function fetchLiveSpotPrices() {
     if (!fetched) {
       console.log('   All APIs failed, no cache — using static fallback');
       fetched = {
-        gold: 5100, silver: 107, platinum: 2150, palladium: 1750,
+        gold: 5150, silver: 87, platinum: 2170, palladium: 1780,
         source: 'static-fallback',
       };
     }
@@ -346,6 +346,9 @@ async function fetchLiveSpotPrices() {
     savePreviousDayPrices(fetched.gold, fetched.silver, fetched.platinum, fetched.palladium);
 
     const marketsClosed = areMarketsClosed();
+
+    // Snapshot previous prices for spike guard (before cache update)
+    const prevPrices = { ...spotPriceCache.prices };
 
     // Update cache
     spotPriceCache = {
@@ -372,10 +375,22 @@ async function fetchLiveSpotPrices() {
       });
     }
 
-    // Log to price_log (non-blocking)
-    logPriceToSupabase(spotPriceCache.prices, fetched.source).catch(err => {
-      console.log('   Price log skipped:', err.message);
-    });
+    // Log to price_log (non-blocking) — skip fallback data to avoid polluting the log
+    if (fetched.source === 'static-fallback' || fetched.source === 'cached-fallback') {
+      console.log(`   Skipping price_log — source is ${fetched.source}`);
+    } else {
+      // Spike guard: reject if gold or silver jumped >10% from previous cache
+      const goldPctChange = prevPrices.gold > 0 ? Math.abs((fetched.gold - prevPrices.gold) / prevPrices.gold) : 0;
+      const silverPctChange = prevPrices.silver > 0 ? Math.abs((fetched.silver - prevPrices.silver) / prevPrices.silver) : 0;
+
+      if (goldPctChange > 0.10 || silverPctChange > 0.10) {
+        console.log(`   ⚠️ Spike guard: Gold ${(goldPctChange * 100).toFixed(1)}%, Silver ${(silverPctChange * 100).toFixed(1)}% — skipping price_log`);
+      } else {
+        logPriceToSupabase(spotPriceCache.prices, fetched.source).catch(err => {
+          console.log('   Price log skipped:', err.message);
+        });
+      }
+    }
 
     return spotPriceCache;
 
@@ -387,7 +402,7 @@ async function fetchLiveSpotPrices() {
       return spotPriceCache;
     }
 
-    spotPriceCache.prices = { gold: 5100, silver: 107, platinum: 2150, palladium: 1750 };
+    spotPriceCache.prices = { gold: 5150, silver: 87, platinum: 2170, palladium: 1780 };
     spotPriceCache.lastUpdated = new Date();
     spotPriceCache.source = 'static-fallback';
     return spotPriceCache;
