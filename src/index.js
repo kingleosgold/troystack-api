@@ -22,6 +22,7 @@ const widgetRouter = require('./routes/widget');
 const snapshotsRouter = require('./routes/snapshots');
 const scanUsageRouter = require('./routes/scan-usage');
 const minVersionRouter = require('./routes/min-version');
+const troyChatRouter = require('./routes/troy-chat');
 
 const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase, areMarketsClosed } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
@@ -139,6 +140,9 @@ app.use('/', openCors, legalRouter);
 
 // Minimum app version check — no auth, no rate limit
 app.use('/v1/min-version', minVersionRouter);
+
+// Troy Chat — persistent conversations (mobile app sends userId)
+app.use('/v1/troy', publicLimiter, troyChatRouter);
 
 // ============================================================
 // HEALTH + API ROOT
