@@ -21,6 +21,7 @@ const { stripeWebhookHandler, revenueCatWebhookHandler } = require('./routes/str
 const widgetRouter = require('./routes/widget');
 const snapshotsRouter = require('./routes/snapshots');
 const scanUsageRouter = require('./routes/scan-usage');
+const minVersionRouter = require('./routes/min-version');
 
 const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase, areMarketsClosed } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
@@ -135,6 +136,9 @@ app.use('/v1', publicLimiter, scanUsageRouter);
 
 // Legal pages — open CORS, public
 app.use('/', openCors, legalRouter);
+
+// Minimum app version check — no auth, no rate limit
+app.use('/v1/min-version', minVersionRouter);
 
 // ============================================================
 // HEALTH + API ROOT
