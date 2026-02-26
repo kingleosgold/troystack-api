@@ -286,7 +286,9 @@ app.listen(PORT, () => {
                   .single();
                 const briefEnabled = !notifPref || notifPref.daily_brief !== false;
 
-                if (briefEnabled) {
+                if (!briefEnabled) {
+                  console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: daily_brief preference disabled`);
+                } else {
                   const { data: tokenData } = await supabase
                     .from('push_tokens')
                     .select('expo_push_token')
@@ -295,7 +297,11 @@ app.listen(PORT, () => {
                     .limit(1)
                     .single();
 
-                  if (tokenData && isValidExpoPushToken(tokenData.expo_push_token)) {
+                  if (!tokenData) {
+                    console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: no push token registered`);
+                  } else if (!isValidExpoPushToken(tokenData.expo_push_token)) {
+                    console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: invalid token ${tokenData.expo_push_token}`);
+                  } else {
                     const firstSentence = result.brief.brief_text.split(/[.!]\s/)[0];
                     const body = firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence;
                     await sendPush(tokenData.expo_push_token, {
@@ -305,11 +311,14 @@ app.listen(PORT, () => {
                       sound: 'default',
                     });
                     pushSent++;
+                    console.log(`📝 [Daily Brief Cron] Push sent to ${user.id}: ${tokenData.expo_push_token}`);
                   }
                 }
               } catch (pushErr) {
-                console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: ${pushErr.message}`);
+                console.log(`📝 [Daily Brief Cron] Push error for ${user.id}: ${pushErr.message}`);
               }
+            } else {
+              console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: no brief text generated`);
             }
           } catch (err) {
             failed++;
