@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const supabase = require('../lib/supabase');
+const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
 
 const router = express.Router();
 
@@ -358,20 +359,17 @@ router.post('/conversations/:id/messages', async (req, res) => {
 
     const userHoldings = holdings || [];
 
-    // Get current spot prices from price_log
-    const { data: latestPrice } = await supabase
-      .from('price_log')
-      .select('gold_price, silver_price, platinum_price, palladium_price')
-      .order('timestamp', { ascending: false })
-      .limit(1)
-      .single();
-
-    const prices = {
-      gold: latestPrice?.gold_price || 0,
-      silver: latestPrice?.silver_price || 0,
-      platinum: latestPrice?.platinum_price || 0,
-      palladium: latestPrice?.palladium_price || 0,
-    };
+    // Get current spot prices from in-memory cache (same source as /v1/prices)
+    let prices = getCachedPrices();
+    if (!prices.gold || !prices.silver) {
+      // Cache cold (server just started) — fetch fresh
+      try {
+        const fresh = await getSpotPrices();
+        prices = fresh.prices;
+      } catch (e) {
+        console.error('[Troy Chat] Price fetch fallback failed:', e.message);
+      }
+    }
 
     // Build portfolio summary
     const metalTotals = { gold: { oz: 0, cost: 0 }, silver: { oz: 0, cost: 0 }, platinum: { oz: 0, cost: 0 }, palladium: { oz: 0, cost: 0 } };
@@ -510,7 +508,7 @@ APP GUIDE (when users ask how to do things in the app):
     const geminiResp = await axios.post(geminiUrl, {
       contents,
       system_instruction: { parts: [{ text: systemPrompt }] },
-      generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+      generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
     }, {
       headers: { 'Content-Type': 'application/json' },
       timeout: 30000,
