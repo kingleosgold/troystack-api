@@ -23,6 +23,7 @@ const snapshotsRouter = require('./routes/snapshots');
 const scanUsageRouter = require('./routes/scan-usage');
 const minVersionRouter = require('./routes/min-version');
 const troyChatRouter = require('./routes/troy-chat');
+const stackSignalRouter = require('./routes/stack-signal');
 
 const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase, areMarketsClosed } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
@@ -143,6 +144,9 @@ app.use('/v1/min-version', minVersionRouter);
 
 // Troy Chat — persistent conversations (mobile app sends userId)
 app.use('/v1/troy', publicLimiter, troyChatRouter);
+
+// Stack Signal — curated precious metals news with Troy's commentary
+app.use('/v1/stack-signal', publicLimiter, stackSignalRouter);
 
 // ============================================================
 // HEALTH + API ROOT
@@ -377,6 +381,32 @@ app.listen(PORT, () => {
     }
   }, { timezone: 'UTC' });
   console.log('💰 [Price Log Cron] Scheduled: every 15 minutes');
+
+  // ── Stack Signal article processor: every 2 hours ──
+  cron.schedule('0 */2 * * *', async () => {
+    console.log(`\n📰 [Stack Signal Cron] Triggered at ${new Date().toISOString()}`);
+    try {
+      const { runStackSignalPipeline } = require('./services/stack-signal-processor');
+      const result = await runStackSignalPipeline();
+      console.log(`📰 [Stack Signal Cron] Done: ${result.saved} articles saved`);
+    } catch (err) {
+      console.error('📰 [Stack Signal Cron] Failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('📰 [Stack Signal Cron] Scheduled: every 2 hours');
+
+  // ── Stack Signal daily synthesis: 6:30 AM EST (11:30 UTC) ──
+  cron.schedule('30 11 * * *', async () => {
+    console.log(`\n📰 [Stack Signal Daily] Triggered at ${new Date().toISOString()}`);
+    try {
+      const { generateStackSignal } = require('./services/stack-signal-processor');
+      const result = await generateStackSignal();
+      console.log(`📰 [Stack Signal Daily] Done: ${result ? result.slug : 'no synthesis generated'}`);
+    } catch (err) {
+      console.error('📰 [Stack Signal Daily] Failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('📰 [Stack Signal Daily] Scheduled: daily at 6:30 AM EST (11:30 UTC)');
 
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 });
