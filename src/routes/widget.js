@@ -47,6 +47,31 @@ function dedupeConsecutive(rows) {
 }
 
 /**
+ * Smooth single-point outlier spikes caused by bad bid/ask bounces.
+ * For each interior point, if it deviates >2% from the average of its
+ * neighbors, replace it with the neighbor average. Applied per-metal.
+ */
+const PRICE_COLS = ['gold_price', 'silver_price', 'platinum_price', 'palladium_price'];
+
+function smoothOutliers(rows) {
+  if (rows.length <= 2) return rows;
+  const smoothed = rows.map(r => ({ ...r }));
+  for (let i = 1; i < smoothed.length - 1; i++) {
+    for (const col of PRICE_COLS) {
+      const prev = parseFloat(smoothed[i - 1][col]);
+      const curr = parseFloat(smoothed[i][col]);
+      const next = parseFloat(smoothed[i + 1][col]);
+      if (!prev || !curr || !next) continue;
+      const neighborAvg = (prev + next) / 2;
+      if (Math.abs(curr - neighborAvg) / neighborAvg > 0.02) {
+        smoothed[i][col] = neighborAvg;
+      }
+    }
+  }
+  return smoothed;
+}
+
+/**
  * Get the last trading session's data for weekend sparklines.
  * Queries the most recent 500 price_log rows, filters to trading hours,
  * and removes consecutive duplicate prices for clean charts.
@@ -111,7 +136,7 @@ async function getLastTradingSession() {
 async function getTradingRows(limit = 96) {
   if (areMarketsClosed()) {
     const session = await getLastTradingSession();
-    return session.slice(-limit);
+    return smoothOutliers(session.slice(-limit));
   }
 
   const since = new Date();
@@ -130,7 +155,7 @@ async function getTradingRows(limit = 96) {
   const trading = data.filter(row => !isDuringMarketClose(row.timestamp));
 
   // Take the most recent `limit` rows
-  return trading.slice(-limit);
+  return smoothOutliers(trading.slice(-limit));
 }
 
 // GET /v1/widget-data — Widget display data with sparklines
