@@ -23,6 +23,77 @@ const xmlParser = new XMLParser({
 });
 
 // ============================================
+// SOURCE NAME EXTRACTION
+// ============================================
+
+const DOMAIN_TO_NAME = {
+  'reuters.com': 'Reuters',
+  'kitco.com': 'Kitco News',
+  'bloomberg.com': 'Bloomberg',
+  'seekingalpha.com': 'Seeking Alpha',
+  'zerohedge.com': 'Zero Hedge',
+  'cnbc.com': 'CNBC',
+  'mining.com': 'Mining.com',
+  'investingnews.com': 'Investing News',
+  'yahoo.com': 'Yahoo Finance',
+  'finance.yahoo.com': 'Yahoo Finance',
+  'wsj.com': 'Wall Street Journal',
+  'ft.com': 'Financial Times',
+  'barrons.com': "Barron's",
+  'marketwatch.com': 'MarketWatch',
+  'bullionstar.com': 'BullionStar',
+  'goldseek.com': 'GoldSeek',
+  'silverseek.com': 'SilverSeek',
+  'schiffgold.com': 'SchiffGold',
+  'bullionvault.com': 'BullionVault',
+  'sprottmoney.com': 'Sprott Money',
+  'goldprice.org': 'GoldPrice.org',
+  'jmbullion.com': 'JM Bullion',
+  'apmex.com': 'APMEX',
+  'moneymetals.com': 'Money Metals Exchange',
+  'cnn.com': 'CNN',
+  'bbc.com': 'BBC',
+  'nytimes.com': 'New York Times',
+  'washingtonpost.com': 'Washington Post',
+  'foxbusiness.com': 'Fox Business',
+  'investing.com': 'Investing.com',
+};
+
+/**
+ * Extract actual publication name from an RSS item.
+ * Priority: item.source text > URL domain lookup > feed name fallback.
+ */
+function extractSourceName(item, link, feedName) {
+  // 1. RSS <source> element (Google News provides this)
+  const srcField = item.source;
+  if (srcField) {
+    const text = typeof srcField === 'string' ? srcField : srcField['#text'];
+    if (text && typeof text === 'string' && text.trim().length > 0) {
+      return text.trim();
+    }
+  }
+
+  // 2. Extract from link URL domain (more reliable than author fields)
+  if (link) {
+    try {
+      const hostname = new URL(String(link)).hostname.replace(/^www\./, '');
+      for (const [domain, name] of Object.entries(DOMAIN_TO_NAME)) {
+        if (hostname === domain || hostname.endsWith('.' + domain)) {
+          return name;
+        }
+      }
+      // Unknown domain — capitalize first part
+      const parts = hostname.split('.');
+      const name = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
+      return name.charAt(0).toUpperCase() + name.slice(1) + '.' + parts[parts.length - 1];
+    } catch (_) {}
+  }
+
+  // 3. Fallback to feed name
+  return feedName;
+}
+
+// ============================================
 // FETCH + PARSE
 // ============================================
 
@@ -103,7 +174,7 @@ async function fetchNewArticles() {
           link: String(link).trim(),
           pubDate,
           description,
-          source: feed.name,
+          source: extractSourceName(item, link, feed.name),
         });
         feedCount++;
       }

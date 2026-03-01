@@ -439,7 +439,12 @@ Return ONLY valid JSON.`;
       troy_commentary: parsed.commentary || '',
       troy_one_liner: parsed.one_liner || '',
       category: 'macro',
-      sources: recentArticles.map(a => (a.sources && a.sources[0]) || { name: 'Stack Signal' }),
+      sources: [...new Map(
+        recentArticles
+          .flatMap(a => a.sources || [])
+          .filter(s => s && s.name)
+          .map(s => [s.name, s])
+      ).values()],
       image_url: imageUrl,
       image_prompt: imagePrompt,
       gold_price_at_publish: prices.gold || null,
