@@ -47,28 +47,41 @@ function dedupeConsecutive(rows) {
 }
 
 /**
- * Smooth single-point outlier spikes caused by bad bid/ask bounces.
- * For each interior point, if it deviates >2% from the average of its
- * neighbors, replace it with the neighbor average. Applied per-metal.
+ * Remove single-point outlier spikes caused by bad bid/ask bounces.
+ * If ANY metal deviates >1.5% from its neighbor average at index i,
+ * that entire row is removed (keeps all arrays aligned).
+ * Runs up to 3 passes since removing a point changes neighbors.
  */
 const PRICE_COLS = ['gold_price', 'silver_price', 'platinum_price', 'palladium_price'];
 
-function smoothOutliers(rows) {
+function removeOutliers(rows) {
   if (rows.length <= 2) return rows;
-  const smoothed = rows.map(r => ({ ...r }));
-  for (let i = 1; i < smoothed.length - 1; i++) {
-    for (const col of PRICE_COLS) {
-      const prev = parseFloat(smoothed[i - 1][col]);
-      const curr = parseFloat(smoothed[i][col]);
-      const next = parseFloat(smoothed[i + 1][col]);
-      if (!prev || !curr || !next) continue;
-      const neighborAvg = (prev + next) / 2;
-      if (Math.abs(curr - neighborAvg) / neighborAvg > 0.02) {
-        smoothed[i][col] = neighborAvg;
+  let cleaned = rows;
+  for (let pass = 0; pass < 3; pass++) {
+    if (cleaned.length <= 2) break;
+    const keep = [true];
+    let removed = 0;
+    for (let i = 1; i < cleaned.length - 1; i++) {
+      let isOutlier = false;
+      for (const col of PRICE_COLS) {
+        const prev = parseFloat(cleaned[i - 1][col]);
+        const curr = parseFloat(cleaned[i][col]);
+        const next = parseFloat(cleaned[i + 1][col]);
+        if (!prev || !curr || !next) continue;
+        const neighborAvg = (prev + next) / 2;
+        if (Math.abs(curr - neighborAvg) / neighborAvg > 0.015) {
+          isOutlier = true;
+          break;
+        }
       }
+      keep.push(!isOutlier);
+      if (isOutlier) removed++;
     }
+    keep.push(true);
+    if (removed === 0) break;
+    cleaned = cleaned.filter((_, i) => keep[i]);
   }
-  return smoothed;
+  return cleaned;
 }
 
 /**
@@ -136,7 +149,7 @@ async function getLastTradingSession() {
 async function getTradingRows(limit = 96) {
   if (areMarketsClosed()) {
     const session = await getLastTradingSession();
-    return smoothOutliers(session.slice(-limit));
+    return removeOutliers(session.slice(-limit));
   }
 
   const since = new Date();
@@ -155,7 +168,7 @@ async function getTradingRows(limit = 96) {
   const trading = data.filter(row => !isDuringMarketClose(row.timestamp));
 
   // Take the most recent `limit` rows
-  return smoothOutliers(trading.slice(-limit));
+  return removeOutliers(trading.slice(-limit));
 }
 
 // GET /v1/widget-data — Widget display data with sparklines
