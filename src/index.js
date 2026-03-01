@@ -382,6 +382,17 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('💰 [Price Log Cron] Scheduled: every 15 minutes');
 
+  // ── Price Alert Checker: every 5 minutes ──
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { checkPriceAlerts } = require('./services/price-alert-checker');
+      await checkPriceAlerts();
+    } catch (err) {
+      console.error('🔔 [Alert Checker] Error:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('🔔 [Alert Checker] Scheduled: every 5 minutes');
+
   // ── Stack Signal article processor: every 2 hours ──
   cron.schedule('0 */2 * * *', async () => {
     console.log(`\n📰 [Stack Signal Cron] Triggered at ${new Date().toISOString()}`);
