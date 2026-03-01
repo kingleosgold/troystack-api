@@ -35,22 +35,24 @@ async function fetchNewArticles() {
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const allArticles = [];
 
-  // Fetch existing URLs from DB to deduplicate
+  // Fetch existing URLs and titles from DB to deduplicate
   let existingUrls = new Set();
+  let existingTitles = new Set();
   try {
     const { data } = await supabase
       .from('stack_signal_articles')
-      .select('sources')
-      .gte('created_at', cutoff.toISOString());
+      .select('sources, title');
 
     if (data) {
       for (const row of data) {
+        if (row.title) existingTitles.add(row.title.toLowerCase().trim());
         const sources = row.sources || [];
         for (const src of sources) {
           if (src.url) existingUrls.add(src.url);
         }
       }
     }
+    console.log(`[RSS] Dedup loaded: ${existingUrls.size} URLs, ${existingTitles.size} titles`);
   } catch (err) {
     console.log(`[RSS] Could not check existing articles: ${err.message}`);
   }
@@ -92,8 +94,9 @@ async function fetchNewArticles() {
         const pubDate = pubDateStr ? new Date(pubDateStr) : new Date();
         if (pubDate < cutoff) continue;
 
-        // Skip if already in DB
+        // Skip if URL or title already in DB
         if (existingUrls.has(link)) continue;
+        if (existingTitles.has(String(title).toLowerCase().trim())) continue;
 
         allArticles.push({
           title: String(title).trim(),

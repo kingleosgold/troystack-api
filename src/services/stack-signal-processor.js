@@ -25,6 +25,29 @@ function cleanJsonResponse(text) {
   return JSON.parse(cleaned);
 }
 
+const DAILY_CAP = 8;
+
+/**
+ * Count how many articles created today (UTC) have a non-null field.
+ */
+async function getTodayCount(field) {
+  const todayStart = new Date();
+  todayStart.setUTCHours(0, 0, 0, 0);
+
+  const { count, error } = await supabase
+    .from('stack_signal_articles')
+    .select('*', { count: 'exact', head: true })
+    .not(field, 'is', null)
+    .gte('created_at', todayStart.toISOString())
+    .eq('is_stack_signal', false);
+
+  if (error) {
+    console.log(`[DailyCap] Error checking ${field}: ${error.message}`);
+    return 0;
+  }
+  return count || 0;
+}
+
 // ============================================
 // PHASE 1: SCORE ARTICLES (Gemini Flash)
 // ============================================
@@ -117,20 +140,29 @@ Return ONLY the JSON array, no other text.`;
 
 /**
  * Generate Troy's original commentary for high-scoring articles.
- * Only processes articles scoring 60+, max 8 per cycle.
+ * Only processes articles scoring 60+, daily-capped at 8 total.
  */
 async function generateCommentary(articles, prices) {
+  // Check daily cap before doing any Claude calls
+  const commentaryToday = await getTodayCount('troy_commentary');
+  const remaining = DAILY_CAP - commentaryToday;
+
+  if (remaining <= 0) {
+    console.log(`[Commentary] Daily cap reached (${commentaryToday}/${DAILY_CAP} today) — skipping`);
+    return [];
+  }
+
   const eligible = articles
     .filter(a => a.relevance_score >= 60)
     .sort((a, b) => b.relevance_score - a.relevance_score)
-    .slice(0, 8);
+    .slice(0, remaining);
 
   if (!eligible.length) {
     console.log('[Commentary] No articles scored 60+');
     return [];
   }
 
-  console.log(`[Commentary] Generating for ${eligible.length} articles`);
+  console.log(`[Commentary] Generating for ${eligible.length} articles (${commentaryToday} already today, cap ${DAILY_CAP})`);
 
   const systemPrompt = `You are Troy, the precious metals stack analyst from Stack Tracker Gold. You write original commentary on metals news — not summaries, but your take as a stacker who's been in the game since 2008.
 
@@ -190,6 +222,7 @@ const CATEGORY_STYLE = {
 
 /**
  * Generate hero images for articles with commentary.
+ * Daily-capped at 8 total DALL-E images (~$0.08/image = ~$0.64/day max).
  * Uploads to Supabase Storage bucket 'stack-signal-images'.
  */
 async function generateArticleImages(articles) {
@@ -200,9 +233,22 @@ async function generateArticleImages(articles) {
     return articles;
   }
 
-  console.log(`[Images] Generating ${withCommentary.length} images`);
+  // Check daily cap before doing any DALL-E calls
+  const imagesToday = await getTodayCount('image_url');
+  const remaining = DAILY_CAP - imagesToday;
 
-  for (const article of withCommentary) {
+  if (remaining <= 0) {
+    console.log(`[Images] Daily cap reached (${imagesToday}/${DAILY_CAP} today) — skipping`);
+    return articles;
+  }
+
+  const toGenerate = withCommentary
+    .sort((a, b) => b.relevance_score - a.relevance_score)
+    .slice(0, remaining);
+
+  console.log(`[Images] Generating ${toGenerate.length} images (${imagesToday} already today, cap ${DAILY_CAP})`);
+
+  for (const article of toGenerate) {
     try {
       const categoryStyle = CATEGORY_STYLE[article.category] || CATEGORY_STYLE.macro;
       const imagePrompt = `Editorial illustration for precious metals news article: "${article.title}". Style: ${categoryStyle}. Photorealistic, moody lighting, cinematic composition, no text or watermarks.`;
