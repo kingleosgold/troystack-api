@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../lib/supabase');
+const { areMarketsClosed } = require('../services/price-fetcher');
 
 // ============================================
 // Shared: filter out market-closed rows
@@ -30,11 +31,89 @@ function isDuringMarketClose(isoTimestamp) {
 }
 
 /**
+ * Remove consecutive rows where the primary price (gold) is identical.
+ * Keeps first and last occurrence to preserve time range.
+ */
+function dedupeConsecutive(rows) {
+  if (rows.length <= 2) return rows;
+  const result = [rows[0]];
+  for (let i = 1; i < rows.length - 1; i++) {
+    if (parseFloat(rows[i].gold_price) !== parseFloat(rows[i - 1].gold_price)) {
+      result.push(rows[i]);
+    }
+  }
+  result.push(rows[rows.length - 1]);
+  return result;
+}
+
+/**
+ * Get the last trading session's data for weekend sparklines.
+ * Queries the most recent 500 price_log rows, filters to trading hours,
+ * and removes consecutive duplicate prices for clean charts.
+ */
+async function getLastTradingSession() {
+  // Fetch the most recent 500 rows (DESC), then reverse for chronological order.
+  // 500 rows at 15-min intervals ≈ 5 days of data — more than enough for a full session.
+  const { data, error } = await supabase
+    .from('price_log')
+    .select('timestamp, gold_price, silver_price, platinum_price, palladium_price')
+    .order('timestamp', { ascending: false })
+    .limit(500);
+
+  if (error) throw error;
+  if (!data || data.length === 0) return [];
+
+  // Reverse to chronological order and filter to trading hours only
+  const trading = data.reverse().filter(row => !isDuringMarketClose(row.timestamp));
+  if (trading.length === 0) return [];
+
+  // Find the last trading day's data
+  const etDayFmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+
+  const lastTradingDate = etDayFmt.format(new Date(trading[trading.length - 1].timestamp));
+
+  // Collect last trading day rows + prior evening session
+  const lastDayRows = trading.filter(r =>
+    etDayFmt.format(new Date(r.timestamp)) === lastTradingDate
+  );
+
+  // Include prior evening session (e.g. Thursday 6PM–midnight for Friday's session)
+  let sessionRows = lastDayRows;
+  if (lastDayRows.length > 0) {
+    const sessionStart = new Date(lastDayRows[0].timestamp);
+    sessionStart.setHours(sessionStart.getHours() - 12);
+    const priorRows = trading.filter(r => {
+      const t = new Date(r.timestamp);
+      return t >= sessionStart && t < new Date(lastDayRows[0].timestamp);
+    });
+    sessionRows = [...priorRows, ...lastDayRows];
+  }
+
+  // Remove consecutive duplicate prices
+  sessionRows = dedupeConsecutive(sessionRows);
+
+  // Fallback: if too few points, use all available trading data
+  if (sessionRows.length < 10) {
+    sessionRows = dedupeConsecutive(trading);
+  }
+
+  return sessionRows;
+}
+
+/**
  * Fetch trading-hours-only price_log rows.
- * Looks back 72 hours, filters out market-closed rows,
- * then takes the most recent `limit` rows.
+ * On weekends: returns the last full trading session (Friday).
+ * On weekdays: looks back 72 hours, filters out market-closed rows.
  */
 async function getTradingRows(limit = 96) {
+  if (areMarketsClosed()) {
+    const session = await getLastTradingSession();
+    return session.slice(-limit);
+  }
+
   const since = new Date();
   since.setHours(since.getHours() - 72);
 
