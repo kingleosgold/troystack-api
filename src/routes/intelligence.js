@@ -579,10 +579,10 @@ router.post('/daily-brief/generate', async (req, res) => {
       try {
         const { data: notifPref } = await supabase
           .from('notification_preferences')
-          .select('daily_brief')
+          .select('morning_brief')
           .eq('user_id', userId)
           .single();
-        const briefEnabled = !notifPref || notifPref.daily_brief !== false;
+        const briefEnabled = !notifPref || notifPref.morning_brief !== false;
 
         if (briefEnabled) {
           const { data: tokenData } = await supabase

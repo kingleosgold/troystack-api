@@ -359,32 +359,42 @@ router.get('/notification-preferences', async (req, res) => {
 
     const { data, error } = await supabase
       .from('notification_preferences')
-      .select('daily_brief, price_alerts, breaking_news, comex_alerts, comex_gold, comex_silver, comex_platinum, comex_palladium')
+      .select('daily_brief, morning_brief, market_alerts, critical_alerts, price_alerts, breaking_news, comex_alerts, comex_gold, comex_silver, comex_platinum, comex_palladium')
       .eq('user_id', userId)
       .single();
 
+    const defaults = { daily_brief: true, morning_brief: true, market_alerts: true, critical_alerts: true, price_alerts: true, breaking_news: true, comex_alerts: true, comex_gold: true, comex_silver: true, comex_platinum: true, comex_palladium: true };
+
     if (error || !data) {
-      return res.json({ daily_brief: true, price_alerts: true, breaking_news: true, comex_alerts: true, comex_gold: true, comex_silver: true, comex_platinum: true, comex_palladium: true });
+      return res.json(defaults);
     }
 
-    res.json(data);
+    // Fill nulls with defaults (columns may not exist yet pre-migration)
+    const result = { ...defaults, ...data };
+    res.json(result);
   } catch (error) {
     console.error('❌ [Notification Prefs] Get error:', error.message);
-    res.json({ daily_brief: true, price_alerts: true, breaking_news: true, comex_alerts: true, comex_gold: true, comex_silver: true, comex_platinum: true, comex_palladium: true });
+    res.json({ daily_brief: true, morning_brief: true, market_alerts: true, critical_alerts: true, price_alerts: true, breaking_news: true, comex_alerts: true, comex_gold: true, comex_silver: true, comex_platinum: true, comex_palladium: true });
   }
 });
 
 // POST /v1/push/notification-preferences
 router.post('/notification-preferences', async (req, res) => {
   try {
-    const { userId, daily_brief, price_alerts, breaking_news, comex_alerts, comex_gold, comex_silver, comex_platinum, comex_palladium } = req.body;
+    const { userId, daily_brief, morning_brief, market_alerts, critical_alerts, price_alerts, breaking_news, comex_alerts, comex_gold, comex_silver, comex_platinum, comex_palladium } = req.body;
     if (!userId || !isUUID(userId)) {
       return res.status(400).json({ error: 'Valid userId is required' });
     }
 
+    // morning_brief syncs with daily_brief for backward compatibility
+    const morningBriefVal = morning_brief !== undefined ? morning_brief !== false : daily_brief !== false;
+
     const prefs = {
       user_id: userId,
-      daily_brief: daily_brief !== false,
+      daily_brief: morningBriefVal,
+      morning_brief: morningBriefVal,
+      market_alerts: market_alerts !== undefined ? market_alerts !== false : true,
+      critical_alerts: critical_alerts !== undefined ? critical_alerts !== false : true,
       price_alerts: price_alerts !== false,
       breaking_news: breaking_news !== false,
       comex_alerts: comex_alerts !== false,
@@ -403,7 +413,7 @@ router.post('/notification-preferences', async (req, res) => {
       return res.status(500).json({ error: error.message });
     }
 
-    console.log(`🔔 [Notification Prefs] Saved for ${userId}: brief=${prefs.daily_brief}, alerts=${prefs.price_alerts}, breaking=${prefs.breaking_news}, comex=${prefs.comex_alerts}`);
+    console.log(`🔔 [Notification Prefs] Saved for ${userId}: morning=${prefs.morning_brief}, market=${prefs.market_alerts}, critical=${prefs.critical_alerts}, price=${prefs.price_alerts}`);
     res.json({ success: true, ...prefs });
   } catch (error) {
     console.error('❌ [Notification Prefs] Save error:', error.message);

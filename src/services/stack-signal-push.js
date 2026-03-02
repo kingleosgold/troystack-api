@@ -99,11 +99,14 @@ async function maybePushStackSignalAlert(article) {
     return;
   }
 
-  // Filter out users who disabled breaking_news notifications
+  // Filter out users who disabled this tier's notifications
+  // market_alert / breaking_news tiers → check market_alerts pref
+  // critical_alert tier → check critical_alerts pref
+  const prefColumn = tierName === 'critical_alert' ? 'critical_alerts' : 'market_alerts';
   const { data: disabledPrefs } = await supabase
     .from('notification_preferences')
     .select('user_id')
-    .eq('breaking_news', false);
+    .eq(prefColumn, false);
 
   const disabledUserIds = new Set((disabledPrefs || []).map(p => p.user_id));
 

@@ -302,13 +302,13 @@ app.listen(PORT, () => {
               try {
                 const { data: notifPref } = await supabase
                   .from('notification_preferences')
-                  .select('daily_brief')
+                  .select('morning_brief')
                   .eq('user_id', user.id)
                   .single();
-                const briefEnabled = !notifPref || notifPref.daily_brief !== false;
+                const briefEnabled = !notifPref || notifPref.morning_brief !== false;
 
                 if (!briefEnabled) {
-                  console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: daily_brief preference disabled`);
+                  console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: morning_brief preference disabled`);
                 } else {
                   const { data: tokenData } = await supabase
                     .from('push_tokens')
