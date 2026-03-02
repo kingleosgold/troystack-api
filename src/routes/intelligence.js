@@ -273,10 +273,33 @@ async function generateDailyBrief(userId) {
     .map(b => `- [${b.category}] ${b.title}: ${b.summary}`)
     .join('\n');
 
+  // Fetch today's Stack Signal synthesis (generated ~20 min before the brief)
+  let synthesis = null;
+  try {
+    const { data: synthData } = await supabase
+      .from('stack_signal_articles')
+      .select('title, troy_one_liner, troy_commentary')
+      .eq('is_stack_signal', true)
+      .gte('published_at', new Date(Date.now() - 3600000).toISOString())
+      .order('published_at', { ascending: false })
+      .limit(1)
+      .single();
+    synthesis = synthData;
+  } catch (synthErr) {
+    console.log(`📝 [Daily Brief] Synthesis fetch skipped: ${synthErr.message}`);
+  }
+
   // Call Gemini 2.5 Flash
   const systemPrompt = `You are Troy, a precious metals stack analyst writing your morning briefing called "Troy's Take." Write in first person, conversational tone. Short sentences. Lead with what happened overnight, connect every data point to the user's specific holdings, and end with one thing to watch today. No corporate language. No emojis. No exclamation points. Keep it under 200 words. You never recommend selling. Dips are entry points. You track COMEX physical flows, central bank buying, and the gold/silver ratio. You respect the user's strategy — don't suggest diversification unsolicited.
 
-Use plain text, no markdown headers or bullet points. Do NOT start with "Good morning" or any time-of-day greeting — jump straight into the analysis. Say "your stack" not "your portfolio." Say "spot" not "spot price." Say "oz" not "troy ounces." When discussing price moves, include both the number AND what it means for their stack in dollars.`;
+Use plain text, no markdown headers or bullet points. Do NOT start with "Good morning" or any time-of-day greeting — jump straight into the analysis. Say "your stack" not "your portfolio." Say "spot" not "spot price." Say "oz" not "troy ounces." When discussing price moves, include both the number AND what it means for their stack in dollars.
+
+${synthesis ? `Today's Stack Signal synthesis:
+Title: ${synthesis.title}
+Headline: ${synthesis.troy_one_liner || ''}
+Key analysis: ${synthesis.troy_commentary || ''}
+
+Incorporate the key market themes from the Stack Signal synthesis into the daily brief. The brief should feel like ONE cohesive morning message from Troy — personal stack context PLUS the day's market intelligence. Don't repeat the synthesis word for word — weave the key themes into your brief naturally.` : ''}`;
 
   const userPrompt = `Write today's Troy's Take briefing (${today}).
 
@@ -572,13 +595,33 @@ router.post('/daily-brief/generate', async (req, res) => {
 
           if (tokenData && isValidExpoPushToken(tokenData.expo_push_token)) {
             const { sendPush } = require('./push');
-            const firstSentence = result.brief.brief_text.split(/[.!]\s/)[0];
-            const body = firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence;
+
+            // Fetch synthesis for push body
+            let synthOneLiner = null;
+            try {
+              const { data: synthData } = await supabase
+                .from('stack_signal_articles')
+                .select('troy_one_liner')
+                .eq('is_stack_signal', true)
+                .gte('published_at', new Date(Date.now() - 3600000).toISOString())
+                .order('published_at', { ascending: false })
+                .limit(1)
+                .single();
+              synthOneLiner = synthData?.troy_one_liner;
+            } catch (_) { /* no synthesis available */ }
+
+            const pushBody = synthOneLiner
+              ? synthOneLiner.slice(0, 120)
+              : (() => {
+                  const firstSentence = result.brief.brief_text.split(/[.!]\s/)[0];
+                  return firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence;
+                })();
             await sendPush(tokenData.expo_push_token, {
-              title: '☀️ Your daily brief from Troy is ready',
-              body,
-              data: { type: 'daily_brief' },
+              title: 'Troy\'s Morning Brief',
+              body: pushBody,
+              data: { type: 'morning_brief', screen: 'DailyBrief' },
               sound: 'default',
+              badge: 1,
             });
             console.log(`📝 [Daily Brief] Push sent to ${userId}`);
           }

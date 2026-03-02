@@ -268,6 +268,23 @@ app.listen(PORT, () => {
           return;
         }
 
+        // Fetch today's Stack Signal synthesis for push notification body
+        let synthesis = null;
+        try {
+          const { data: synthData } = await supabase
+            .from('stack_signal_articles')
+            .select('troy_one_liner')
+            .eq('is_stack_signal', true)
+            .gte('published_at', new Date(Date.now() - 3600000).toISOString())
+            .order('published_at', { ascending: false })
+            .limit(1)
+            .single();
+          synthesis = synthData;
+          console.log(`📝 [Daily Brief Cron] Synthesis found: ${synthesis?.troy_one_liner?.slice(0, 60) || 'none'}...`);
+        } catch (synthErr) {
+          console.log(`📝 [Daily Brief Cron] No synthesis available: ${synthErr.message}`);
+        }
+
         console.log(`📝 [Daily Brief Cron] Generating briefs for ${goldUsers.length} Gold/Lifetime users`);
         let success = 0;
         let failed = 0;
@@ -306,13 +323,18 @@ app.listen(PORT, () => {
                   } else if (!isValidExpoPushToken(tokenData.expo_push_token)) {
                     console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: invalid token ${tokenData.expo_push_token}`);
                   } else {
-                    const firstSentence = result.brief.brief_text.split(/[.!]\s/)[0];
-                    const body = firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence;
+                    const pushBody = synthesis?.troy_one_liner
+                      ? synthesis.troy_one_liner.slice(0, 120)
+                      : (() => {
+                          const firstSentence = result.brief.brief_text.split(/[.!]\s/)[0];
+                          return firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence;
+                        })();
                     await sendPush(tokenData.expo_push_token, {
-                      title: '☀️ Your daily brief from Troy is ready',
-                      body,
-                      data: { type: 'daily_brief' },
+                      title: 'Troy\'s Morning Brief',
+                      body: pushBody,
+                      data: { type: 'morning_brief', screen: 'DailyBrief' },
                       sound: 'default',
+                      badge: 1,
                     });
                     pushSent++;
                     console.log(`📝 [Daily Brief Cron] Push sent to ${user.id}: ${tokenData.expo_push_token}`);
@@ -406,8 +428,9 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('📰 [Stack Signal Cron] Scheduled: every 2 hours');
 
-  // ── Stack Signal daily synthesis: 6:30 AM EST (11:30 UTC) ──
-  cron.schedule('30 11 * * *', async () => {
+  // ── Stack Signal daily synthesis: 6:15 AM EST (11:15 UTC) ──
+  // Runs 20 min before Daily Brief so synthesis is ready for the combined morning push
+  cron.schedule('15 11 * * *', async () => {
     console.log(`\n📰 [Stack Signal Daily] Triggered at ${new Date().toISOString()}`);
     try {
       const { generateStackSignal } = require('./services/stack-signal-processor');
@@ -417,7 +440,7 @@ app.listen(PORT, () => {
       console.error('📰 [Stack Signal Daily] Failed:', err.message);
     }
   }, { timezone: 'UTC' });
-  console.log('📰 [Stack Signal Daily] Scheduled: daily at 6:30 AM EST (11:30 UTC)');
+  console.log('📰 [Stack Signal Daily] Scheduled: daily at 6:15 AM EST (11:15 UTC)');
 
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 });
