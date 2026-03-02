@@ -83,24 +83,62 @@ async function incrementImageCount() {
 }
 
 /**
- * Count how many articles created today (UTC) have a non-null field.
+ * Check how many commentaries have been generated today (via app_state).
+ * Auto-resets when the date changes.
  */
-async function getTodayCount(field) {
-  const todayStart = new Date();
-  todayStart.setUTCHours(0, 0, 0, 0);
+async function getCommentaryCount() {
+  const today = new Date().toISOString().split('T')[0];
 
-  const { count, error } = await supabase
-    .from('stack_signal_articles')
-    .select('*', { count: 'exact', head: true })
-    .not(field, 'is', null)
-    .gte('created_at', todayStart.toISOString())
-    .eq('is_stack_signal', false);
+  try {
+    const { data } = await supabase
+      .from('app_state')
+      .select('value')
+      .eq('key', 'commentary_daily_count')
+      .single();
 
-  if (error) {
-    console.log(`[DailyCap] Error checking ${field}: ${error.message}`);
-    return 0;
-  }
-  return count || 0;
+    if (data) {
+      const parsed = JSON.parse(data.value);
+      if (parsed.date === today) {
+        return { count: parsed.count, allowed: parsed.count < DAILY_CAP };
+      }
+    }
+  } catch (_) { /* no row yet or parse error — allow */ }
+
+  // New day or no record — reset to 0
+  return { count: 0, allowed: true };
+}
+
+/**
+ * Increment the daily commentary counter in app_state.
+ * Call ONLY after commentary is successfully generated.
+ */
+async function incrementCommentaryCount() {
+  const today = new Date().toISOString().split('T')[0];
+
+  let count = 1;
+  try {
+    const { data } = await supabase
+      .from('app_state')
+      .select('value')
+      .eq('key', 'commentary_daily_count')
+      .single();
+
+    if (data) {
+      const parsed = JSON.parse(data.value);
+      if (parsed.date === today) {
+        count = parsed.count + 1;
+      }
+    }
+  } catch (_) { /* first commentary today */ }
+
+  await supabase
+    .from('app_state')
+    .upsert({
+      key: 'commentary_daily_count',
+      value: JSON.stringify({ date: today, count }),
+    }, { onConflict: 'key' });
+
+  return count;
 }
 
 // ============================================
@@ -256,15 +294,16 @@ Substantive analysis — 150-300 words. No filler.`,
  * Commentary depth scales with Troy Score tier.
  */
 async function generateCommentary(articles, prices) {
-  // Check daily cap before doing any Claude calls
-  const commentaryToday = await getTodayCount('troy_commentary');
-  const remaining = DAILY_CAP - commentaryToday;
+  // Check daily cap before doing any Claude calls (app_state, auto-resets daily)
+  const today = new Date().toISOString().split('T')[0];
+  const { count: commentaryToday, allowed } = await getCommentaryCount();
 
-  if (remaining <= 0) {
-    console.log(`[Commentary] Daily cap reached (${commentaryToday}/${DAILY_CAP} today) — skipping`);
+  if (!allowed) {
+    console.log(`[Commentary] Daily cap reached: ${commentaryToday}/${DAILY_CAP} (${today}) — skipping`);
     return [];
   }
 
+  const remaining = DAILY_CAP - commentaryToday;
   const eligible = articles
     .filter(a => a.relevance_score >= 60)
     .sort((a, b) => b.relevance_score - a.relevance_score)
@@ -275,11 +314,18 @@ async function generateCommentary(articles, prices) {
     return [];
   }
 
-  console.log(`[Commentary] Generating for ${eligible.length} articles (${commentaryToday} already today, cap ${DAILY_CAP})`);
+  console.log(`[Commentary] Generating for ${eligible.length} articles (${commentaryToday} already today, cap ${DAILY_CAP}, date ${today})`);
 
   const results = [];
 
   for (const article of eligible) {
+    // Re-check cap before each article (another pipeline run could have incremented)
+    const { count: currentCount, allowed: stillAllowed } = await getCommentaryCount();
+    if (!stillAllowed) {
+      console.log(`[Commentary] Daily cap reached: ${currentCount}/${DAILY_CAP} (${today}) — stopping`);
+      break;
+    }
+
     const { tier, maxTokens, instructions } = getCommentaryTier(article.relevance_score);
 
     const systemPrompt = `${TROY_VOICE}
@@ -306,7 +352,9 @@ Return ONLY valid JSON.`;
         troy_one_liner: parsed.one_liner || '',
       });
 
-      console.log(`[Commentary] ${tier} (score ${article.relevance_score}): "${article.title.slice(0, 50)}..."`);
+      // Increment ONLY after successful generation
+      const newCount = await incrementCommentaryCount();
+      console.log(`[Commentary] Daily count: ${newCount}/${DAILY_CAP} (${today}) — ${tier} (score ${article.relevance_score}): "${article.title.slice(0, 50)}..."`);
 
       // Small delay between Claude calls
       await new Promise(r => setTimeout(r, 500));
