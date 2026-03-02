@@ -26,6 +26,61 @@ function cleanJsonResponse(text) {
 }
 
 const DAILY_CAP = 8;
+const MAX_DAILY_IMAGES = 3;
+
+/**
+ * Check if we can generate another DALL-E image today (hard cap via app_state).
+ */
+async function canGenerateImage() {
+  const today = new Date().toISOString().split('T')[0];
+
+  try {
+    const { data } = await supabase
+      .from('app_state')
+      .select('value')
+      .eq('key', 'dalle_daily_count')
+      .single();
+
+    if (data) {
+      const parsed = JSON.parse(data.value);
+      if (parsed.date === today) {
+        return { allowed: parsed.count < MAX_DAILY_IMAGES, count: parsed.count };
+      }
+    }
+  } catch (_) { /* no row yet or parse error — allow */ }
+
+  return { allowed: true, count: 0 };
+}
+
+/**
+ * Increment the daily DALL-E image counter in app_state.
+ */
+async function incrementImageCount() {
+  const today = new Date().toISOString().split('T')[0];
+
+  let count = 1;
+  try {
+    const { data } = await supabase
+      .from('app_state')
+      .select('value')
+      .eq('key', 'dalle_daily_count')
+      .single();
+
+    if (data) {
+      const parsed = JSON.parse(data.value);
+      if (parsed.date === today) {
+        count = parsed.count + 1;
+      }
+    }
+  } catch (_) { /* first image today */ }
+
+  await supabase
+    .from('app_state')
+    .upsert({
+      key: 'dalle_daily_count',
+      value: JSON.stringify({ date: today, count }),
+    }, { onConflict: 'key' });
+}
 
 /**
  * Count how many articles created today (UTC) have a non-null field.
@@ -226,34 +281,43 @@ const CATEGORY_STYLE = {
  * Uploads to Supabase Storage bucket 'stack-signal-images'.
  */
 async function generateArticleImages(articles) {
-  const withCommentary = articles.filter(a => a.troy_commentary);
+  // Only generate images for high-scoring articles (85+) with commentary
+  const eligible = articles.filter(a => a.troy_commentary && (a.relevance_score || 0) >= 85);
 
-  if (!withCommentary.length) {
-    console.log('[Images] No articles with commentary');
+  if (!eligible.length) {
+    console.log('[Images] No articles with commentary scoring 85+');
     return articles;
   }
 
-  // Check daily cap before doing any DALL-E calls
-  const imagesToday = await getTodayCount('image_url');
-  const remaining = DAILY_CAP - imagesToday;
-
-  if (remaining <= 0) {
-    console.log(`[Images] Daily cap reached (${imagesToday}/${DAILY_CAP} today) — skipping`);
+  // Check DALL-E daily cap via app_state
+  const { allowed, count: imagesSoFar } = await canGenerateImage();
+  if (!allowed) {
+    console.log(`[Images] DALL-E daily cap reached (${imagesSoFar}/${MAX_DAILY_IMAGES}) — skipping all`);
     return articles;
   }
 
-  const toGenerate = withCommentary
+  const toGenerate = eligible
     .sort((a, b) => b.relevance_score - a.relevance_score)
-    .slice(0, remaining);
+    .slice(0, MAX_DAILY_IMAGES - imagesSoFar);
 
-  console.log(`[Images] Generating ${toGenerate.length} images (${imagesToday} already today, cap ${DAILY_CAP})`);
+  console.log(`[Images] Generating ${toGenerate.length} images (${imagesSoFar} already today, cap ${MAX_DAILY_IMAGES})`);
 
   for (const article of toGenerate) {
+    // Re-check cap before each generation (another pipeline run could have incremented)
+    const { allowed: stillAllowed, count: currentCount } = await canGenerateImage();
+    if (!stillAllowed) {
+      console.log(`[Images] DALL-E daily cap reached (${currentCount}/${MAX_DAILY_IMAGES}) — stopping`);
+      break;
+    }
+
     try {
+      console.log(`[Images] DALL-E daily count: ${currentCount}/${MAX_DAILY_IMAGES} — generating image for "${article.title.slice(0, 50)}"`);
+
       const categoryStyle = CATEGORY_STYLE[article.category] || CATEGORY_STYLE.macro;
       const imagePrompt = `Editorial illustration for precious metals news article: "${article.title}". Style: ${categoryStyle}. Photorealistic, moody lighting, cinematic composition, no text or watermarks.`;
 
       const tempUrl = await generateImage(imagePrompt, { size: '1792x1024' });
+      await incrementImageCount();
 
       // Download image and upload to Supabase Storage
       const imageResp = await axios.get(tempUrl, { responseType: 'arraybuffer', timeout: 30000 });
@@ -404,31 +468,38 @@ Return ONLY valid JSON.`;
     const raw = await callClaude(systemPrompt, userMessage, { maxTokens: 2048 });
     const parsed = cleanJsonResponse(raw);
 
-    // Generate hero image for the daily signal
+    // Generate hero image for the daily signal (subject to daily DALL-E cap)
     let imageUrl = null;
     let imagePrompt = null;
-    try {
-      imagePrompt = `Editorial illustration for "The Stack Signal" daily precious metals intelligence brief. Gold and silver bars with financial data overlays, moody cinematic lighting, newspaper editorial style. No text or watermarks.`;
-      const tempUrl = await generateImage(imagePrompt, { size: '1792x1024' });
+    const { allowed: canGenImg, count: imgCount } = await canGenerateImage();
+    if (canGenImg) {
+      try {
+        console.log(`[Stack Signal] DALL-E daily count: ${imgCount}/${MAX_DAILY_IMAGES} — generating synthesis image`);
+        imagePrompt = `Editorial illustration for "The Stack Signal" daily precious metals intelligence brief. Gold and silver bars with financial data overlays, moody cinematic lighting, newspaper editorial style. No text or watermarks.`;
+        const tempUrl = await generateImage(imagePrompt, { size: '1792x1024' });
+        await incrementImageCount();
 
-      const imageResp = await axios.get(tempUrl, { responseType: 'arraybuffer', timeout: 30000 });
-      const buffer = Buffer.from(imageResp.data);
-      const fileName = `stack-signal-${new Date().toISOString().split('T')[0]}.png`;
+        const imageResp = await axios.get(tempUrl, { responseType: 'arraybuffer', timeout: 30000 });
+        const buffer = Buffer.from(imageResp.data);
+        const fileName = `stack-signal-${new Date().toISOString().split('T')[0]}.png`;
 
-      const { error: uploadError } = await supabase.storage
-        .from('stack-signal-images')
-        .upload(fileName, buffer, { contentType: 'image/png', upsert: true });
-
-      if (!uploadError) {
-        const { data: publicUrl } = supabase.storage
+        const { error: uploadError } = await supabase.storage
           .from('stack-signal-images')
-          .getPublicUrl(fileName);
-        imageUrl = publicUrl.publicUrl;
-      } else {
-        imageUrl = tempUrl;
+          .upload(fileName, buffer, { contentType: 'image/png', upsert: true });
+
+        if (!uploadError) {
+          const { data: publicUrl } = supabase.storage
+            .from('stack-signal-images')
+            .getPublicUrl(fileName);
+          imageUrl = publicUrl.publicUrl;
+        } else {
+          imageUrl = tempUrl;
+        }
+      } catch (imgErr) {
+        console.log(`[Stack Signal] Image generation failed: ${imgErr.message}`);
       }
-    } catch (imgErr) {
-      console.log(`[Stack Signal] Image generation failed: ${imgErr.message}`);
+    } else {
+      console.log(`[Stack Signal] DALL-E daily cap reached (${imgCount}/${MAX_DAILY_IMAGES}) — skipping synthesis image`);
     }
 
     // Save as stack signal article
