@@ -2,70 +2,75 @@
  * Stack Signal Breaking News Push Service
  *
  * Sends push notifications for high-scoring Stack Signal articles.
+ * Only the HIGHEST-scoring article per cron cycle triggers a push.
+ * Daily cap: 3 breaking news pushes total (persisted in app_state).
+ *
  * Troy Score tiers:
- *   85-89  → Market Alert    (max 2/day, paid users only)
- *   90-94  → Breaking News   (max 4/day, paid users only)
- *   95-100 → Critical Alert  (no cap, ALL users including free)
+ *   85-89  → Market Alert    (paid users only)
+ *   90-94  → Breaking News   (paid users only)
+ *   95-100 → Critical Alert  (ALL users including free)
  */
 
 const supabase = require('../lib/supabase');
 const { sendBatchPush, isValidExpoPushToken } = require('../routes/push');
 
-const TIER_CONFIG = {
-  market_alert:   { minScore: 85, maxScore: 89, dailyCap: 2,    paidOnly: true  },
-  breaking_news:  { minScore: 90, maxScore: 94, dailyCap: 4,    paidOnly: true  },
-  critical_alert: { minScore: 95, maxScore: 100, dailyCap: null, paidOnly: false },
-};
+const MAX_DAILY_PUSHES = 3;
 
-// In-memory daily cap tracker: { 'YYYY-MM-DD:tier': count }
-const dailyCounts = {};
-
-function getTodayKey(tier) {
+/**
+ * Get today's breaking news push count from app_state (persists across restarts).
+ */
+async function getBreakingPushCount() {
   const today = new Date().toISOString().split('T')[0];
-  return `${today}:${tier}`;
-}
-
-function getDailyCount(tier) {
-  return dailyCounts[getTodayKey(tier)] || 0;
-}
-
-function incrementDailyCount(tier) {
-  const key = getTodayKey(tier);
-  dailyCounts[key] = (dailyCounts[key] || 0) + 1;
+  try {
+    const { data } = await supabase
+      .from('app_state')
+      .select('value')
+      .eq('key', 'breaking_push_count')
+      .single();
+    if (data?.value?.date === today) return data.value.count || 0;
+    return 0; // Different day = reset
+  } catch {
+    return 0;
+  }
 }
 
 /**
- * Check if a saved Stack Signal article should trigger a push notification.
- * Call this after an article is saved to Supabase with its relevance_score.
+ * Increment today's breaking news push count in app_state.
+ */
+async function incrementBreakingPushCount() {
+  const today = new Date().toISOString().split('T')[0];
+  const current = await getBreakingPushCount();
+  await supabase
+    .from('app_state')
+    .upsert({ key: 'breaking_push_count', value: { date: today, count: current + 1 } });
+}
+
+/**
+ * Send a push notification for a single Stack Signal article.
+ * Called from the pipeline with the top-scoring article only.
  *
- * @param {Object} article - The saved article row (needs: id, title, relevance_score, troy_one_liner, troy_commentary)
+ * @param {Object} article - Needs: title, relevance_score, troy_one_liner, troy_commentary, slug
  */
 async function maybePushStackSignalAlert(article) {
   const score = article.relevance_score || 0;
+  if (score < 85) return;
 
-  // Determine tier
-  let tierName = null;
-  if (score >= 95) tierName = 'critical_alert';
-  else if (score >= 90) tierName = 'breaking_news';
-  else if (score >= 85) tierName = 'market_alert';
-  else return; // Below 85 = no push
-
-  const config = TIER_CONFIG[tierName];
-
-  // Check daily cap (skip for critical)
-  if (config.dailyCap !== null) {
-    const currentCount = getDailyCount(tierName);
-    if (currentCount >= config.dailyCap) {
-      console.log(`[StackSignalPush] ${tierName} daily cap reached (${currentCount}/${config.dailyCap}), skipping: "${article.title?.slice(0, 50)}"`);
-      return;
-    }
+  // Check daily cap
+  const dailyCount = await getBreakingPushCount();
+  if (dailyCount >= MAX_DAILY_PUSHES) {
+    console.log(`[StackSignalPush] Daily cap reached (${dailyCount}/${MAX_DAILY_PUSHES}), skipping: "${article.title?.slice(0, 50)}"`);
+    return;
   }
 
-  // Get push tokens with user info
-  let tokens;
+  // Determine tier
+  let tierName, paidOnly;
+  if (score >= 95) { tierName = 'critical_alert'; paidOnly = false; }
+  else if (score >= 90) { tierName = 'breaking_news'; paidOnly = true; }
+  else { tierName = 'market_alert'; paidOnly = true; }
 
-  if (config.paidOnly) {
-    // Get paid user IDs (silver, gold, lifetime)
+  // Get push tokens
+  let tokens;
+  if (paidOnly) {
     const { data: paidUsers } = await supabase
       .from('profiles')
       .select('id')
@@ -85,7 +90,6 @@ async function maybePushStackSignalAlert(article) {
 
     tokens = data;
   } else {
-    // Critical alert: ALL users
     const { data } = await supabase
       .from('push_tokens')
       .select('expo_push_token, user_id')
@@ -100,8 +104,6 @@ async function maybePushStackSignalAlert(article) {
   }
 
   // Filter out users who disabled this tier's notifications
-  // market_alert / breaking_news tiers → check market_alerts pref
-  // critical_alert tier → check critical_alerts pref
   const prefColumn = tierName === 'critical_alert' ? 'critical_alerts' : 'market_alerts';
   const { data: disabledPrefs } = await supabase
     .from('notification_preferences')
@@ -151,9 +153,9 @@ async function maybePushStackSignalAlert(article) {
     });
 
     const sent = results.filter(r => r.success).length;
-    incrementDailyCount(tierName);
+    await incrementBreakingPushCount();
 
-    console.log(`[StackSignalPush] ${tierName} sent to ${sent}/${validTokens.length} users (score: ${score}, "${article.title?.slice(0, 50)}")`);
+    console.log(`[StackSignalPush] ${tierName} sent to ${sent}/${validTokens.length} users (score: ${score}, daily: ${dailyCount + 1}/${MAX_DAILY_PUSHES}, "${article.title?.slice(0, 50)}")`);
   } catch (pushErr) {
     console.error(`[StackSignalPush] ${tierName} batch push failed: ${pushErr.message}`);
   }

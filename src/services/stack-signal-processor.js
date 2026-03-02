@@ -690,31 +690,30 @@ async function runStackSignalPipeline() {
     console.log('\n[Pipeline] Phase 4: Saving to database...');
     const saved = await saveArticles(withImages);
 
-    // Phase 5: Push notifications for high-scoring articles
-    console.log('\n[Pipeline] Phase 5: Checking for breaking news pushes...');
-    let pushCount = 0;
+    // Phase 5: Push notification for the HIGHEST-scoring article only (1 per cycle)
+    console.log('\n[Pipeline] Phase 5: Checking for breaking news push...');
     try {
       const { maybePushStackSignalAlert } = require('./stack-signal-push');
-      for (const article of withImages) {
-        if ((article.relevance_score || 0) >= 85) {
-          try {
-            await maybePushStackSignalAlert({
-              slug: generateSlug(article.title),
-              title: article.title,
-              relevance_score: article.relevance_score,
-              troy_one_liner: article.troy_one_liner,
-              troy_commentary: article.troy_commentary,
-            });
-            pushCount++;
-          } catch (pushErr) {
-            console.log(`[Pipeline] Push error for "${article.title?.slice(0, 40)}": ${pushErr.message}`);
-          }
-        }
+      const pushCandidates = withImages
+        .filter(a => (a.relevance_score || 0) >= 85)
+        .sort((a, b) => (b.relevance_score || 0) - (a.relevance_score || 0));
+
+      if (pushCandidates.length > 0) {
+        const top = pushCandidates[0];
+        console.log(`[Pipeline] Top article for push: score=${top.relevance_score}, "${top.title?.slice(0, 50)}" (${pushCandidates.length} candidates)`);
+        await maybePushStackSignalAlert({
+          slug: generateSlug(top.title),
+          title: top.title,
+          relevance_score: top.relevance_score,
+          troy_one_liner: top.troy_one_liner,
+          troy_commentary: top.troy_commentary,
+        });
+      } else {
+        console.log('[Pipeline] No articles scored 85+ for push');
       }
     } catch (err) {
       console.log(`[Pipeline] Push phase error: ${err.message}`);
     }
-    console.log(`[Pipeline] Push phase: ${pushCount} articles checked for alerts`);
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n${'━'.repeat(50)}`);

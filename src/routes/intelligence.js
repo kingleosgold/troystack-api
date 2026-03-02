@@ -574,62 +574,8 @@ router.post('/daily-brief/generate', async (req, res) => {
     // Generate portfolio intelligence alongside the daily brief
     try { await generatePortfolioIntelligence(userId); } catch (piErr) { console.log(`🧠 [Portfolio Intelligence] Skipped for ${userId}: ${piErr.message}`); }
 
-    // Send push notification after successful generation
-    if (result && result.brief && result.brief.brief_text) {
-      try {
-        const { data: notifPref } = await supabase
-          .from('notification_preferences')
-          .select('morning_brief')
-          .eq('user_id', userId)
-          .single();
-        const briefEnabled = !notifPref || notifPref.morning_brief !== false;
-
-        if (briefEnabled) {
-          const { data: tokenData } = await supabase
-            .from('push_tokens')
-            .select('expo_push_token')
-            .eq('user_id', userId)
-            .order('last_active', { ascending: false })
-            .limit(1)
-            .single();
-
-          if (tokenData && isValidExpoPushToken(tokenData.expo_push_token)) {
-            const { sendPush } = require('./push');
-
-            // Fetch synthesis for push body
-            let synthOneLiner = null;
-            try {
-              const { data: synthData } = await supabase
-                .from('stack_signal_articles')
-                .select('troy_one_liner')
-                .eq('is_stack_signal', true)
-                .gte('published_at', new Date(Date.now() - 3600000).toISOString())
-                .order('published_at', { ascending: false })
-                .limit(1)
-                .single();
-              synthOneLiner = synthData?.troy_one_liner;
-            } catch (_) { /* no synthesis available */ }
-
-            const pushBody = synthOneLiner
-              ? synthOneLiner.slice(0, 120)
-              : (() => {
-                  const firstSentence = result.brief.brief_text.split(/[.!]\s/)[0];
-                  return firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence;
-                })();
-            await sendPush(tokenData.expo_push_token, {
-              title: 'Troy\'s Morning Brief',
-              body: pushBody,
-              data: { type: 'morning_brief', screen: 'DailyBrief' },
-              sound: 'default',
-              badge: 1,
-            });
-            console.log(`📝 [Daily Brief] Push sent to ${userId}`);
-          }
-        }
-      } catch (pushErr) {
-        console.log(`📝 [Daily Brief] Push skipped for ${userId}: ${pushErr.message}`);
-      }
-    }
+    // Push notification handled by the daily brief cron — manual endpoint skips push
+    // to avoid duplicate notifications when user triggers generation from the app
 
     return res.json(result);
 
