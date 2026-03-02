@@ -194,8 +194,66 @@ Return ONLY the JSON array, no other text.`;
 // ============================================
 
 /**
+ * Troy's voice rules (shared across all tiers).
+ */
+const TROY_VOICE = `You are Troy, the precious metals stack analyst from Stack Tracker Gold. You write original commentary on metals news — not summaries, but your take as a stacker who's been in the game since 2008.
+
+Voice rules:
+- Say "your stack" not "your portfolio"
+- Say "spot" not "spot price"
+- Say "oz" not "troy ounces"
+- Use **bold** for key numbers, dollar amounts, and data points
+- No headers, no bullet points, no tables — flowing prose only
+- No emojis, no exclamation points
+- Direct and opinionated — you have a view and aren't afraid to share it
+- Never recommend selling. Dips are buying opportunities.
+- Dry humor is welcome but rare
+- You track COMEX physical flows, central bank buying, the gold/silver ratio`;
+
+/**
+ * Tier-specific prompt instructions and token limits.
+ *
+ * 85-100: Full treatment — 3-5 paragraph deep analysis (Claude)
+ * 70-84:  Standard — 2-3 paragraph analysis (Claude)
+ * 60-69:  Brief — 1 paragraph quick take (Claude)
+ */
+function getCommentaryTier(score) {
+  if (score >= 85) return {
+    tier: 'full',
+    maxTokens: 2048,
+    instructions: `Write Troy's analysis in 3-5 paragraphs of flowing prose.
+
+Structure:
+- Paragraph 1: What happened and why it matters to stackers RIGHT NOW
+- Paragraph 2: Historical context — when has this happened before? What followed?
+- Paragraph 3: What this means for the physical vs paper market (COMEX implications, dealer premiums, supply dynamics)
+- Paragraph 4 (if relevant): What Troy would be watching next — specific data points, dates, or thresholds
+- Paragraph 5 (if relevant): How this affects different metals differently (gold vs silver vs platinum)
+
+This is a deep analysis piece — 300-500 words. Make every paragraph earn its place.`,
+  };
+  if (score >= 70) return {
+    tier: 'standard',
+    maxTokens: 1200,
+    instructions: `Write Troy's analysis in 2-3 paragraphs of flowing prose.
+
+- Paragraph 1: What happened and why stackers should care
+- Paragraph 2: What this means for physical metals and what to watch
+- Paragraph 3 (if relevant): Historical context or cross-metal implications
+
+Substantive analysis — 150-300 words. No filler.`,
+  };
+  return {
+    tier: 'brief',
+    maxTokens: 800,
+    instructions: `Write Troy's quick take in 1 paragraph. What happened, why it matters for stackers, and one thing to watch. 80-150 words.`,
+  };
+}
+
+/**
  * Generate Troy's original commentary for high-scoring articles.
  * Only processes articles scoring 60+, daily-capped at 8 total.
+ * Commentary depth scales with Troy Score tier.
  */
 async function generateCommentary(articles, prices) {
   // Check daily cap before doing any Claude calls
@@ -219,26 +277,27 @@ async function generateCommentary(articles, prices) {
 
   console.log(`[Commentary] Generating for ${eligible.length} articles (${commentaryToday} already today, cap ${DAILY_CAP})`);
 
-  const systemPrompt = `You are Troy, the precious metals stack analyst from Stack Tracker Gold. You write original commentary on metals news — not summaries, but your take as a stacker who's been in the game since 2008.
+  const results = [];
 
-Your voice: Direct, data-driven, conversational. Short sentences. You track COMEX physical flows, central bank buying, the gold/silver ratio. You never recommend selling. Dips are entry points. No emojis. No exclamation points.
+  for (const article of eligible) {
+    const { tier, maxTokens, instructions } = getCommentaryTier(article.relevance_score);
+
+    const systemPrompt = `${TROY_VOICE}
 
 Current spot: Gold $${prices.gold || 'N/A'}, Silver $${prices.silver || 'N/A'}.
+Gold/Silver Ratio: ${prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1) : 'N/A'}.
 
-For each article, provide:
-1. A one-liner (max 15 words) — Troy's punchy take
-2. A commentary paragraph (80-150 words) — original analysis connecting the news to what it means for stackers
+${instructions}
+
+Also provide a one-liner (max 15 words) — Troy's punchy headline take.
 
 Return JSON: { "one_liner": "...", "commentary": "..." }
 Return ONLY valid JSON.`;
 
-  const results = [];
-
-  for (const article of eligible) {
     try {
-      const userMessage = `Article: "${article.title}"\nSource: ${article.source}\nSummary: ${article.description}\nCategory: ${article.category}\n\nWrite Troy's take.`;
+      const userMessage = `Article: "${article.title}"\nSource: ${article.source}\nSummary: ${article.description}\nCategory: ${article.category}\nTroy Score: ${article.relevance_score}\n\nWrite Troy's take.`;
 
-      const raw = await callClaude(systemPrompt, userMessage, { maxTokens: 1024 });
+      const raw = await callClaude(systemPrompt, userMessage, { maxTokens });
       const parsed = cleanJsonResponse(raw);
 
       results.push({
@@ -247,7 +306,7 @@ Return ONLY valid JSON.`;
         troy_one_liner: parsed.one_liner || '',
       });
 
-      console.log(`[Commentary] Done: "${article.title.slice(0, 50)}..."`);
+      console.log(`[Commentary] ${tier} (score ${article.relevance_score}): "${article.title.slice(0, 50)}..."`);
 
       // Small delay between Claude calls
       await new Promise(r => setTimeout(r, 500));
