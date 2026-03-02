@@ -24,6 +24,7 @@ const scanUsageRouter = require('./routes/scan-usage');
 const minVersionRouter = require('./routes/min-version');
 const troyChatRouter = require('./routes/troy-chat');
 const stackSignalRouter = require('./routes/stack-signal');
+const socialRouter = require('./routes/social');
 
 const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase, areMarketsClosed } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
@@ -148,6 +149,9 @@ app.use('/v1/troy', publicLimiter, troyChatRouter);
 // Stack Signal — curated precious metals news with Troy's commentary
 app.use('/v1/stack-signal', publicLimiter, stackSignalRouter);
 
+// Social features — views, likes, comments on Stack Signal articles
+app.use('/v1/stack-signal', publicLimiter, socialRouter);
+
 // ============================================================
 // HEALTH + API ROOT
 // ============================================================
@@ -198,6 +202,13 @@ app.get('/', (req, res) => {
         'POST /v1/stripe/create-checkout-session': 'Create Stripe checkout',
         'POST /v1/stripe/verify-session': 'Verify checkout session',
         'POST /v1/webhooks/stripe': 'Stripe webhook',
+      },
+      social: {
+        'POST /v1/stack-signal/articles/:id/view': 'Record article view',
+        'POST /v1/stack-signal/articles/:id/like': 'Toggle like (userId required)',
+        'GET /v1/stack-signal/articles/:id/likes': 'Get like count + user_liked',
+        'POST /v1/stack-signal/articles/:id/comments': 'Post comment (userId required)',
+        'GET /v1/stack-signal/articles/:id/comments': 'List comments',
       },
       llm: {
         'GET /llms.txt': 'LLM-readable app description',
