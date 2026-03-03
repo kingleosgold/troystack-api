@@ -311,12 +311,13 @@ app.listen(PORT, () => {
             // Send push notification
             if (result && result.brief && result.brief.brief_text) {
               try {
-                const { data: notifPref } = await supabase
+                const { data: notifRows } = await supabase
                   .from('notification_preferences')
                   .select('morning_brief')
                   .eq('user_id', user.id)
-                  .single();
-                const briefEnabled = !notifPref || notifPref.morning_brief !== false;
+                  .limit(1);
+                // Default to opted-in: only skip if user explicitly set morning_brief = false
+                const briefEnabled = !notifRows?.[0] || notifRows[0].morning_brief !== false;
 
                 if (!briefEnabled) {
                   console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: morning_brief preference disabled`);

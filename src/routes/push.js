@@ -140,6 +140,21 @@ router.post('/register', async (req, res) => {
       return res.status(500).json({ success: false, error: insertError.message });
     }
 
+    // Create default notification preferences (all opted-in) if none exist
+    if (user_id) {
+      await supabase
+        .from('notification_preferences')
+        .upsert({
+          user_id,
+          morning_brief: true,
+          market_alerts: true,
+          critical_alerts: true,
+          price_alerts: true,
+          breaking_news: true,
+          comex_alerts: true,
+        }, { onConflict: 'user_id', ignoreDuplicates: true });
+    }
+
     console.log(`✅ [Push Token] Registered NEW: ${expo_push_token.substring(0, 30)}... (id: ${inserted.id})`);
     res.json({ success: true, action: 'created', id: inserted.id });
   } catch (error) {
