@@ -25,7 +25,7 @@ function cleanJsonResponse(text) {
   return JSON.parse(cleaned);
 }
 
-const DAILY_CAP = 8;
+const DAILY_CAP = 5;
 const MAX_DAILY_IMAGES = 3;
 
 /**
@@ -83,7 +83,7 @@ async function incrementImageCount() {
 }
 
 /**
- * Check how many commentaries have been generated today (via app_state).
+ * Check how many synthesis articles have been generated today (via app_state).
  * Auto-resets when the date changes.
  */
 async function getCommentaryCount() {
@@ -104,13 +104,12 @@ async function getCommentaryCount() {
     }
   } catch (_) { /* no row yet or parse error — allow */ }
 
-  // New day or no record — reset to 0
   return { count: 0, allowed: true };
 }
 
 /**
- * Increment the daily commentary counter in app_state.
- * Call ONLY after commentary is successfully generated.
+ * Increment the daily synthesis article counter in app_state.
+ * Call ONLY after an article is successfully generated.
  */
 async function incrementCommentaryCount() {
   const today = new Date().toISOString().split('T')[0];
@@ -129,7 +128,7 @@ async function incrementCommentaryCount() {
         count = parsed.count + 1;
       }
     }
-  } catch (_) { /* first commentary today */ }
+  } catch (_) { /* first article today */ }
 
   await supabase
     .from('app_state')
@@ -228,159 +227,219 @@ Return ONLY the JSON array, no other text.`;
 }
 
 // ============================================
-// PHASE 2: GENERATE COMMENTARY (Claude Sonnet)
+// PHASE 2: CLUSTER BY THEME (Gemini Flash)
 // ============================================
 
 /**
- * Troy's voice rules (shared across all tiers).
+ * Group scored articles into thematic clusters using Gemini Flash.
+ * Each cluster becomes one original synthesis article.
+ * Returns 2-5 clusters sorted by importance.
  */
-const TROY_VOICE = `You are Troy, a precious metals market analyst who has been stacking since 2008. You write original analysis — not summaries.
+async function clusterArticles(scoredArticles) {
+  const worthy = scoredArticles.filter(a => a.relevance_score >= 50);
+
+  if (worthy.length < 3) {
+    console.log(`[Clustering] Only ${worthy.length} articles scored 50+ — using as individual clusters`);
+    return worthy.slice(0, 3).map(a => ({
+      theme: a.title,
+      importance: a.relevance_score,
+      articles: [a],
+      suggested_angle: 'Analyze the key developments',
+      category: a.category || 'macro',
+    }));
+  }
+
+  const articleSummaries = worthy.map((a, i) =>
+    `[${i}] (score: ${a.relevance_score}, category: ${a.category}) ${a.title}\n${a.description || ''}`
+  ).join('\n\n');
+
+  const systemPrompt = `You are an editor at a precious metals intelligence publication. Group these articles by THEME into clusters. Each cluster represents ONE original article that a metals journalist would write today, synthesizing all sources in that cluster.`;
+
+  const userMessage = `ARTICLES:
+${articleSummaries}
+
+Return ONLY valid JSON — no markdown, no backticks, no preamble:
+[
+  {
+    "theme": "Compelling article title a journalist would write",
+    "importance": 95,
+    "article_indices": [0, 3, 7],
+    "suggested_angle": "One sentence describing the unique angle Troy should take",
+    "category": "gold"
+  }
+]
+
+RULES:
+- Maximum 5 clusters. Minimum 2.
+- Each cluster must reference at least 2 source articles (by index number).
+- Rank clusters by importance to precious metals stackers (0-100).
+- KILL duplicate narratives — if 8 articles say "gold hits record", that's ONE cluster, not eight.
+- Prioritize: physical market stories > COMEX/vault data > geopolitical impact > equities/mining stocks
+- The "theme" should be a compelling original article title, NOT a copy of any source title.
+- importance score should reflect the cluster's overall significance, not just the highest individual score.
+- category must be one of: gold, silver, platinum, palladium, market_data, geopolitical, comex, macro, mining, central_banks`;
+
+  try {
+    const raw = await callGemini(MODELS.flash, systemPrompt, userMessage, {
+      temperature: 0.3,
+      responseMimeType: 'application/json',
+    });
+
+    let clusters;
+    try {
+      clusters = cleanJsonResponse(raw);
+    } catch (e) {
+      const match = raw.match(/\[[\s\S]*\]/);
+      if (match) clusters = JSON.parse(match[0]);
+      else throw e;
+    }
+
+    if (!Array.isArray(clusters)) throw new Error('Non-array response');
+
+    const mapped = clusters
+      .map(c => ({
+        ...c,
+        articles: (c.article_indices || []).map(i => worthy[i]).filter(Boolean),
+      }))
+      .filter(c => c.articles.length > 0)
+      .sort((a, b) => b.importance - a.importance)
+      .slice(0, 5);
+
+    if (mapped.length === 0) throw new Error('No valid clusters after mapping');
+
+    console.log(`[Clustering] ${mapped.length} clusters: ${mapped.map(c => `"${c.theme.slice(0, 40)}..." (${c.articles.length} sources, importance ${c.importance})`).join(', ')}`);
+    return mapped;
+  } catch (err) {
+    console.error(`[Clustering] Failed: ${err.message} — falling back to top articles`);
+    return worthy
+      .sort((a, b) => b.relevance_score - a.relevance_score)
+      .slice(0, 5)
+      .map(a => ({
+        theme: a.title,
+        importance: a.relevance_score,
+        articles: [a],
+        suggested_angle: 'Analyze the key developments',
+        category: a.category || 'macro',
+      }));
+  }
+}
+
+// ============================================
+// PHASE 3: WRITE SYNTHESIS ARTICLES (Claude)
+// ============================================
+
+/**
+ * Write an original long-form article synthesizing all sources in a cluster.
+ * Uses Claude Sonnet via the existing callClaude function.
+ * Returns the article text (800-1200 words, 4-6 paragraphs) or null on failure.
+ */
+async function writeSynthesisArticle(cluster, currentPrices) {
+  const sourceMaterial = cluster.articles.map(a =>
+    `SOURCE: ${a.source || 'Unknown'}\nTITLE: ${a.title}\nCONTENT: ${a.description || 'No content available'}`
+  ).join('\n\n---\n\n');
+
+  const goldPrice = currentPrices?.gold || 'N/A';
+  const silverPrice = currentPrices?.silver || 'N/A';
+  const ratio = (silverPrice && silverPrice > 0) ? (goldPrice / silverPrice).toFixed(1) : 'N/A';
+
+  const systemPrompt = `You are Troy, a precious metals market analyst and journalist writing for Stack Tracker Gold's Stack Signal publication. You are writing an ORIGINAL article that synthesizes multiple source materials into a cohesive, insightful piece.
+
+You are NOT summarizing a single article. You are a journalist who has read everything and is writing YOUR analysis. Cite sources naturally: "According to Reuters..." / "Kitco reports..." / "COMEX data shows..."
 
 VOICE RULES (apply to ALL output):
+- Direct, opinionated, stacker worldview. No corporate speak, no hedging.
 - Say "your stack" not "your portfolio"
 - Say "spot" not "spot price"
 - Say "oz" not "troy ounces"
-- Use **bold** for key numbers and prices
-- No headers, no bullet points, no numbered lists — flowing prose paragraphs ONLY
+- Use **bold** for key numbers and data points
+- No headers, no bullet points, no numbered lists — flowing prose paragraphs only
 - No emojis, no exclamation points
-- Direct, opinionated, stacker worldview
-- Never recommend selling — dips are buying opportunities
 - Dry humor welcome but rare
-- You track COMEX physical flows, central bank buying, the gold/silver ratio`;
+- Never recommend selling. Dips are buying opportunities.
+- Respects physical metal over paper markets
+- Aware of COMEX manipulation, silver derivatives, central bank accumulation
 
-/**
- * Tier-specific prompt instructions and token limits.
- *
- * 85-100: Full treatment — exactly 4 paragraphs (Claude)
- * 70-84:  Standard — exactly 2 paragraphs (Claude)
- * 60-69:  Brief — exactly 1 paragraph (Claude)
- */
-function getCommentaryTier(score) {
-  if (score >= 85) return {
-    tier: 'full',
-    maxTokens: 2048,
-    instructions: `Write EXACTLY 4 paragraphs of analysis. Separate each paragraph with two newlines (\\n\\n). This is non-negotiable.
+STRUCTURE — Write EXACTLY 4-6 paragraphs. Total length: 800-1200 words.
 
-PARAGRAPH 1 — WHAT HAPPENED: Lead with the key price move or event. Include specific numbers in **bold**. Why this matters RIGHT NOW for stackers. (3-5 sentences)
+PARAGRAPH 1 — THE STORY (150-200 words)
+Lead with the most important development. Hook the reader. Include specific numbers in **bold**. This should read like the opening of a Reuters wire story but with Troy's stacker perspective.
 
-PARAGRAPH 2 — HISTORICAL CONTEXT: When did we last see this pattern? What followed? Reference specific dates and price levels. (3-5 sentences)
+PARAGRAPH 2 — THE CONTEXT (150-200 words)
+Why does this matter historically? When did we last see this pattern? What followed? Reference specific dates and price levels if the sources provide them. Connect today's news to broader trends.
 
-PARAGRAPH 3 — PHYSICAL VS PAPER: What's happening with COMEX inventory, dealer premiums, delivery demand? This is what separates you from every other analyst. (3-5 sentences)
+PARAGRAPH 3 — THE PHYSICAL MARKET (150-200 words)
+What's happening in physical vs paper? COMEX inventory, dealer premiums, delivery demand, vault drawdowns, mine supply. This is Troy's edge — the physical market intelligence nobody else synthesizes. If sources don't mention physical data, use your knowledge to add relevant physical market context.
 
-PARAGRAPH 4 — WHAT TO WATCH: Specific dates, thresholds, data points that will confirm or deny this trend. End with a direct, opinionated call to action for stackers. (3-5 sentences)
+PARAGRAPH 4 — CONNECTING THE DOTS (150-200 words)
+Cross-reference data from multiple sources. Show patterns the individual articles miss. "Reuters reports X, while COMEX data shows Y — together these suggest..."
 
-CRITICAL FORMAT RULES:
-- Total output: 300-500 words
-- Each paragraph: 75-125 words, 3-5 sentences
-- EXACTLY 4 paragraphs separated by blank lines
-- DO NOT write one long block of text
-- DO NOT use headers or labels before paragraphs
-- Start each paragraph directly with the prose`,
-  };
-  if (score >= 70) return {
-    tier: 'standard',
-    maxTokens: 1200,
-    instructions: `Write EXACTLY 2 paragraphs of analysis. Separate them with two newlines (\\n\\n). This is non-negotiable.
+PARAGRAPH 5 — WHAT TO WATCH (100-150 words)
+Specific dates, price levels, thresholds, upcoming events. Be precise: "Watch the March 5 COMEX delivery report" not "watch upcoming data."
 
-PARAGRAPH 1: What happened and why stackers should care. Include key numbers in **bold**. (3-4 sentences, 75-125 words)
-
-PARAGRAPH 2: What to watch and how this affects your stack. Be specific — name levels, dates, or data points. (3-4 sentences, 75-125 words)
+PARAGRAPH 6 (optional) — THE STACKER'S EDGE (75-100 words)
+Direct take on what this means for someone building a physical stack.
 
 CRITICAL FORMAT RULES:
-- Total output: 150-300 words
-- EXACTLY 2 paragraphs separated by a blank line
+- Separate each paragraph with a blank line (two newlines: \\n\\n)
 - DO NOT write one long block of text
-- DO NOT use headers or labels before paragraphs`,
-  };
-  return {
-    tier: 'brief',
-    maxTokens: 800,
-    instructions: `Write EXACTLY 1 paragraph. 2-3 sentences, 50-80 words total. State what happened and one implication for stackers. Use **bold** for key numbers. No line breaks.`,
-  };
+- DO NOT use headers, labels, or section titles before paragraphs
+- Each paragraph must be a distinct block separated by a blank line
+- This is non-negotiable`;
+
+  const userMessage = `ARTICLE THEME: ${cluster.theme}
+SUGGESTED ANGLE: ${cluster.suggested_angle}
+CURRENT PRICES: Gold $${goldPrice}, Silver $${silverPrice}, G/S Ratio: ${ratio}:1
+
+SOURCE MATERIAL (${cluster.articles.length} sources):
+
+${sourceMaterial}
+
+Write the article. Remember: 4-6 paragraphs, 800-1200 words total, separated by blank lines.`;
+
+  try {
+    return await callClaude(systemPrompt, userMessage, { maxTokens: 2000 });
+  } catch (err) {
+    console.error(`[Synthesis] Claude error for "${cluster.theme}": ${err.message}`);
+    return null;
+  }
 }
 
 /**
- * Generate Troy's original commentary for high-scoring articles.
- * Only processes articles scoring 60+, daily-capped at 8 total.
- * Commentary depth scales with Troy Score tier.
+ * Generate one-liner and metadata for a synthesis article.
+ * Uses Gemini Flash for the one-liner (cheap).
  */
-async function generateCommentary(articles, prices) {
-  // Check daily cap before doing any Claude calls (app_state, auto-resets daily)
-  const today = new Date().toISOString().split('T')[0];
-  const { count: commentaryToday, allowed } = await getCommentaryCount();
+async function generateArticleMetadata(cluster, articleText) {
+  const systemPrompt = `You are a precious metals news editor. Write a single punchy headline one-liner (max 100 characters) for this article. The author is Troy, a metals analyst with a stacker worldview. No emojis, no exclamation points.`;
 
-  if (!allowed) {
-    console.log(`[Commentary] Daily cap reached: ${commentaryToday}/${DAILY_CAP} (${today}) — skipping`);
-    return [];
+  const userMessage = `Article title: ${cluster.theme}\nArticle excerpt: ${articleText.substring(0, 500)}\n\nReturn ONLY the one-liner, nothing else.`;
+
+  let oneLiner;
+  try {
+    const raw = await callGemini(MODELS.flash, systemPrompt, userMessage, {
+      temperature: 0.5,
+      maxOutputTokens: 100,
+    });
+    oneLiner = raw.trim().replace(/^["']|["']$/g, '');
+  } catch (err) {
+    console.log(`[Metadata] One-liner generation failed: ${err.message}`);
+    oneLiner = cluster.theme;
   }
 
-  const remaining = DAILY_CAP - commentaryToday;
-  const eligible = articles
-    .filter(a => a.relevance_score >= 60)
-    .sort((a, b) => b.relevance_score - a.relevance_score)
-    .slice(0, remaining);
-
-  if (!eligible.length) {
-    console.log('[Commentary] No articles scored 60+');
-    return [];
-  }
-
-  console.log(`[Commentary] Generating for ${eligible.length} articles (${commentaryToday} already today, cap ${DAILY_CAP}, date ${today})`);
-
-  const results = [];
-
-  for (const article of eligible) {
-    // Re-check cap before each article (another pipeline run could have incremented)
-    const { count: currentCount, allowed: stillAllowed } = await getCommentaryCount();
-    if (!stillAllowed) {
-      console.log(`[Commentary] Daily cap reached: ${currentCount}/${DAILY_CAP} (${today}) — stopping`);
-      break;
-    }
-
-    const { tier, maxTokens, instructions } = getCommentaryTier(article.relevance_score);
-
-    const systemPrompt = `${TROY_VOICE}
-
-Current spot: Gold $${prices.gold || 'N/A'}, Silver $${prices.silver || 'N/A'}.
-Gold/Silver Ratio: ${prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1) : 'N/A'}.
-
-${instructions}
-
-Also provide a one-liner (max 15 words) — Troy's punchy headline take.
-
-Return JSON: { "one_liner": "...", "commentary": "..." }
-Return ONLY valid JSON.`;
-
-    try {
-      const userMessage = `Article: "${article.title}"\nSource: ${article.source}\nSummary: ${article.description}\nCategory: ${article.category}\nTroy Score: ${article.relevance_score}\n\nWrite Troy's take.`;
-
-      const raw = await callClaude(systemPrompt, userMessage, { maxTokens });
-      const parsed = cleanJsonResponse(raw);
-
-      results.push({
-        ...article,
-        troy_commentary: parsed.commentary || '',
-        troy_one_liner: parsed.one_liner || '',
-      });
-
-      // Increment ONLY after successful generation
-      const newCount = await incrementCommentaryCount();
-      console.log(`[Commentary] Daily count: ${newCount}/${DAILY_CAP} (${today}) — ${tier} (score ${article.relevance_score}): "${article.title.slice(0, 50)}..."`);
-
-      // Small delay between Claude calls
-      await new Promise(r => setTimeout(r, 500));
-    } catch (err) {
-      console.log(`[Commentary] Failed for "${article.title.slice(0, 40)}": ${err.message}`);
-      // Still include article without commentary
-      results.push({ ...article, troy_commentary: '', troy_one_liner: '' });
-    }
-  }
-
-  return results;
+  return {
+    title: cluster.theme,
+    troy_one_liner: oneLiner,
+    category: cluster.category || 'macro',
+    relevance_score: cluster.importance,
+    sources: cluster.articles.map(a => ({
+      name: a.source || 'Unknown',
+      url: a.link || null,
+      title: a.title,
+    })),
+  };
 }
 
 // ============================================
-// PHASE 3: GENERATE IMAGES (DALL-E 3)
+// PHASE 4: GENERATE IMAGES (DALL-E 3)
 // ============================================
 
 const CATEGORY_STYLE = {
@@ -394,20 +453,18 @@ const CATEGORY_STYLE = {
 };
 
 /**
- * Generate hero images for articles with commentary.
- * Daily-capped at 8 total DALL-E images (~$0.08/image = ~$0.64/day max).
- * Uploads to Supabase Storage bucket 'stack-signal-images'.
+ * Generate hero images for synthesis articles.
+ * Only for articles scoring 85+ with commentary.
+ * Daily-capped at MAX_DAILY_IMAGES via app_state.
  */
 async function generateArticleImages(articles) {
-  // Only generate images for high-scoring articles (85+) with commentary
   const eligible = articles.filter(a => a.troy_commentary && (a.relevance_score || 0) >= 85);
 
   if (!eligible.length) {
-    console.log('[Images] No articles with commentary scoring 85+');
+    console.log('[Images] No synthesis articles scoring 85+');
     return articles;
   }
 
-  // Check DALL-E daily cap via app_state
   const { allowed, count: imagesSoFar } = await canGenerateImage();
   if (!allowed) {
     console.log(`[Images] DALL-E daily cap reached (${imagesSoFar}/${MAX_DAILY_IMAGES}) — skipping all`);
@@ -421,7 +478,6 @@ async function generateArticleImages(articles) {
   console.log(`[Images] Generating ${toGenerate.length} images (${imagesSoFar} already today, cap ${MAX_DAILY_IMAGES})`);
 
   for (const article of toGenerate) {
-    // Re-check cap before each generation (another pipeline run could have incremented)
     const { allowed: stillAllowed, count: currentCount } = await canGenerateImage();
     if (!stillAllowed) {
       console.log(`[Images] DALL-E daily cap reached (${currentCount}/${MAX_DAILY_IMAGES}) — stopping`);
@@ -429,10 +485,11 @@ async function generateArticleImages(articles) {
     }
 
     try {
-      console.log(`[Images] DALL-E daily count: ${currentCount}/${MAX_DAILY_IMAGES} — generating image for "${article.title.slice(0, 50)}"`);
+      console.log(`[Images] DALL-E daily count: ${currentCount}/${MAX_DAILY_IMAGES} — generating for "${article.title.slice(0, 50)}"`);
 
       const categoryStyle = CATEGORY_STYLE[article.category] || CATEGORY_STYLE.macro;
-      const imagePrompt = `Editorial illustration for precious metals news article: "${article.title}". Style: ${categoryStyle}. Photorealistic, moody lighting, cinematic composition, no text or watermarks.`;
+      const articleSnippet = article.troy_commentary ? article.troy_commentary.substring(0, 200) : '';
+      const imagePrompt = `Editorial illustration for precious metals article: "${article.title}". Context: ${articleSnippet}. Style: ${categoryStyle}. Photorealistic, moody lighting, cinematic composition, no text or watermarks.`;
 
       const tempUrl = await generateImage(imagePrompt, { size: '1792x1024' });
       await incrementImageCount();
@@ -440,7 +497,7 @@ async function generateArticleImages(articles) {
       // Download image and upload to Supabase Storage
       const imageResp = await axios.get(tempUrl, { responseType: 'arraybuffer', timeout: 30000 });
       const buffer = Buffer.from(imageResp.data);
-      const fileName = `${generateSlug(article.title)}.png`;
+      const fileName = `${article.slug || generateSlug(article.title)}.png`;
 
       const { error: uploadError } = await supabase.storage
         .from('stack-signal-images')
@@ -451,7 +508,7 @@ async function generateArticleImages(articles) {
 
       if (uploadError) {
         console.log(`[Images] Upload failed for "${article.title.slice(0, 40)}": ${uploadError.message}`);
-        article.image_url = tempUrl; // fallback to temp URL
+        article.image_url = tempUrl;
       } else {
         const { data: publicUrl } = supabase.storage
           .from('stack-signal-images')
@@ -462,7 +519,6 @@ async function generateArticleImages(articles) {
       article.image_prompt = imagePrompt;
       console.log(`[Images] Done: "${article.title.slice(0, 50)}..."`);
 
-      // Delay between DALL-E calls
       await new Promise(r => setTimeout(r, 1000));
     } catch (err) {
       console.log(`[Images] Failed for "${article.title.slice(0, 40)}": ${err.message}`);
@@ -473,11 +529,11 @@ async function generateArticleImages(articles) {
 }
 
 // ============================================
-// PHASE 4: SAVE ARTICLES
+// PHASE 5: SAVE ARTICLES
 // ============================================
 
 /**
- * Save processed articles to stack_signal_articles table.
+ * Save synthesized articles to stack_signal_articles table.
  */
 async function saveArticles(articles) {
   if (!articles.length) {
@@ -490,21 +546,20 @@ async function saveArticles(articles) {
 
   for (const article of articles) {
     try {
-      const slug = generateSlug(article.title);
       const row = {
-        slug,
+        slug: article.slug || generateSlug(article.title),
         title: article.title,
         troy_commentary: article.troy_commentary || null,
         troy_one_liner: article.troy_one_liner || null,
         category: article.category || 'macro',
-        sources: [{ url: article.link, name: article.source, description: article.description }],
+        sources: article.sources || [],
         image_url: article.image_url || null,
         image_prompt: article.image_prompt || null,
         gold_price_at_publish: prices.gold || null,
         silver_price_at_publish: prices.silver || null,
         relevance_score: article.relevance_score || 0,
         is_stack_signal: false,
-        published_at: article.pubDate ? article.pubDate.toISOString() : new Date().toISOString(),
+        published_at: new Date().toISOString(),
       };
 
       const { error } = await supabase
@@ -526,12 +581,12 @@ async function saveArticles(articles) {
 }
 
 // ============================================
-// PHASE 5: DAILY STACK SIGNAL SYNTHESIS
+// DAILY STACK SIGNAL SYNTHESIS
 // ============================================
 
 /**
  * Generate the daily "Stack Signal" synthesis narrative.
- * Pulls last 24h articles and writes a comprehensive daily digest.
+ * Pulls last 24h synthesis articles and writes a comprehensive daily digest.
  */
 async function generateStackSignal() {
   console.log('\n[Stack Signal] Generating daily synthesis...');
@@ -544,7 +599,7 @@ async function generateStackSignal() {
     .eq('is_stack_signal', false)
     .gte('published_at', cutoff)
     .order('relevance_score', { ascending: false })
-    .limit(20);
+    .limit(10);
 
   if (error) {
     console.log(`[Stack Signal] DB error: ${error.message}`);
@@ -558,17 +613,18 @@ async function generateStackSignal() {
 
   const prices = getCachedPrices();
 
+  // Use one-liners + first 500 chars of each article (full text is now 800-1200 words)
   const articleSummaries = recentArticles.map((a, i) =>
-    `${i + 1}. [${a.category}] "${a.title}" (Score: ${a.relevance_score})\n   Troy's take: ${a.troy_one_liner || 'N/A'}\n   ${a.troy_commentary || 'No commentary'}`
+    `${i + 1}. [${a.category}] "${a.title}" (Score: ${a.relevance_score})\n   Troy's take: ${a.troy_one_liner || 'N/A'}\n   ${(a.troy_commentary || 'No commentary').substring(0, 500)}`
   ).join('\n\n');
 
-  const systemPrompt = `You are Troy, writing "The Stack Signal" — your daily precious metals intelligence briefing for Stack Tracker Gold users. This is a comprehensive synthesis, not a summary. Connect the dots between stories, identify the signal from the noise, and tell stackers what actually matters today.
+  const systemPrompt = `You are Troy, writing "The Stack Signal" — your daily precious metals intelligence briefing for Stack Tracker Gold users. Today's source material is your own long-form synthesis articles from the day. Distill the key themes into a cohesive morning overview — connect the dots between your articles and tell stackers what the overall picture looks like today.
 
 Your voice: Direct, analytical, conversational. You've been stacking since 2008. You track COMEX flows, central bank buying, the gold/silver ratio. No emojis. No exclamation points. No corporate jargon.
 
 Structure your synthesis as flowing prose in 3-4 paragraphs:
 1. The headline — what's the single most important thing today
-2. The context — how other stories connect and what the pattern means
+2. The context — how your articles connect and what the pattern means
 3. What it means for your stack — concrete implications for physical stackers
 4. One thing to watch — a forward-looking signal
 
@@ -665,44 +721,108 @@ Return ONLY valid JSON.`;
 // ============================================
 
 /**
- * Run the full Stack Signal pipeline (phases 1-4).
- * Phase 5 (daily synthesis) runs on its own schedule.
+ * Run the full Stack Signal v2 pipeline.
+ *
+ * Phase 0: Fetch RSS feeds
+ * Phase 1: Score articles individually (Gemini Flash)
+ * Phase 2: Cluster scored articles by theme (Gemini Flash)
+ * Phase 3: Write synthesis article per cluster (Claude Sonnet)
+ * Phase 4: Generate images (DALL-E 3)
+ * Phase 5: Save to database
+ * Phase 6: Push notification for top article
  */
 async function runStackSignalPipeline() {
   const startTime = Date.now();
   console.log(`\n${'━'.repeat(50)}`);
-  console.log(`  Stack Signal Pipeline — ${new Date().toISOString()}`);
+  console.log(`  Stack Signal v2 Pipeline — ${new Date().toISOString()}`);
   console.log(`${'━'.repeat(50)}`);
 
   try {
-    // Fetch RSS articles
+    // Phase 0: Fetch RSS articles
     console.log('\n[Pipeline] Phase 0: Fetching RSS feeds...');
     const rawArticles = await fetchNewArticles();
 
     if (!rawArticles.length) {
       console.log('[Pipeline] No new articles found. Pipeline complete.');
-      return { articles: 0, scored: 0, commentary: 0, saved: 0 };
+      return { articles: 0, scored: 0, clusters: 0, synthesized: 0, saved: 0 };
     }
 
     // Phase 1: Score
     console.log('\n[Pipeline] Phase 1: Scoring articles...');
     const scoredArticles = await scoreArticles(rawArticles);
 
-    // Phase 2: Commentary
-    console.log('\n[Pipeline] Phase 2: Generating commentary...');
+    // Phase 2: Cluster by theme
+    console.log('\n[Pipeline] Phase 2: Clustering articles by theme...');
+    const clusters = await clusterArticles(scoredArticles);
+    console.log(`[Pipeline] ${clusters.length} clusters identified`);
+
+    // Phase 3: Write synthesis articles (daily-capped)
+    const today = new Date().toISOString().split('T')[0];
+    const { count: commentaryToday, allowed } = await getCommentaryCount();
+
+    if (!allowed) {
+      console.log(`[Pipeline] Daily synthesis cap reached: ${commentaryToday}/${DAILY_CAP} (${today}) — skipping writing`);
+      return { articles: rawArticles.length, scored: scoredArticles.length, clusters: clusters.length, synthesized: 0, saved: 0 };
+    }
+
+    const remainingSlots = DAILY_CAP - commentaryToday;
+    const clustersToWrite = clusters.slice(0, remainingSlots);
+
+    console.log(`\n[Pipeline] Phase 3: Writing ${clustersToWrite.length} synthesis articles (${commentaryToday} already today, cap ${DAILY_CAP})...`);
+
     const prices = getCachedPrices();
-    const withCommentary = await generateCommentary(scoredArticles, prices);
+    const synthesizedArticles = [];
 
-    // Phase 3: Images
-    console.log('\n[Pipeline] Phase 3: Generating images...');
-    const withImages = await generateArticleImages(withCommentary);
+    for (let i = 0; i < clustersToWrite.length; i++) {
+      // Re-check cap before each article
+      const { count: currentCount, allowed: stillAllowed } = await getCommentaryCount();
+      if (!stillAllowed) {
+        console.log(`[Synthesis] Daily cap reached: ${currentCount}/${DAILY_CAP} — stopping`);
+        break;
+      }
 
-    // Phase 4: Save
-    console.log('\n[Pipeline] Phase 4: Saving to database...');
+      const cluster = clustersToWrite[i];
+      console.log(`[Synthesis] Writing article ${i + 1}/${clustersToWrite.length}: "${cluster.theme.slice(0, 50)}" (${cluster.articles.length} sources, importance: ${cluster.importance})`);
+
+      const articleText = await writeSynthesisArticle(cluster, prices);
+      if (!articleText) {
+        console.log(`[Synthesis] Skipped: "${cluster.theme.slice(0, 50)}" — no output from Claude`);
+        continue;
+      }
+
+      const metadata = await generateArticleMetadata(cluster, articleText);
+      const newCount = await incrementCommentaryCount();
+
+      const article = {
+        ...metadata,
+        troy_commentary: articleText,
+        slug: generateSlug(metadata.title),
+      };
+
+      synthesizedArticles.push(article);
+
+      const paragraphs = articleText.split('\n\n').filter(p => p.trim().length > 0);
+      console.log(`[Synthesis] Done: "${cluster.theme.slice(0, 50)}" — ${articleText.length} chars, ${paragraphs.length} paragraphs (daily: ${newCount}/${DAILY_CAP})`);
+
+      // Small delay between Claude calls
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    if (!synthesizedArticles.length) {
+      console.log('[Pipeline] No synthesis articles generated');
+      return { articles: rawArticles.length, scored: scoredArticles.length, clusters: clusters.length, synthesized: 0, saved: 0 };
+    }
+
+    // Phase 4: Images
+    console.log(`\n[Pipeline] Phase 4: Generating images for ${synthesizedArticles.length} articles...`);
+    const withImages = await generateArticleImages(synthesizedArticles);
+
+    // Phase 5: Save
+    console.log('\n[Pipeline] Phase 5: Saving to database...');
     const saved = await saveArticles(withImages);
 
-    // Phase 5: Push notification for the HIGHEST-scoring article only (1 per cycle)
-    console.log('\n[Pipeline] Phase 5: Checking for breaking news push...');
+    // Phase 6: Push notification for the HIGHEST-scoring article only (1 per cycle)
+    console.log('\n[Pipeline] Phase 6: Checking for breaking news push...');
     try {
       const { maybePushStackSignalAlert } = require('./stack-signal-push');
       const pushCandidates = withImages
@@ -713,7 +833,7 @@ async function runStackSignalPipeline() {
         const top = pushCandidates[0];
         console.log(`[Pipeline] Top article for push: score=${top.relevance_score}, "${top.title?.slice(0, 50)}" (${pushCandidates.length} candidates)`);
         await maybePushStackSignalAlert({
-          slug: generateSlug(top.title),
+          slug: top.slug || generateSlug(top.title),
           title: top.title,
           relevance_score: top.relevance_score,
           troy_one_liner: top.troy_one_liner,
@@ -729,20 +849,22 @@ async function runStackSignalPipeline() {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n${'━'.repeat(50)}`);
     console.log(`  Pipeline Complete`);
-    console.log(`  Articles: ${rawArticles.length} fetched, ${withCommentary.length} with commentary, ${saved} saved`);
-    console.log(`  Runtime: ${elapsed}s`);
+    console.log(`  RSS: ${rawArticles.length} fetched, ${scoredArticles.length} scored`);
+    console.log(`  Clusters: ${clusters.length} identified, ${synthesizedArticles.length} written`);
+    console.log(`  Saved: ${saved} | Runtime: ${elapsed}s`);
     console.log(`${'━'.repeat(50)}\n`);
 
-    return { articles: rawArticles.length, scored: scoredArticles.length, commentary: withCommentary.length, saved };
+    return { articles: rawArticles.length, scored: scoredArticles.length, clusters: clusters.length, synthesized: synthesizedArticles.length, saved };
   } catch (err) {
     console.error(`[Pipeline] Fatal error: ${err.message}`);
-    return { articles: 0, scored: 0, commentary: 0, saved: 0, error: err.message };
+    return { articles: 0, scored: 0, clusters: 0, synthesized: 0, saved: 0, error: err.message };
   }
 }
 
 module.exports = {
   scoreArticles,
-  generateCommentary,
+  clusterArticles,
+  writeSynthesisArticle,
   generateArticleImages,
   saveArticles,
   generateStackSignal,
