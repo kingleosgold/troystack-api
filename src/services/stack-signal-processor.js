@@ -250,7 +250,9 @@ RULES:
 - Prioritize: physical market stories > COMEX/vault data > geopolitical impact > equities/mining stocks
 - The "theme" should be a compelling original article title, NOT a copy of any source title.
 - importance score should reflect the cluster's overall significance, not just the highest individual score.
-- category must be one of: gold, silver, platinum, palladium, market_data, geopolitical, comex, macro, mining, central_banks`;
+- category must be one of: gold, silver, platinum, palladium, market_data, geopolitical, comex, macro, mining, central_banks
+
+CRITICAL: Return ONLY the JSON array. No markdown, no code fences, no explanation, no text before or after the array. Start with [ and end with ]. Use double quotes for all strings. No trailing commas.`;
 
   try {
     const raw = await callGemini(MODELS.flash, systemPrompt, userMessage, {
@@ -262,9 +264,30 @@ RULES:
     try {
       clusters = cleanJsonResponse(raw);
     } catch (e) {
-      const match = raw.match(/\[[\s\S]*\]/);
-      if (match) clusters = JSON.parse(match[0]);
-      else throw e;
+      // Robust fallback: extract and clean the JSON array
+      let cleaned = raw;
+      cleaned = cleaned.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
+      const firstBracket = cleaned.indexOf('[');
+      const lastBracket = cleaned.lastIndexOf(']');
+      if (firstBracket !== -1 && lastBracket > firstBracket) {
+        cleaned = cleaned.substring(firstBracket, lastBracket + 1);
+      }
+      cleaned = cleaned.replace(/,\s*([\]}])/g, '$1');
+      cleaned = cleaned.replace(/\/\/.*$/gm, '');
+      cleaned = cleaned.trim();
+
+      try {
+        clusters = JSON.parse(cleaned);
+      } catch (e2) {
+        // Last resort: replace single quotes with double quotes
+        try {
+          clusters = JSON.parse(cleaned.replace(/'/g, '"'));
+        } catch (e3) {
+          console.error(`[Clustering] Failed to parse after cleaning: ${e3.message}`);
+          console.error(`[Clustering] Raw response (first 500 chars): ${raw.substring(0, 500)}`);
+          throw e3;
+        }
+      }
     }
 
     if (!Array.isArray(clusters)) throw new Error('Non-array response');
