@@ -30,6 +30,7 @@ const MAX_DAILY_IMAGES = 3;
 
 /**
  * Check if we can generate another DALL-E image today (hard cap via app_state).
+ * The value column is JSONB — access as object, not string.
  */
 async function canGenerateImage() {
   const today = new Date().toISOString().split('T')[0];
@@ -41,44 +42,31 @@ async function canGenerateImage() {
       .eq('key', 'dalle_daily_count')
       .single();
 
-    if (data) {
-      const parsed = JSON.parse(data.value);
-      if (parsed.date === today) {
-        return { allowed: parsed.count < MAX_DAILY_IMAGES, count: parsed.count };
+    if (data?.value) {
+      // Handle both JSONB (object) and legacy string formats
+      const val = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
+      if (val.date === today) {
+        return { allowed: val.count < MAX_DAILY_IMAGES, count: val.count };
       }
     }
-  } catch (_) { /* no row yet or parse error — allow */ }
+  } catch (_) { /* no row yet — allow */ }
 
   return { allowed: true, count: 0 };
 }
 
 /**
  * Increment the daily DALL-E image counter in app_state.
+ * Stores as plain JSONB object (not JSON.stringify).
  */
 async function incrementImageCount() {
   const today = new Date().toISOString().split('T')[0];
-
-  let count = 1;
-  try {
-    const { data } = await supabase
-      .from('app_state')
-      .select('value')
-      .eq('key', 'dalle_daily_count')
-      .single();
-
-    if (data) {
-      const parsed = JSON.parse(data.value);
-      if (parsed.date === today) {
-        count = parsed.count + 1;
-      }
-    }
-  } catch (_) { /* first image today */ }
+  const { count: current } = await canGenerateImage();
 
   await supabase
     .from('app_state')
     .upsert({
       key: 'dalle_daily_count',
-      value: JSON.stringify({ date: today, count }),
+      value: { date: today, count: current + 1 },
     }, { onConflict: 'key' });
 }
 
@@ -96,13 +84,13 @@ async function getCommentaryCount() {
       .eq('key', 'commentary_daily_count')
       .single();
 
-    if (data) {
-      const parsed = JSON.parse(data.value);
-      if (parsed.date === today) {
-        return { count: parsed.count, allowed: parsed.count < DAILY_CAP };
+    if (data?.value) {
+      const val = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
+      if (val.date === today) {
+        return { count: val.count, allowed: val.count < DAILY_CAP };
       }
     }
-  } catch (_) { /* no row yet or parse error — allow */ }
+  } catch (_) { /* no row yet — allow */ }
 
   return { count: 0, allowed: true };
 }
@@ -113,31 +101,16 @@ async function getCommentaryCount() {
  */
 async function incrementCommentaryCount() {
   const today = new Date().toISOString().split('T')[0];
-
-  let count = 1;
-  try {
-    const { data } = await supabase
-      .from('app_state')
-      .select('value')
-      .eq('key', 'commentary_daily_count')
-      .single();
-
-    if (data) {
-      const parsed = JSON.parse(data.value);
-      if (parsed.date === today) {
-        count = parsed.count + 1;
-      }
-    }
-  } catch (_) { /* first article today */ }
+  const { count: current } = await getCommentaryCount();
 
   await supabase
     .from('app_state')
     .upsert({
       key: 'commentary_daily_count',
-      value: JSON.stringify({ date: today, count }),
+      value: { date: today, count: current + 1 },
     }, { onConflict: 'key' });
 
-  return count;
+  return current + 1;
 }
 
 // ============================================
