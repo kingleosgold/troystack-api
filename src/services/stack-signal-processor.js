@@ -412,8 +412,10 @@ async function generateArticleMetadata(cluster, articleText) {
 }
 
 // ============================================
-// PHASE 4: GENERATE IMAGES (DALL-E 3)
+// PHASE 4: ARTICLE IMAGES
 // ============================================
+
+const USE_DALLE = false; // Set to true to re-enable DALL-E image generation
 
 const CATEGORY_STYLE = {
   macro: 'sweeping financial landscape with gold bars and currency symbols',
@@ -426,11 +428,43 @@ const CATEGORY_STYLE = {
 };
 
 /**
- * Generate hero images for synthesis articles.
- * Only for articles scoring 85+ with commentary.
- * Daily-capped at MAX_DAILY_IMAGES via app_state.
+ * Assign an existing image from the database pool, matched by category.
+ * Zero cost — reuses the 800+ DALL-E images already generated.
  */
-async function generateArticleImages(articles) {
+async function assignExistingImage(article) {
+  const category = article.category || 'gold';
+
+  // Try category match first
+  let { data: images } = await supabase
+    .from('stack_signal_articles')
+    .select('image_url')
+    .eq('category', category)
+    .not('image_url', 'is', null)
+    .limit(50);
+
+  // Fallback to any image if no category match
+  if (!images || images.length === 0) {
+    const { data: fallback } = await supabase
+      .from('stack_signal_articles')
+      .select('image_url')
+      .not('image_url', 'is', null)
+      .limit(50);
+    images = fallback;
+  }
+
+  if (!images || images.length === 0) {
+    return null;
+  }
+
+  const randomIndex = Math.floor(Math.random() * images.length);
+  return images[randomIndex].image_url;
+}
+
+/**
+ * DALL-E image generation (disabled by default — USE_DALLE flag).
+ * Generates hero images via OpenAI DALL-E 3, daily-capped at MAX_DAILY_IMAGES.
+ */
+async function generateDalleImages(articles) {
   const eligible = articles.filter(a => a.troy_commentary && (a.relevance_score || 0) >= 85);
 
   if (!eligible.length) {
@@ -448,7 +482,7 @@ async function generateArticleImages(articles) {
     .sort((a, b) => b.relevance_score - a.relevance_score)
     .slice(0, MAX_DAILY_IMAGES - imagesSoFar);
 
-  console.log(`[Images] Generating ${toGenerate.length} images (${imagesSoFar} already today, cap ${MAX_DAILY_IMAGES})`);
+  console.log(`[Images] Generating ${toGenerate.length} DALL-E images (${imagesSoFar} already today, cap ${MAX_DAILY_IMAGES})`);
 
   for (const article of toGenerate) {
     const { allowed: stillAllowed, count: currentCount } = await canGenerateImage();
@@ -467,7 +501,6 @@ async function generateArticleImages(articles) {
       const tempUrl = await generateImage(imagePrompt, { size: '1792x1024' });
       await incrementImageCount();
 
-      // Download image and upload to Supabase Storage
       const imageResp = await axios.get(tempUrl, { responseType: 'arraybuffer', timeout: 30000 });
       const buffer = Buffer.from(imageResp.data);
       const fileName = `${article.slug || generateSlug(article.title)}.png`;
@@ -498,6 +531,42 @@ async function generateArticleImages(articles) {
     }
   }
 
+  return articles;
+}
+
+/**
+ * Assign images to articles.
+ * When USE_DALLE is false: assigns from existing image pool (all articles, zero cost).
+ * When USE_DALLE is true: generates via DALL-E (top 3 by score, daily-capped).
+ */
+async function generateArticleImages(articles) {
+  if (USE_DALLE) {
+    return generateDalleImages(articles);
+  }
+
+  // Pool mode: assign existing images to ALL articles with commentary
+  const eligible = articles.filter(a => a.troy_commentary);
+  if (!eligible.length) {
+    console.log('[Images] No articles with commentary to assign images');
+    return articles;
+  }
+
+  console.log(`[Images] Assigning images from pool for ${eligible.length} articles`);
+
+  for (const article of eligible) {
+    try {
+      const imageUrl = await assignExistingImage(article);
+      if (imageUrl) {
+        article.image_url = imageUrl;
+      } else {
+        console.log(`[Images] No pool image found for "${article.title.slice(0, 40)}"`);
+      }
+    } catch (err) {
+      console.log(`[Images] Pool assignment failed for "${article.title.slice(0, 40)}": ${err.message}`);
+    }
+  }
+
+  console.log(`[Images] Assigned ${eligible.filter(a => a.image_url).length}/${eligible.length} images from pool`);
   return articles;
 }
 
@@ -618,35 +687,43 @@ Return ONLY valid JSON.`;
     // Generate hero image for the daily signal (subject to daily DALL-E cap)
     let imageUrl = null;
     let imagePrompt = null;
-    const { allowed: canGenImg, count: imgCount } = await canGenerateImage();
-    if (canGenImg) {
-      try {
-        console.log(`[Stack Signal] DALL-E daily count: ${imgCount}/${MAX_DAILY_IMAGES} — generating synthesis image`);
-        imagePrompt = `Editorial illustration for "The Stack Signal" daily precious metals intelligence brief. Gold and silver bars with financial data overlays, moody cinematic lighting, newspaper editorial style. No text or watermarks.`;
-        const tempUrl = await generateImage(imagePrompt, { size: '1792x1024' });
-        await incrementImageCount();
+    if (USE_DALLE) {
+      const { allowed: canGenImg, count: imgCount } = await canGenerateImage();
+      if (canGenImg) {
+        try {
+          console.log(`[Stack Signal] DALL-E daily count: ${imgCount}/${MAX_DAILY_IMAGES} — generating synthesis image`);
+          imagePrompt = `Editorial illustration for "The Stack Signal" daily precious metals intelligence brief. Gold and silver bars with financial data overlays, moody cinematic lighting, newspaper editorial style. No text or watermarks.`;
+          const tempUrl = await generateImage(imagePrompt, { size: '1792x1024' });
+          await incrementImageCount();
 
-        const imageResp = await axios.get(tempUrl, { responseType: 'arraybuffer', timeout: 30000 });
-        const buffer = Buffer.from(imageResp.data);
-        const fileName = `stack-signal-${new Date().toISOString().split('T')[0]}.png`;
+          const imageResp = await axios.get(tempUrl, { responseType: 'arraybuffer', timeout: 30000 });
+          const buffer = Buffer.from(imageResp.data);
+          const fileName = `stack-signal-${new Date().toISOString().split('T')[0]}.png`;
 
-        const { error: uploadError } = await supabase.storage
-          .from('stack-signal-images')
-          .upload(fileName, buffer, { contentType: 'image/png', upsert: true });
-
-        if (!uploadError) {
-          const { data: publicUrl } = supabase.storage
+          const { error: uploadError } = await supabase.storage
             .from('stack-signal-images')
-            .getPublicUrl(fileName);
-          imageUrl = publicUrl.publicUrl;
-        } else {
-          imageUrl = tempUrl;
+            .upload(fileName, buffer, { contentType: 'image/png', upsert: true });
+
+          if (!uploadError) {
+            const { data: publicUrl } = supabase.storage
+              .from('stack-signal-images')
+              .getPublicUrl(fileName);
+            imageUrl = publicUrl.publicUrl;
+          } else {
+            imageUrl = tempUrl;
+          }
+        } catch (imgErr) {
+          console.log(`[Stack Signal] Image generation failed: ${imgErr.message}`);
         }
-      } catch (imgErr) {
-        console.log(`[Stack Signal] Image generation failed: ${imgErr.message}`);
+      } else {
+        console.log(`[Stack Signal] DALL-E daily cap reached (${imgCount}/${MAX_DAILY_IMAGES}) — skipping synthesis image`);
       }
     } else {
-      console.log(`[Stack Signal] DALL-E daily cap reached (${imgCount}/${MAX_DAILY_IMAGES}) — skipping synthesis image`);
+      // Pool mode: assign existing image
+      imageUrl = await assignExistingImage({ category: 'macro' });
+      if (imageUrl) {
+        console.log('[Stack Signal] Assigned image from pool for daily synthesis');
+      }
     }
 
     // Save as stack signal article
