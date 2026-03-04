@@ -469,6 +469,7 @@ router.post('/breaking-news', async (req, res) => {
     const { data: tokens, error: tokenError } = await supabase
       .from('push_tokens')
       .select('expo_push_token, user_id')
+      .not('user_id', 'is', null)
       .order('last_active', { ascending: false });
 
     if (tokenError || !tokens) {

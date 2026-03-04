@@ -128,6 +128,7 @@ async function checkPriceAlerts() {
         const { data: tokenData, error: tokenErr } = await supabase
           .from('push_tokens')
           .select('expo_push_token')
+          .not('user_id', 'is', null)
           .or(orConditions.join(','))
           .order('last_active', { ascending: false })
           .limit(1)

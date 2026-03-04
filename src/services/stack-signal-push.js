@@ -133,6 +133,7 @@ async function maybePushStackSignalAlert(article) {
     const { data } = await supabase
       .from('push_tokens')
       .select('expo_push_token, user_id')
+      .not('user_id', 'is', null)
       .order('last_active', { ascending: false });
 
     tokens = data;
