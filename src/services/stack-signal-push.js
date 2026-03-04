@@ -3,7 +3,8 @@
  *
  * Sends push notifications for high-scoring Stack Signal articles.
  * Only the HIGHEST-scoring article per cron cycle triggers a push.
- * Daily cap: 3 breaking news pushes total (persisted in app_state).
+ *
+ * Daily cap: 1 push/day (normal), up to 3 for emergency bypass.
  *
  * Troy Score tiers:
  *   85-89  → Market Alert    (paid users only)
@@ -14,7 +15,36 @@
 const supabase = require('../lib/supabase');
 const { sendBatchPush, isValidExpoPushToken } = require('../routes/push');
 
-const MAX_DAILY_PUSHES = 3;
+const DAILY_PUSH_CAP = 1;
+const HARD_CEILING = 3; // Even emergencies can't exceed this
+const EMERGENCY_SCORE_THRESHOLD = 99;
+
+const EMERGENCY_KEYWORDS = [
+  'strait of hormuz closed',
+  'gold standard',
+  'dollar collapse',
+  'comex default',
+  'delivery failure',
+  'bank run',
+  'martial law',
+  'war declared',
+  'nuclear',
+  'mint halts production',
+  'confiscation',
+  'bretton woods',
+  'treasury default',
+  'hyperinflation',
+];
+
+/**
+ * Check if an article qualifies as an emergency (score 99+ AND keyword match).
+ */
+function isEmergency(article) {
+  if ((article.relevance_score || 0) < EMERGENCY_SCORE_THRESHOLD) return false;
+
+  const combined = ((article.title || '') + ' ' + (article.troy_commentary || '')).toLowerCase();
+  return EMERGENCY_KEYWORDS.some(keyword => combined.includes(keyword));
+}
 
 /**
  * Get today's breaking news push count from app_state (persists across restarts).
@@ -28,7 +58,7 @@ async function getBreakingPushCount() {
       .eq('key', 'breaking_push_count')
       .single();
     if (data?.value?.date === today) return data.value.count || 0;
-    return 0; // Different day = reset
+    return 0;
   } catch {
     return 0;
   }
@@ -55,11 +85,21 @@ async function maybePushStackSignalAlert(article) {
   const score = article.relevance_score || 0;
   if (score < 85) return;
 
-  // Check daily cap
+  // Check daily cap with emergency bypass
   const dailyCount = await getBreakingPushCount();
-  if (dailyCount >= MAX_DAILY_PUSHES) {
-    console.log(`[StackSignalPush] Daily cap reached (${dailyCount}/${MAX_DAILY_PUSHES}), skipping: "${article.title?.slice(0, 50)}"`);
+
+  if (dailyCount >= HARD_CEILING) {
+    console.log(`[StackSignalPush] HARD CEILING reached (${dailyCount}/${HARD_CEILING}) — blocking even emergency: "${article.title?.slice(0, 50)}"`);
     return;
+  }
+
+  if (dailyCount >= DAILY_PUSH_CAP) {
+    if (isEmergency(article)) {
+      console.log(`[StackSignalPush] EMERGENCY BYPASS: "${article.title?.slice(0, 50)}" (score: ${score}, daily: ${dailyCount}/${HARD_CEILING})`);
+    } else {
+      console.log(`[StackSignalPush] Daily push cap reached (${dailyCount}/${DAILY_PUSH_CAP}) — skipping: "${article.title?.slice(0, 50)}"`);
+      return;
+    }
   }
 
   // Determine tier
@@ -155,7 +195,7 @@ async function maybePushStackSignalAlert(article) {
     const sent = results.filter(r => r.success).length;
     await incrementBreakingPushCount();
 
-    console.log(`[StackSignalPush] ${tierName} sent to ${sent}/${validTokens.length} users (score: ${score}, daily: ${dailyCount + 1}/${MAX_DAILY_PUSHES}, "${article.title?.slice(0, 50)}")`);
+    console.log(`[StackSignalPush] ${tierName} sent to ${sent}/${validTokens.length} users (score: ${score}, daily: ${dailyCount + 1}/${DAILY_PUSH_CAP}, "${article.title?.slice(0, 50)}")`);
   } catch (pushErr) {
     console.error(`[StackSignalPush] ${tierName} batch push failed: ${pushErr.message}`);
   }
