@@ -606,10 +606,23 @@ async function saveArticles(articles) {
     return 0;
   }
 
+  const validArticles = articles.filter(a => {
+    if (!a.troy_commentary || a.troy_commentary.length < 1000) {
+      console.log(`[Save] Filtered out short article: "${a.title?.substring(0, 50)}" (${a.troy_commentary?.length || 0} chars)`);
+      return false;
+    }
+    return true;
+  });
+
+  if (!validArticles.length) {
+    console.log(`[Save] All ${articles.length} articles filtered out (< 1000 chars)`);
+    return 0;
+  }
+
   const prices = getCachedPrices();
   let saved = 0;
 
-  for (const article of articles) {
+  for (const article of validArticles) {
     try {
       const row = {
         slug: article.slug || generateSlug(article.title),
@@ -641,7 +654,7 @@ async function saveArticles(articles) {
     }
   }
 
-  console.log(`[Save] Saved ${saved}/${articles.length} articles`);
+  console.log(`[Save] Saved ${saved}/${validArticles.length} articles (${articles.length - validArticles.length} filtered out)`);
   return saved;
 }
 
