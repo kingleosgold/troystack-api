@@ -834,8 +834,8 @@ async function runStackSignalPipeline() {
     const { count: commentaryToday, allowed } = await getCommentaryCount();
 
     if (!allowed) {
-      console.log(`[Pipeline] Daily synthesis cap reached: ${commentaryToday}/${DAILY_CAP} (${today}) — skipping writing`);
-      return { articles: rawArticles.length, scored: scoredArticles.length, clusters: clusters.length, synthesized: 0, saved: 0 };
+      console.log(`[Pipeline] Daily synthesis cap reached: ${commentaryToday}/${DAILY_CAP} (${today}) — skipping entire cycle`);
+      return { articles: rawArticles.length, scored: scoredArticles.length, clusters: clusters.length, synthesized: 0, saved: 0, skipped: true };
     }
 
     const remainingSlots = DAILY_CAP - commentaryToday;
