@@ -25,6 +25,7 @@ const minVersionRouter = require('./routes/min-version');
 const troyChatRouter = require('./routes/troy-chat');
 const stackSignalRouter = require('./routes/stack-signal');
 const socialRouter = require('./routes/social');
+const dealerPricesRouter = require('./routes/dealerPrices');
 
 const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase, areMarketsClosed } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
@@ -152,6 +153,9 @@ app.use('/v1/stack-signal', publicLimiter, stackSignalRouter);
 // Social features — views, likes, comments on Stack Signal articles
 app.use('/v1/stack-signal', publicLimiter, socialRouter);
 
+// Dealer price comparison
+app.use('/v1/dealer-prices', publicLimiter, dealerPricesRouter);
+
 // ============================================================
 // HEALTH + API ROOT
 // ============================================================
@@ -209,6 +213,11 @@ app.get('/', (req, res) => {
         'GET /v1/stack-signal/articles/:id/likes': 'Get like count + user_liked',
         'POST /v1/stack-signal/articles/:id/comments': 'Post comment (userId required)',
         'GET /v1/stack-signal/articles/:id/comments': 'List comments',
+      },
+      dealer_prices: {
+        'GET /v1/dealer-prices?metal=&weight=': 'Compare dealer prices for a product',
+        'GET /v1/dealer-prices/products': 'List tracked products',
+        'POST /v1/dealer-prices/click': 'Log affiliate click',
       },
       llm: {
         'GET /llms.txt': 'LLM-readable app description',
@@ -453,6 +462,42 @@ app.listen(PORT, () => {
     }
   }, { timezone: 'UTC' });
   console.log('📰 [Stack Signal Daily] Scheduled: daily at 6:15 AM EST (11:15 UTC)');
+
+  // ── Dealer price scraping: every hour at :05 ──
+  cron.schedule('5 * * * *', async () => {
+    console.log(`\n[DealerScraper Cron] Starting hourly scrape at ${new Date().toISOString()}`);
+    try {
+      const { getCachedPrices } = require('./services/price-fetcher');
+      const { scrapeAllDealers } = require('./services/dealerScraper');
+      const supabase = require('./lib/supabase');
+
+      const cached = getCachedPrices();
+      const spotPrices = {
+        gold: cached?.gold || null,
+        silver: cached?.silver || null,
+      };
+
+      const results = await scrapeAllDealers(spotPrices);
+
+      if (results.length === 0) {
+        console.log('[DealerScraper Cron] No results scraped — skipping insert');
+        return;
+      }
+
+      const { error } = await supabase
+        .from('dealer_prices')
+        .insert(results);
+
+      if (error) {
+        console.error('[DealerScraper Cron] Supabase insert error:', error.message);
+      } else {
+        console.log(`[DealerScraper Cron] Saved ${results.length} prices`);
+      }
+    } catch (err) {
+      console.error('[DealerScraper Cron] Failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('[DealerScraper Cron] Scheduled: every hour at :05');
 
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 });
