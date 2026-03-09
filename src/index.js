@@ -351,7 +351,7 @@ app.listen(PORT, () => {
                           return firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence;
                         })();
                     await sendPush(tokenData.expo_push_token, {
-                      title: 'Troy\'s Morning Brief',
+                      title: '☀️ Your daily brief from Troy is ready',
                       body: pushBody,
                       data: { type: 'morning_brief', screen: 'DailyBrief' },
                       sound: 'default',
