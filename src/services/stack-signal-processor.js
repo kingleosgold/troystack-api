@@ -640,6 +640,36 @@ async function saveArticles(articles) {
         published_at: new Date().toISOString(),
       };
 
+      // Safety net: assign image from pool if missing
+      if (!row.image_url) {
+        try {
+          // Try category match first
+          let { data: poolImages } = await supabase
+            .from('stack_signal_articles')
+            .select('image_url')
+            .eq('category', row.category)
+            .not('image_url', 'is', null)
+            .limit(50);
+
+          // Fallback to any category if no match
+          if (!poolImages || poolImages.length === 0) {
+            const fallback = await supabase
+              .from('stack_signal_articles')
+              .select('image_url')
+              .not('image_url', 'is', null)
+              .limit(50);
+            poolImages = fallback.data;
+          }
+
+          if (poolImages && poolImages.length > 0) {
+            row.image_url = poolImages[Math.floor(Math.random() * poolImages.length)].image_url;
+            console.log(`[SaveArticles] Assigned fallback pool image (${row.category}) to: ${row.slug}`);
+          }
+        } catch (err) {
+          console.error('[SaveArticles] Fallback image assignment failed:', err.message);
+        }
+      }
+
       const { error } = await supabase
         .from('stack_signal_articles')
         .upsert(row, { onConflict: 'slug' });
@@ -759,6 +789,33 @@ Return ONLY valid JSON.`;
       imageUrl = await assignExistingImage({ category: 'macro' });
       if (imageUrl) {
         console.log('[Stack Signal] Assigned image from pool for daily synthesis');
+      }
+    }
+
+    if (!imageUrl) {
+      try {
+        let { data: poolImages } = await supabase
+          .from('stack_signal_articles')
+          .select('image_url')
+          .eq('category', 'macro')
+          .not('image_url', 'is', null)
+          .limit(50);
+
+        if (!poolImages || poolImages.length === 0) {
+          const fallback = await supabase
+            .from('stack_signal_articles')
+            .select('image_url')
+            .not('image_url', 'is', null)
+            .limit(50);
+          poolImages = fallback.data;
+        }
+
+        if (poolImages && poolImages.length > 0) {
+          imageUrl = poolImages[Math.floor(Math.random() * poolImages.length)].image_url;
+          console.log('[Stack Signal] Assigned fallback pool image to daily digest');
+        }
+      } catch (err) {
+        console.error('[Stack Signal] Fallback image failed:', err.message);
       }
     }
 
