@@ -82,6 +82,9 @@ async function incrementBreakingPushCount() {
  * @param {Object} article - Needs: title, relevance_score, troy_one_liner, troy_commentary, slug
  */
 async function maybePushStackSignalAlert(article) {
+  console.log('[Stack Signal Push] Push notifications disabled — content available in-app only');
+  return;
+
   const score = article.relevance_score || 0;
   if (score < 85) return;
 

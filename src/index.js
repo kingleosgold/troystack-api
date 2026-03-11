@@ -312,6 +312,18 @@ app.listen(PORT, () => {
 
         for (const user of goldUsers) {
           try {
+            const { data: existingBrief } = await supabase
+              .from('daily_briefs')
+              .select('id')
+              .eq('user_id', user.id)
+              .eq('date', new Date().toISOString().split('T')[0])
+              .limit(1);
+
+            if (existingBrief && existingBrief.length > 0) {
+              console.log(`⏭️ [Daily Brief] Skipping ${user.id} — brief already exists for today`);
+              continue;
+            }
+
             const result = await generateDailyBrief(user.id);
             try { await generatePortfolioIntelligence(user.id); } catch (piErr) { console.log(`🧠 [Portfolio Intelligence Cron] Skipped for ${user.id}: ${piErr.message}`); }
             success++;
