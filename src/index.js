@@ -312,15 +312,14 @@ app.listen(PORT, () => {
 
         for (const user of goldUsers) {
           try {
-            const { data: existingBrief } = await supabase
-              .from('daily_briefs')
-              .select('id')
-              .eq('user_id', user.id)
-              .eq('date', new Date().toISOString().split('T')[0])
-              .limit(1);
+            // Atomic lock: INSERT fails on unique constraint if another instance already claimed this user+day
+            const lockKey = `daily_brief_lock_${user.id}_${new Date().toISOString().split('T')[0]}`;
+            const { error: lockError } = await supabase
+              .from('app_state')
+              .insert({ key: lockKey, value: JSON.stringify({ locked_at: new Date().toISOString() }) });
 
-            if (existingBrief && existingBrief.length > 0) {
-              console.log(`⏭️ [Daily Brief] Skipping ${user.id} — brief already exists for today`);
+            if (lockError) {
+              console.log(`⏭️ [Daily Brief] Lock claim failed for ${user.id} — another instance won. Skipping.`);
               continue;
             }
 

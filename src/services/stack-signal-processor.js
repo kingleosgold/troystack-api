@@ -25,7 +25,7 @@ function cleanJsonResponse(text) {
   return JSON.parse(cleaned);
 }
 
-const DAILY_CAP = 5;
+const DAILY_CAP = 8;
 const MAX_DAILY_IMAGES = 3;
 
 /**
@@ -640,7 +640,7 @@ async function saveArticles(articles) {
   }
 
   const validArticles = articles.filter(a => {
-    if (!a.troy_commentary || a.troy_commentary.length < 1000) {
+    if (!a.troy_commentary || a.troy_commentary.length < 500) {
       console.log(`[Save] Filtered out short article: "${a.title?.substring(0, 50)}" (${a.troy_commentary?.length || 0} chars)`);
       return false;
     }
@@ -648,7 +648,7 @@ async function saveArticles(articles) {
   });
 
   if (!validArticles.length) {
-    console.log(`[Save] All ${articles.length} articles filtered out (< 1000 chars)`);
+    console.log(`[Save] All ${articles.length} articles filtered out (< 500 chars)`);
     return 0;
   }
 
@@ -960,7 +960,7 @@ async function runStackSignalPipeline() {
       const cluster = clustersToWrite[i];
       console.log(`[Synthesis] Writing article ${i + 1}/${clustersToWrite.length}: "${cluster.theme.slice(0, 50)}" (${cluster.articles.length} sources, importance: ${cluster.importance})`);
 
-      const articleText = await writeSynthesisArticle(cluster, prices);
+      const articleText = await writeFeedReaction(cluster, prices);
       if (!articleText) {
         console.log(`[Synthesis] Skipped: "${cluster.theme.slice(0, 50)}" — no output from Claude`);
         continue;
