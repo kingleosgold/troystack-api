@@ -674,6 +674,7 @@ async function saveArticles(articles) {
       };
 
       // Safety net: assign image from pool if missing
+      console.log(`[SaveArticles] Checking image for ${row.slug}: image_url = ${row.image_url ? 'present' : 'NULL'}`);
       if (!row.image_url) {
         try {
           // Try category match first
@@ -684,6 +685,7 @@ async function saveArticles(articles) {
             .not('image_url', 'is', null)
             .limit(50);
 
+          console.log(`[SaveArticles] Pool query returned ${poolImages?.length || 0} images for category ${row.category}`);
           // Fallback to any category if no match
           if (!poolImages || poolImages.length === 0) {
             const fallback = await supabase
