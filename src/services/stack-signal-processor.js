@@ -729,8 +729,8 @@ async function saveArticles(articles) {
  * Generate the daily "Stack Signal" synthesis narrative.
  * Pulls last 24h synthesis articles and writes a comprehensive daily digest.
  */
-async function generateStackSignal() {
-  console.log('\n[Stack Signal] Generating daily synthesis...');
+async function generateStackSignal(timeOfDay = 'morning') {
+  console.log(`\n[Stack Signal] Generating ${timeOfDay} synthesis...`);
 
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
@@ -777,7 +777,15 @@ The one_liner is the headline summary (max 20 words).
 Return ONLY valid JSON.`;
 
   const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
-  const userMessage = `Write today's Stack Signal for ${today}.\n\nToday's articles (${recentArticles.length}):\n\n${articleSummaries}`;
+  const preambleMap = {
+    evening: 'This is the EVENING post-market-close edition. Focus on: how the trading day played out, notable price action and volume, what moved markets today, and what to watch overnight. Frame this as a market close recap, not a morning preview.',
+    weekly_recap: 'This is the FRIDAY WEEKLY RECAP. Summarize the entire week in precious metals: key price moves day by day, biggest stories, COMEX activity, and what shifted for stackers this week. End with what to watch next week.',
+    weekly_preview: 'This is the MONDAY WEEKLY PREVIEW. Look ahead at the week: scheduled economic data releases, Fed speakers, geopolitical developments, and technical levels to watch for gold and silver. Frame this as what stackers should have on their radar this week.',
+    monthly_recap: 'This is the MONTH-END REVIEW. Summarize the entire month in precious metals: opening vs closing prices, percentage changes, biggest stories and themes, COMEX trends, central bank activity, and how the month shaped up for stackers. Provide monthly context — was this a good month to stack?',
+    yearly_recap: 'This is the YEAR-END REVIEW. Summarize the entire year in precious metals: January opening vs December closing prices for gold, silver, platinum, and palladium. Percentage changes for the year. The biggest stories, themes, and turning points. COMEX trends across the year. Central bank buying patterns. How the gold-silver ratio evolved. What stackers who bought consistently this year gained. Frame this as the definitive year-end retrospective for precious metals stackers.'
+  };
+  const preamble = preambleMap[timeOfDay] || '';
+  const userMessage = `${preamble ? preamble + '\n\n' : ''}Write today's Stack Signal for ${today}.\n\nToday's articles (${recentArticles.length}):\n\n${articleSummaries}`;
 
   try {
     const raw = await callClaude(systemPrompt, userMessage, { maxTokens: 2048 });
@@ -853,10 +861,28 @@ Return ONLY valid JSON.`;
     }
 
     // Save as stack signal article
-    const slug = `the-stack-signal-${new Date().toISOString().split('T')[0]}`;
+    const dateStr = new Date().toISOString().split('T')[0];
+    const titleMap = {
+      morning: 'The Stack Signal',
+      evening: 'Evening Signal',
+      weekly_recap: 'Weekly Recap',
+      weekly_preview: 'The Week Ahead',
+      monthly_recap: 'Monthly Review',
+      yearly_recap: 'Year in Review'
+    };
+    const titlePrefix = titleMap[timeOfDay] || 'The Stack Signal';
+    const slugPrefixMap = {
+      morning: 'the-stack-signal',
+      evening: 'evening-signal',
+      weekly_recap: 'weekly-recap',
+      weekly_preview: 'week-ahead',
+      monthly_recap: 'monthly-review',
+      yearly_recap: 'year-in-review'
+    };
+    const slug = `${slugPrefixMap[timeOfDay] || 'the-stack-signal'}-${dateStr}`;
     const row = {
       slug,
-      title: parsed.title || `The Stack Signal — ${today}`,
+      title: parsed.title || `${titlePrefix} — ${today}`,
       troy_commentary: parsed.commentary || '',
       troy_one_liner: parsed.one_liner || '',
       category: 'macro',

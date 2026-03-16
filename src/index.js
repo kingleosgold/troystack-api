@@ -474,6 +474,70 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('📰 [Stack Signal Daily] Scheduled: daily at 6:15 AM EST (11:15 UTC)');
 
+  // ── Evening Stack Signal — post market close (4:30 PM EST / 21:30 UTC) ──
+  cron.schedule('30 21 * * 1-5', async () => {
+    console.log('⚡ [Stack Signal] Running evening post-close digest...');
+    try {
+      const { generateStackSignal } = require('./services/stack-signal-processor');
+      await generateStackSignal('evening');
+    } catch (err) {
+      console.error('[Stack Signal] Evening digest failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('⚡ [Stack Signal Evening] Scheduled: weekdays at 4:30 PM EST (21:30 UTC)');
+
+  // Friday Weekly Recap — 5:00 PM EST / 22:00 UTC on Fridays
+  cron.schedule('0 22 * * 5', async () => {
+    console.log('⚡ [Stack Signal] Running Friday weekly recap...');
+    try {
+      const { generateStackSignal } = require('./services/stack-signal-processor');
+      await generateStackSignal('weekly_recap');
+    } catch (err) {
+      console.error('[Stack Signal] Weekly recap failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('⚡ [Stack Signal Weekly Recap] Scheduled: Fridays at 5:00 PM EST (22:00 UTC)');
+
+  // Monday Weekly Preview — 6:15 AM EST / 11:15 UTC on Mondays
+  cron.schedule('15 11 * * 1', async () => {
+    console.log('⚡ [Stack Signal] Running Monday weekly preview...');
+    try {
+      const { generateStackSignal } = require('./services/stack-signal-processor');
+      await generateStackSignal('weekly_preview');
+    } catch (err) {
+      console.error('[Stack Signal] Weekly preview failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('⚡ [Stack Signal Weekly Preview] Scheduled: Mondays at 6:15 AM EST (11:15 UTC)');
+
+  // Month-End Review — 5:00 PM EST / 22:00 UTC on last business day of month
+  // Runs on 28th-31st, checks if tomorrow is a new month
+  cron.schedule('0 22 28-31 * *', async () => {
+    const tomorrow = new Date();
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    if (tomorrow.getUTCDate() !== 1) return; // Not last day of month
+    console.log('⚡ [Stack Signal] Running month-end review...');
+    try {
+      const { generateStackSignal } = require('./services/stack-signal-processor');
+      await generateStackSignal('monthly_recap');
+    } catch (err) {
+      console.error('[Stack Signal] Monthly recap failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('⚡ [Stack Signal Monthly Recap] Scheduled: last day of month at 5:00 PM EST (22:00 UTC)');
+
+  // Year-End Review — 10:00 AM EST / 15:00 UTC on January 1
+  cron.schedule('0 15 1 1 *', async () => {
+    console.log('⚡ [Stack Signal] Running year-in-review...');
+    try {
+      const { generateStackSignal } = require('./services/stack-signal-processor');
+      await generateStackSignal('yearly_recap');
+    } catch (err) {
+      console.error('[Stack Signal] Year-end review failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('⚡ [Stack Signal Year-End Review] Scheduled: January 1 at 10:00 AM EST (15:00 UTC)');
+
   // ── Dealer price scraping: every hour at :05 ──
   cron.schedule('5 * * * *', async () => {
     console.log(`\n[DealerScraper Cron] Starting hourly scrape at ${new Date().toISOString()}`);
