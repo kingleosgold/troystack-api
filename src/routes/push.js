@@ -35,8 +35,10 @@ async function sendPush(token, notification) {
     }];
 
     const chunks = expo.chunkPushNotifications(messages);
+    console.log(`[Push Debug] Sending ${messages.length} messages in ${chunks.length} chunks`);
     for (const chunk of chunks) {
-      await expo.sendPushNotificationsAsync(chunk);
+      const tickets = await expo.sendPushNotificationsAsync(chunk);
+      console.log(`[Push Debug] Tickets:`, JSON.stringify(tickets));
     }
     return { success: true };
   } catch (error) {
