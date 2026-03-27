@@ -192,6 +192,9 @@ function formatOz(oz) {
  * Checks notification_preferences: comex_alerts must be true AND comex_{metal} must be true.
  */
 async function sendComexAlerts(triggeredAlerts) {
+  console.log('[COMEX Scraper] Push notifications disabled — vault data available in-app only');
+  return 0;
+
   if (triggeredAlerts.length === 0) return 0;
 
   let totalSent = 0;

@@ -273,8 +273,18 @@ app.listen(PORT, () => {
     // ── Daily Brief cron: 6:35 AM EST (11:35 UTC) ──
     cron.schedule('35 11 * * *', async () => {
       console.log(`\n📝 [Daily Brief Cron] Triggered at ${new Date().toISOString()}`);
+      const supabase = require('./lib/supabase');
+      // Log cron fire count to prove how many times this executes per day
+      const cronFireKey = `daily_brief_cron_fire_${new Date().toISOString().split('T')[0]}`;
       try {
-        const supabase = require('./lib/supabase');
+        const { data: existingFire } = await supabase.from('app_state').select('value').eq('key', cronFireKey).single();
+        const fireCount = existingFire ? (JSON.parse(existingFire.value).count || 0) + 1 : 1;
+        await supabase.from('app_state').upsert({ key: cronFireKey, value: JSON.stringify({ count: fireCount, last_fired: new Date().toISOString() }) });
+        console.log(`📝 [Daily Brief Cron] Fire count today: ${fireCount}`);
+      } catch (fireErr) {
+        console.log(`📝 [Daily Brief Cron] Fire count tracking failed: ${fireErr.message}`);
+      }
+      try {
         const { generateDailyBrief, generatePortfolioIntelligence } = require('./routes/intelligence');
         const { sendPush, isValidExpoPushToken } = require('./routes/push');
 
@@ -286,23 +296,6 @@ app.listen(PORT, () => {
         if (error || !goldUsers) {
           console.error('📝 [Daily Brief Cron] Failed to fetch Gold users:', error?.message);
           return;
-        }
-
-        // Fetch today's Stack Signal synthesis for push notification body
-        let synthesis = null;
-        try {
-          const { data: synthData } = await supabase
-            .from('stack_signal_articles')
-            .select('troy_one_liner')
-            .eq('is_stack_signal', true)
-            .gte('published_at', new Date(Date.now() - 3600000).toISOString())
-            .order('published_at', { ascending: false })
-            .limit(1)
-            .single();
-          synthesis = synthData;
-          console.log(`📝 [Daily Brief Cron] Synthesis found: ${synthesis?.troy_one_liner?.slice(0, 60) || 'none'}...`);
-        } catch (synthErr) {
-          console.log(`📝 [Daily Brief Cron] No synthesis available: ${synthErr.message}`);
         }
 
         console.log(`📝 [Daily Brief Cron] Generating briefs for ${goldUsers.length} Gold/Lifetime users`);
@@ -328,55 +321,56 @@ app.listen(PORT, () => {
             success++;
             console.log(`📝 [Daily Brief Cron] ✅ ${success}/${goldUsers.length} — user ${user.id}`);
 
-            // Send push notification
-            if (result && result.brief && result.brief.brief_text) {
-              try {
-                const { data: notifRows } = await supabase
-                  .from('notification_preferences')
-                  .select('morning_brief')
+            // ── Clean daily brief push (Phase 2 rebuild) ──
+            try {
+              const { data: notifRow } = await supabase
+                .from('notification_preferences')
+                .select('daily_brief')
+                .eq('user_id', user.id)
+                .limit(1)
+                .single();
+
+              // Default to enabled if no preference row exists
+              if (notifRow && notifRow.daily_brief === false) {
+                console.log(`📝 [Daily Brief Push] Skipped ${user.id}: daily_brief disabled`);
+              } else {
+                const { data: tokenRow } = await supabase
+                  .from('push_tokens')
+                  .select('expo_push_token')
                   .eq('user_id', user.id)
-                  .limit(1);
-                // Default to opted-in: only skip if user explicitly set morning_brief = false
-                const briefEnabled = !notifRows?.[0] || notifRows[0].morning_brief !== false;
+                  .order('last_active', { ascending: false })
+                  .limit(1)
+                  .single();
 
-                if (!briefEnabled) {
-                  console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: morning_brief preference disabled`);
+                if (!tokenRow || !isValidExpoPushToken(tokenRow.expo_push_token)) {
+                  console.log(`📝 [Daily Brief Push] Skipped ${user.id}: no valid token`);
                 } else {
-                  const { data: tokenData } = await supabase
-                    .from('push_tokens')
-                    .select('expo_push_token')
-                    .eq('user_id', user.id)
-                    .order('last_active', { ascending: false })
-                    .limit(1)
-                    .single();
+                  // Dedup: one push per user per day, no exceptions
+                  const pushLockKey = `daily_push_${user.id}_${new Date().toISOString().split('T')[0]}`;
+                  const { error: pushLockErr } = await supabase
+                    .from('app_state')
+                    .insert({ key: pushLockKey, value: JSON.stringify({ sent_at: new Date().toISOString() }) });
 
-                  if (!tokenData) {
-                    console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: no push token registered`);
-                  } else if (!isValidExpoPushToken(tokenData.expo_push_token)) {
-                    console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: invalid token ${tokenData.expo_push_token}`);
+                  if (pushLockErr) {
+                    console.log(`📝 [Daily Brief Push] Skipped ${user.id}: already sent today`);
                   } else {
-                    const pushBody = synthesis?.troy_one_liner
-                      ? synthesis.troy_one_liner.slice(0, 120)
-                      : (() => {
-                          const firstSentence = result.brief.brief_text.split(/[.!]\s/)[0];
-                          return firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence;
-                        })();
-                    await sendPush(tokenData.expo_push_token, {
+                    // Body: first sentence of the brief. Nothing else. No fallbacks. No synthesis.
+                    const firstSentence = result.brief.brief_text.split(/[.!]\s/)[0];
+                    const body = firstSentence.length > 120 ? firstSentence.slice(0, 117) + '...' : firstSentence + '.';
+
+                    await sendPush(tokenRow.expo_push_token, {
                       title: '☀️ Your daily brief from Troy is ready',
-                      body: pushBody,
-                      data: { type: 'morning_brief', screen: 'DailyBrief' },
+                      body: body,
+                      data: { type: 'daily_brief', screen: 'DailyBrief' },
                       sound: 'default',
-                      badge: 1,
                     });
                     pushSent++;
-                    console.log(`📝 [Daily Brief Cron] Push sent to ${user.id}: ${tokenData.expo_push_token}`);
+                    console.log(`📝 [Daily Brief Push] ✅ Sent to ${user.id}`);
                   }
                 }
-              } catch (pushErr) {
-                console.log(`📝 [Daily Brief Cron] Push error for ${user.id}: ${pushErr.message}`);
               }
-            } else {
-              console.log(`📝 [Daily Brief Cron] Push skipped for ${user.id}: no brief text generated`);
+            } catch (pushErr) {
+              console.error(`📝 [Daily Brief Push] Error for ${user.id}:`, pushErr.message);
             }
           } catch (err) {
             failed++;
