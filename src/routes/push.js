@@ -39,6 +39,12 @@ async function sendPush(token, notification) {
     for (const chunk of chunks) {
       const tickets = await expo.sendPushNotificationsAsync(chunk);
       console.log(`[Push Debug] Tickets:`, JSON.stringify(tickets));
+      for (const ticket of tickets) {
+        if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
+          console.log(`[Push] Token ${token} is DeviceNotRegistered — deleting from push_tokens`);
+          await supabase.from('push_tokens').delete().eq('expo_push_token', token);
+        }
+      }
     }
     return { success: true };
   } catch (error) {
@@ -68,6 +74,13 @@ async function sendBatchPush(tokens, notification) {
   for (const chunk of chunks) {
     try {
       const tickets = await expo.sendPushNotificationsAsync(chunk);
+      for (let i = 0; i < tickets.length; i++) {
+        if (tickets[i].status === 'error' && tickets[i].details?.error === 'DeviceNotRegistered') {
+          const deadToken = chunk[i].to;
+          console.log(`[Push] Token ${deadToken} is DeviceNotRegistered — deleting from push_tokens`);
+          await supabase.from('push_tokens').delete().eq('expo_push_token', deadToken);
+        }
+      }
       results.push(...tickets.map(t => ({ success: t.status === 'ok' })));
     } catch (error) {
       console.error('Batch push error:', error.message);
