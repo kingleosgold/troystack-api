@@ -600,10 +600,10 @@ async function generateArticleImages(articles) {
     return generateDalleImages(articles);
   }
 
-  // Pool mode: assign existing images to ALL articles with commentary
-  const eligible = articles.filter(a => a.troy_commentary);
+  // Pool mode: assign existing images to ALL articles missing an image
+  const eligible = articles.filter(a => !a.image_url);
   if (!eligible.length) {
-    console.log('[Images] No articles with commentary to assign images');
+    console.log('[Images] All articles already have images');
     return articles;
   }
 
