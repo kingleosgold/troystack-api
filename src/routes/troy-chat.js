@@ -31,6 +31,57 @@ function generateTitle(message) {
 }
 
 // ============================================
+// PREVIEW DETECTION
+// ============================================
+
+function detectPreviewContent(troyResponse, contextData) {
+  const response = troyResponse.toLowerCase();
+
+  if (contextData.holdings && contextData.holdings.length > 0 && (
+    response.includes('your stack') ||
+    response.includes('portfolio') ||
+    response.includes('your gold') ||
+    response.includes('your silver') ||
+    response.includes('holdings') ||
+    response.includes('overall gain') ||
+    response.includes('performance') ||
+    response.includes('total value')
+  )) {
+    return { type: 'portfolio', data: { holdings: contextData.holdings, totalValue: contextData.totalValue, totalGain: contextData.totalGain, totalGainPercent: contextData.totalGainPercent } };
+  }
+
+  if (response.includes('purchasing power') ||
+      response.includes('barrels of oil') ||
+      response.includes('real terms') ||
+      response.includes('gallons of gas') ||
+      response.includes('hours of labor') ||
+      response.includes('buying power')) {
+    return { type: 'purchasing_power', data: contextData.purchasingPower };
+  }
+
+  if (response.includes('cost basis') ||
+      response.includes('average cost') ||
+      response.includes('break even')) {
+    return { type: 'cost_basis', data: { holdings: contextData.holdings } };
+  }
+
+  if (response.includes('gold/silver ratio') ||
+      response.includes('gold silver ratio') ||
+      response.includes('the ratio')) {
+    return { type: 'chart', chartType: 'ratio', data: { ratio: contextData.goldSilverRatio } };
+  }
+
+  if (response.includes('gold price') ||
+      response.includes('silver price') ||
+      response.includes('spot price') ||
+      response.includes('price action')) {
+    return { type: 'chart', chartType: 'spot_price', data: { goldPrice: contextData.goldPrice, silverPrice: contextData.silverPrice } };
+  }
+
+  return null;
+}
+
+// ============================================
 // QUOTA HELPERS (follows scan-usage.js pattern)
 // ============================================
 
@@ -411,6 +462,24 @@ router.post('/conversations/:id/messages', async (req, res) => {
     const totalCost = Object.keys(metalTotals).reduce((sum, m) => sum + metalTotals[m].cost, 0);
     const gsRatio = prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1) : 'N/A';
 
+    const contextData = {
+      holdings: holdingDetails,
+      totalValue,
+      totalCost,
+      totalGain: totalValue - totalCost,
+      totalGainPercent: totalCost > 0 ? ((totalValue - totalCost) / totalCost * 100).toFixed(1) : '0',
+      goldPrice: prices.gold,
+      silverPrice: prices.silver,
+      goldSilverRatio: prices.silver > 0 ? prices.gold / prices.silver : null,
+      purchasingPower: {
+        goldPerBarrelOfOil: prices.gold / 85,
+        silverPerGallonOfGas: prices.silver / 3.50,
+        stackBarrelsOfOil: totalValue / 85,
+        stackMonthsOfRent: totalValue / 1850,
+        stackHoursOfLabor: totalValue / 29,
+      },
+    };
+
     const holdingsText = holdingDetails.length > 0
       ? holdingDetails.map(h =>
         `- ${h.qty}x ${h.type} (${h.metal}): ${h.totalOz} oz, Cost $${h.totalCost}, Value $${h.currentValue}, ${parseFloat(h.gainLoss) >= 0 ? '+' : ''}$${h.gainLoss} (${h.gainLossPct}%), Purchased ${h.purchaseDate}`
@@ -653,11 +722,13 @@ These facts make the case for silver without you having to hype it. Let the data
     // --- Increment quota (only after successful response) ---
     await incrementQuota(userId);
 
-    console.log(`[Troy Chat] Response for user ${userId}, conv ${id}: ${responseText.length} chars`);
+    const preview = detectPreviewContent(responseText, contextData);
+    console.log(`[Troy Chat] Response for user ${userId}, conv ${id}: ${responseText.length} chars, preview: ${preview?.type || 'none'}`);
 
     res.json({
       message: assistantMsg,
       title,
+      preview,
     });
 
   } catch (error) {
