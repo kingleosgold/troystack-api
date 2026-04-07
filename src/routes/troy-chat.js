@@ -750,6 +750,7 @@ These facts make the case for silver without you having to hype it. Let the data
 // Proxies text to ElevenLabs, streams audio/mpeg back
 // ============================================
 router.post('/speak', async (req, res) => {
+  console.log('🔊 [TTS] Endpoint hit');
   try {
     const { userId, text } = req.body;
 
