@@ -746,6 +746,42 @@ These facts make the case for silver without you having to hype it. Let the data
 });
 
 // ============================================
+// TTS HELPERS
+// ============================================
+
+function sanitizeTTSText(text) {
+  let clean = text;
+
+  // Remove markdown formatting
+  clean = clean.replace(/\*\*/g, '');
+  clean = clean.replace(/\*/g, '');
+  clean = clean.replace(/_/g, '');
+
+  // Replace abbreviations
+  clean = clean.replace(/\boz\b/gi, 'ounces');
+  clean = clean.replace(/\bpt\b/gi, 'platinum');
+  clean = clean.replace(/\bpd\b/gi, 'palladium');
+  clean = clean.replace(/\bASE\b/g, 'American Silver Eagle');
+  clean = clean.replace(/\bAGE\b/g, 'American Gold Eagle');
+
+  // Format dollar amounts — remove commas so TTS reads naturally
+  clean = clean.replace(/\$([0-9]{1,3}),([0-9]{3}),([0-9]{3})/g, '$$$1$2$3'); // millions
+  clean = clean.replace(/\$([0-9]{1,3}),([0-9]{3})/g, '$$$1$2'); // thousands
+
+  // Percentages — add space before % so it reads "percent"
+  clean = clean.replace(/(\d)%/g, '$1 percent');
+
+  // Fractions and ratios
+  clean = clean.replace(/(\d+):(\d+)/g, '$1 to $2');
+
+  // Remove bullet points and special characters
+  clean = clean.replace(/[•·→←▲▼■]/g, '');
+  clean = clean.replace(/\n{3,}/g, '\n\n');
+
+  return clean.trim();
+}
+
+// ============================================
 // TTS — POST /v1/troy/speak
 // Proxies text to ElevenLabs, streams audio/mpeg back
 // ============================================
@@ -796,7 +832,8 @@ router.post('/speak', async (req, res) => {
       return res.status(503).json({ error: 'TTS service not configured' });
     }
 
-    console.log('🔊 [TTS] Calling ElevenLabs, voice:', ELEVENLABS_VOICE_ID, 'text length:', text.length);
+    const cleanText = sanitizeTTSText(text);
+    console.log('🔊 [TTS] Calling ElevenLabs, voice:', ELEVENLABS_VOICE_ID, 'text length:', cleanText.length);
 
     const ttsResponse = await axios({
       method: 'POST',
@@ -807,7 +844,7 @@ router.post('/speak', async (req, res) => {
         'Accept': 'audio/mpeg',
       },
       data: {
-        text: text.trim(),
+        text: cleanText,
         model_id: 'eleven_turbo_v2_5',
       },
       responseType: 'stream',
