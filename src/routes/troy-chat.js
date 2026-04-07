@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+const converter = require('number-to-words');
 const supabase = require('../lib/supabase');
 const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
 
@@ -764,12 +765,29 @@ function sanitizeTTSText(text) {
   clean = clean.replace(/\bASE\b/g, 'American Silver Eagle');
   clean = clean.replace(/\bAGE\b/g, 'American Gold Eagle');
 
-  // Format dollar amounts — remove commas so TTS reads naturally
-  clean = clean.replace(/\$([0-9]{1,3}),([0-9]{3}),([0-9]{3})/g, '$$$1$2$3'); // millions
-  clean = clean.replace(/\$([0-9]{1,3}),([0-9]{3})/g, '$$$1$2'); // thousands
+  // Convert dollar amounts to spoken English: $4,657.59 → "four thousand six hundred fifty-seven dollars and fifty-nine cents"
+  clean = clean.replace(/\$([0-9,]+(?:\.[0-9]{1,2})?)/g, (match, num) => {
+    const n = parseFloat(num.replace(/,/g, ''));
+    const dollars = Math.floor(n);
+    const cents = Math.round((n - dollars) * 100);
+    let result = converter.toWords(dollars) + ' dollars';
+    if (cents > 0) result += ' and ' + converter.toWords(cents) + ' cents';
+    return result;
+  });
+
+  // Convert plain large numbers with commas: 6,096 → "six thousand ninety-six"
+  clean = clean.replace(/\b([0-9]{1,3}(?:,[0-9]{3})+)\b/g, (match) => {
+    return converter.toWords(parseInt(match.replace(/,/g, '')));
+  });
 
   // Percentages — add space before % so it reads "percent"
   clean = clean.replace(/(\d)%/g, '$1 percent');
+
+  // Convert decimal percentages: "122.7 percent" → "one hundred twenty-two point seven percent"
+  clean = clean.replace(/([0-9]+\.[0-9]+)\s*percent/g, (match, num) => {
+    const parts = num.split('.');
+    return converter.toWords(parseInt(parts[0])) + ' point ' + parts[1].split('').map(d => converter.toWords(parseInt(d))).join(' ') + ' percent';
+  });
 
   // Fractions and ratios
   clean = clean.replace(/(\d+):(\d+)/g, '$1 to $2');
