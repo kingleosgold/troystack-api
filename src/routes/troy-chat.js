@@ -1,8 +1,11 @@
 const express = require('express');
 const axios = require('axios');
 const converter = require('number-to-words');
+const multer = require('multer');
 const supabase = require('../lib/supabase');
 const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const router = express.Router();
 
@@ -765,6 +768,10 @@ function sanitizeTTSText(text) {
   clean = clean.replace(/\bASE\b/g, 'American Silver Eagle');
   clean = clean.replace(/\bAGE\b/g, 'American Gold Eagle');
 
+  // Strip .00 decimals (10.00 → 10)
+  clean = clean.replace(/(\d+)\.00\b/g, '$1');
+  clean = clean.replace(/(\d+\.\d)0\b/g, '$1');
+
   // Convert dollar amounts to spoken English: $4,657.59 → "four thousand six hundred fifty-seven dollars and fifty-nine cents"
   clean = clean.replace(/\$([0-9,]+(?:\.[0-9]{1,2})?)/g, (match, num) => {
     const n = parseFloat(num.replace(/,/g, ''));
@@ -778,6 +785,15 @@ function sanitizeTTSText(text) {
   // Convert plain large numbers with commas: 6,096 → "six thousand ninety-six"
   clean = clean.replace(/\b([0-9]{1,3}(?:,[0-9]{3})+)\b/g, (match) => {
     return converter.toWords(parseInt(match.replace(/,/g, '')));
+  });
+
+  // Catch plain large numbers without commas (4+ digits): 4657 → "four thousand six hundred fifty-seven"
+  clean = clean.replace(/\b(\d{4,})\b/g, (match) => {
+    const n = parseInt(match);
+    if (n > 999 && n < 1000000000) {
+      return converter.toWords(n);
+    }
+    return match;
   });
 
   // Percentages — add space before % so it reads "percent"
@@ -842,6 +858,22 @@ router.post('/speak', async (req, res) => {
     }
     console.log('🔊 [TTS] Passed tier gate');
 
+    // Voice usage cap (shared with /transcribe)
+    const today = new Date().toISOString().split('T')[0];
+    const tier = profile.subscription_tier;
+    const dailyLimit = (tier === 'gold' || tier === 'lifetime') ? 20 : 1;
+    const capKey = `voice_usage_${userId}_${today}`;
+    const { data: usage } = await supabase.from('app_state').select('value').eq('key', capKey).single();
+    const currentUsage = usage ? parseInt(usage.value) : 0;
+
+    if (currentUsage >= dailyLimit) {
+      const upgradeMsg = tier === 'free'
+        ? 'Free users get 1 voice exchange per day. Upgrade to Gold for 20.'
+        : 'Daily voice limit reached (20/day).';
+      console.log('🔊 [TTS] Voice cap reached:', currentUsage, '/', dailyLimit);
+      return res.status(429).json({ error: 'Voice limit reached', message: upgradeMsg, limit: dailyLimit, used: currentUsage });
+    }
+
     const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
     const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 
@@ -882,6 +914,12 @@ router.post('/speak', async (req, res) => {
       return res.status(ttsResponse.status).json({ error: 'ElevenLabs API error', details: errorBody });
     }
 
+    // Increment voice usage counter
+    await supabase.from('app_state').upsert({
+      key: capKey,
+      value: String(currentUsage + 1),
+    }, { onConflict: 'key' });
+
     res.set({
       'Content-Type': 'audio/mpeg',
       'Transfer-Encoding': 'chunked',
@@ -893,6 +931,90 @@ router.post('/speak', async (req, res) => {
     if (!res.headersSent) {
       res.status(500).json({ error: 'TTS generation failed' });
     }
+  }
+});
+
+// ============================================
+// STT — POST /v1/troy/transcribe
+// Whisper speech-to-text ($0.006/min)
+// ============================================
+router.post('/transcribe', upload.single('audio'), async (req, res) => {
+  try {
+    console.log('🎤 [STT] Endpoint hit');
+
+    const userId = req.body.userId;
+    if (!userId || !isUUID(userId)) {
+      console.log('🎤 [STT] Rejected: invalid userId:', userId);
+      return res.status(400).json({ error: 'Invalid userId' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No audio file' });
+    }
+
+    console.log('🎤 [STT] Audio size:', req.file.size, 'bytes, mimetype:', req.file.mimetype);
+
+    // Check voice usage cap
+    const today = new Date().toISOString().split('T')[0];
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('subscription_tier')
+      .eq('id', userId)
+      .single();
+
+    const tier = profile?.subscription_tier || 'free';
+    const dailyLimit = (tier === 'gold' || tier === 'lifetime') ? 20 : 1;
+
+    const capKey = `voice_usage_${userId}_${today}`;
+    const { data: usage } = await supabase
+      .from('app_state')
+      .select('value')
+      .eq('key', capKey)
+      .single();
+
+    const currentUsage = usage ? parseInt(usage.value) : 0;
+
+    if (currentUsage >= dailyLimit) {
+      const upgradeMsg = tier === 'free'
+        ? 'Free users get 1 voice exchange per day. Upgrade to Gold for 20.'
+        : 'Daily voice limit reached (20/day).';
+      return res.status(429).json({ error: 'Voice limit reached', message: upgradeMsg, limit: dailyLimit, used: currentUsage });
+    }
+
+    // Send to Whisper
+    const FormData = require('form-data');
+    const formData = new FormData();
+    formData.append('file', req.file.buffer, {
+      filename: 'audio.m4a',
+      contentType: req.file.mimetype || 'audio/m4a',
+    });
+    formData.append('model', 'whisper-1');
+    formData.append('language', 'en');
+
+    const whisperResponse = await axios.post(
+      'https://api.openai.com/v1/audio/transcriptions',
+      formData,
+      {
+        headers: {
+          ...formData.getHeaders(),
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        },
+        timeout: 30000,
+      }
+    );
+
+    console.log('🎤 [STT] Transcription:', whisperResponse.data.text);
+
+    // Increment voice usage counter
+    await supabase.from('app_state').upsert({
+      key: capKey,
+      value: String(currentUsage + 1),
+    }, { onConflict: 'key' });
+
+    res.json({ text: whisperResponse.data.text });
+  } catch (error) {
+    console.error('🎤 [STT] Error:', error.message);
+    res.status(500).json({ error: 'Transcription failed' });
   }
 });
 

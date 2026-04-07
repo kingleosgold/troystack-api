@@ -294,6 +294,8 @@ async function generateDailyBrief(userId) {
 
 Use plain text, no markdown headers or bullet points. Do NOT start with "Good morning" or any time-of-day greeting — jump straight into the analysis. Say "your stack" not "your portfolio." Say "spot" not "spot price." Say "oz" not "troy ounces." When discussing price moves, include both the number AND what it means for their stack in dollars.
 
+Keep the daily brief conversational and narrative. Lead with the story, not the numbers. Mention only 2-3 key numbers — the rest should be context and insight. This brief should sound natural when read aloud. Instead of listing every metal with exact prices, gains, and percentages, summarize: "Gold pulled back slightly while silver held steady. Your stack barely moved — which is exactly what stability looks like." Save detailed breakdowns for when the user asks.
+
 ${synthesis ? `Today's Stack Signal synthesis:
 Title: ${synthesis.title}
 Headline: ${synthesis.troy_one_liner || ''}
