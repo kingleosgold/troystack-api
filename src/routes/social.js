@@ -12,9 +12,15 @@ const supabase = require('../lib/supabase');
 
 const router = express.Router();
 
-// ── Helper: extract userId from request (body or query) ──
+function isUUID(str) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+}
+
+// ── Helper: extract userId from request (body or query), returns null for non-UUIDs ──
 function getUserId(req) {
-  return req.body?.userId || req.query?.userId || null;
+  const id = req.body?.userId || req.query?.userId || null;
+  if (id && !isUUID(id)) return null;
+  return id;
 }
 
 // ════════════════════════════════════════════════════════════

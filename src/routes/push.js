@@ -104,6 +104,12 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Valid expo_push_token is required' });
     }
 
+    // Reject non-UUID user_ids (e.g. $RCAnonymousID:...)
+    if (user_id && !isUUID(user_id)) {
+      console.log(`🔔 [Push Token] Rejected non-UUID user_id: ${user_id?.substring(0, 30)}`);
+      return res.status(400).json({ success: false, error: 'user_id must be a valid UUID' });
+    }
+
     // Check if token already exists
     const { data: existing, error: checkError } = await supabase
       .from('push_tokens')
@@ -235,7 +241,7 @@ router.post('/price-alerts', async (req, res) => {
       device_id: device_id || null,
     };
     if (id) row.id = id;
-    if (userId && userId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-/i)) {
+    if (userId && isUUID(userId)) {
       row.user_id = userId;
     }
 
@@ -265,6 +271,9 @@ router.get('/price-alerts', async (req, res) => {
 
     if (!user_id && !device_id) {
       return res.status(400).json({ success: false, error: 'Either user_id or device_id is required' });
+    }
+    if (user_id && !isUUID(user_id)) {
+      return res.status(400).json({ success: false, error: 'user_id must be a valid UUID' });
     }
 
     let query = supabase.from('price_alerts').select('*');
@@ -352,6 +361,9 @@ router.delete('/price-alerts', async (req, res) => {
     const { user_id, device_id } = req.query;
     if (!user_id && !device_id) {
       return res.status(400).json({ success: false, error: 'Either user_id or device_id is required' });
+    }
+    if (user_id && !isUUID(user_id)) {
+      return res.status(400).json({ success: false, error: 'user_id must be a valid UUID' });
     }
 
     let query = supabase.from('price_alerts').delete();
@@ -532,6 +544,53 @@ router.post('/breaking-news', async (req, res) => {
   } catch (error) {
     console.error('[Breaking News] Error:', error.message);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================
+// GET /v1/push/audit-user-ids — Identify rows with non-UUID user_ids
+// Admin-only: requires INTELLIGENCE_API_KEY
+// ============================================
+router.get('/audit-user-ids', async (req, res) => {
+  try {
+    const apiKey = req.headers['x-api-key'] || req.query.api_key;
+    if (!apiKey || apiKey !== process.env.INTELLIGENCE_API_KEY) {
+      return res.status(401).json({ error: 'Invalid API key' });
+    }
+
+    const tables = ['push_tokens', 'notification_preferences', 'price_alerts', 'portfolio_snapshots', 'troy_conversations'];
+    const results = {};
+
+    for (const table of tables) {
+      const { data, error } = await supabase
+        .from(table)
+        .select('id, user_id')
+        .not('user_id', 'is', null);
+
+      if (error) {
+        results[table] = { error: error.message };
+        continue;
+      }
+
+      const invalid = (data || []).filter(row =>
+        row.user_id && !isUUID(row.user_id)
+      );
+
+      results[table] = {
+        total_rows: data?.length || 0,
+        invalid_user_ids: invalid.length,
+        samples: invalid.slice(0, 10).map(r => ({ id: r.id, user_id: r.user_id })),
+      };
+
+      if (invalid.length > 0) {
+        console.log(`⚠️ [Audit] ${table}: ${invalid.length} rows with non-UUID user_id`);
+      }
+    }
+
+    res.json({ success: true, audit: results });
+  } catch (error) {
+    console.error('[Audit] Error:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 

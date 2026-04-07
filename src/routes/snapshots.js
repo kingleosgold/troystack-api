@@ -2,6 +2,10 @@ const express = require('express');
 const router = express.Router();
 const supabase = require('../lib/supabase');
 
+function isUUID(str) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+}
+
 // POST /v1/snapshots — Save a daily portfolio snapshot
 router.post('/', async (req, res) => {
   try {
@@ -11,8 +15,8 @@ router.post('/', async (req, res) => {
       goldSpot, silverSpot, platinumSpot, palladiumSpot,
     } = req.body;
 
-    if (!userId) {
-      return res.status(400).json({ error: 'userId is required' });
+    if (!userId || !isUUID(userId)) {
+      return res.status(400).json({ error: 'Valid userId (UUID) is required' });
     }
 
     const today = new Date().toISOString().split('T')[0];
@@ -56,8 +60,8 @@ router.get('/:userId', async (req, res) => {
     const { userId } = req.params;
     const range = (req.query.range || 'ALL').toUpperCase();
 
-    if (!userId) {
-      return res.status(400).json({ error: 'userId is required' });
+    if (!userId || !isUUID(userId)) {
+      return res.status(400).json({ error: 'Valid userId (UUID) is required' });
     }
 
     // Calculate date cutoff
