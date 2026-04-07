@@ -784,6 +784,9 @@ router.post('/speak', async (req, res) => {
       return res.status(503).json({ error: 'TTS service not configured' });
     }
 
+    console.log('🔊 [TTS] Using voice:', process.env.ELEVENLABS_VOICE_ID);
+    console.log('🔊 [TTS] Text length:', text.length);
+
     const ttsResponse = await axios({
       method: 'POST',
       url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
@@ -797,7 +800,21 @@ router.post('/speak', async (req, res) => {
         model_id: 'eleven_turbo_v2_5',
       },
       responseType: 'stream',
+      validateStatus: () => true,
     });
+
+    console.log('🔊 [TTS] ElevenLabs status:', ttsResponse.status);
+
+    if (ttsResponse.status !== 200) {
+      // Collect error body from stream
+      const chunks = [];
+      for await (const chunk of ttsResponse.data) {
+        chunks.push(chunk);
+      }
+      const errorBody = Buffer.concat(chunks).toString('utf-8');
+      console.log('🔊 [TTS] Error:', errorBody);
+      return res.status(ttsResponse.status).json({ error: 'ElevenLabs API error', details: errorBody });
+    }
 
     res.set({
       'Content-Type': 'audio/mpeg',
