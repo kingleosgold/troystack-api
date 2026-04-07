@@ -78,6 +78,14 @@ function detectPreviewContent(troyResponse, contextData) {
     return { type: 'chart', chartType: 'spot_price', data: { goldPrice: contextData.goldPrice, silverPrice: contextData.silverPrice } };
   }
 
+  // Dealer affiliate link detection
+  if (response.includes('silver eagle')) {
+    return { type: 'dealer_link', data: { label: 'Buy Silver Eagles', url: 'https://track.flexlinkspro.com/g.ashx?foid=156074.13444.1055589&trid=1546671.246173&foc=16&fot=9999&fos=6' } };
+  }
+  if (response.includes('gold eagle')) {
+    return { type: 'dealer_link', data: { label: 'Buy Gold Eagles', url: 'https://track.flexlinkspro.com/g.ashx?foid=156074.13444.1055590&trid=1546671.246173&foc=16&fot=9999&fos=6' } };
+  }
+
   return null;
 }
 
@@ -734,6 +742,74 @@ These facts make the case for silver without you having to hype it. Let the data
   } catch (error) {
     console.error('[Troy Chat] Message error:', error.message);
     res.status(500).json({ error: 'Failed to get advisor response' });
+  }
+});
+
+// ============================================
+// TTS — POST /v1/troy/speak
+// Proxies text to ElevenLabs, streams audio/mpeg back
+// ============================================
+router.post('/speak', async (req, res) => {
+  try {
+    const { userId, text } = req.body;
+
+    if (!userId || !isUUID(userId)) {
+      return res.status(400).json({ error: 'Valid userId required' });
+    }
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+      return res.status(400).json({ error: 'text is required' });
+    }
+    if (text.length > 2000) {
+      return res.status(400).json({ error: 'text exceeds 2000 character limit' });
+    }
+
+    // Verify user exists and has paid tier
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('subscription_tier')
+      .eq('id', userId)
+      .single();
+
+    if (profileError || !profile) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (!['gold', 'lifetime'].includes(profile.subscription_tier)) {
+      return res.status(403).json({ error: 'TTS requires Gold subscription' });
+    }
+
+    const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+    const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
+
+    if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
+      return res.status(503).json({ error: 'TTS service not configured' });
+    }
+
+    const ttsResponse = await axios({
+      method: 'POST',
+      url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json',
+        'Accept': 'audio/mpeg',
+      },
+      data: {
+        text: text.trim(),
+        model_id: 'eleven_turbo_v2_5',
+      },
+      responseType: 'stream',
+    });
+
+    res.set({
+      'Content-Type': 'audio/mpeg',
+      'Transfer-Encoding': 'chunked',
+    });
+
+    ttsResponse.data.pipe(res);
+  } catch (error) {
+    console.error('[Troy TTS] Error:', error.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'TTS generation failed' });
+    }
   }
 });
 
