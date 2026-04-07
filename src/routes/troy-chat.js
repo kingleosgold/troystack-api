@@ -752,7 +752,8 @@ These facts make the case for silver without you having to hype it. Let the data
 router.post('/speak', async (req, res) => {
   console.log('🔊 [TTS] Endpoint hit');
   try {
-    const { userId, text } = req.body;
+    console.log('🔊 [TTS] Body:', JSON.stringify(req.body)?.substring(0, 200));
+    const { userId, text } = req.body || {};
 
     if (!userId || !isUUID(userId)) {
       return res.status(400).json({ error: 'Valid userId required' });
@@ -824,7 +825,7 @@ router.post('/speak', async (req, res) => {
 
     ttsResponse.data.pipe(res);
   } catch (error) {
-    console.error('[Troy TTS] Error:', error.message);
+    console.log('🔊 [TTS] Error:', error.message, error.stack);
     if (!res.headersSent) {
       res.status(500).json({ error: 'TTS generation failed' });
     }
