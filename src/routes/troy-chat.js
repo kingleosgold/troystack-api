@@ -754,14 +754,18 @@ router.post('/speak', async (req, res) => {
   try {
     console.log('🔊 [TTS] Body:', JSON.stringify(req.body)?.substring(0, 200));
     const { userId, text } = req.body || {};
+    console.log('🔊 [TTS] userId:', userId);
 
     if (!userId || !isUUID(userId)) {
+      console.log('🔊 [TTS] Rejected: invalid userId');
       return res.status(400).json({ error: 'Valid userId required' });
     }
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
+      console.log('🔊 [TTS] Rejected: missing text');
       return res.status(400).json({ error: 'text is required' });
     }
     if (text.length > 2000) {
+      console.log('🔊 [TTS] Rejected: text too long', text.length);
       return res.status(400).json({ error: 'text exceeds 2000 character limit' });
     }
 
@@ -772,22 +776,27 @@ router.post('/speak', async (req, res) => {
       .eq('id', userId)
       .single();
 
+    console.log('🔊 [TTS] tier:', profile?.subscription_tier, 'profileError:', profileError?.message);
+
     if (profileError || !profile) {
+      console.log('🔊 [TTS] Rejected: user not found');
       return res.status(404).json({ error: 'User not found' });
     }
     if (!['gold', 'lifetime'].includes(profile.subscription_tier)) {
+      console.log('🔊 [TTS] Rejected: tier not eligible:', profile.subscription_tier);
       return res.status(403).json({ error: 'TTS requires Gold subscription' });
     }
+    console.log('🔊 [TTS] Passed tier gate');
 
     const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
     const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 
     if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
+      console.log('🔊 [TTS] Rejected: missing env vars, key:', !!ELEVENLABS_API_KEY, 'voice:', !!ELEVENLABS_VOICE_ID);
       return res.status(503).json({ error: 'TTS service not configured' });
     }
 
-    console.log('🔊 [TTS] Using voice:', process.env.ELEVENLABS_VOICE_ID);
-    console.log('🔊 [TTS] Text length:', text.length);
+    console.log('🔊 [TTS] Calling ElevenLabs, voice:', ELEVENLABS_VOICE_ID, 'text length:', text.length);
 
     const ttsResponse = await axios({
       method: 'POST',
