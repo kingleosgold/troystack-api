@@ -768,6 +768,55 @@ function sanitizeTTSText(text) {
   clean = clean.replace(/\bASE\b/g, 'American Silver Eagle');
   clean = clean.replace(/\bAGE\b/g, 'American Gold Eagle');
 
+  // Slash patterns (before number conversion so $amounts get caught)
+  clean = clean.replace(/\$(\d+)\/oz/gi, '$1 dollars an ounce');
+  clean = clean.replace(/\$(\d+)\/barrel/gi, '$1 dollars a barrel');
+  clean = clean.replace(/\$(\d+)\/gallon/gi, '$1 dollars a gallon');
+  clean = clean.replace(/\$(\d+)\/hr/gi, '$1 dollars an hour');
+  clean = clean.replace(/\$(\d+)\/month/gi, '$1 dollars a month');
+  clean = clean.replace(/\$(\d+)\/year/gi, '$1 dollars a year');
+  clean = clean.replace(/\/oz/gi, ' an ounce');
+  clean = clean.replace(/\/barrel/gi, ' a barrel');
+  clean = clean.replace(/\/gallon/gi, ' a gallon');
+
+  // Common abbreviations
+  clean = clean.replace(/\bvs\.?\b/gi, 'versus');
+  clean = clean.replace(/\bQ1\b/g, 'first quarter');
+  clean = clean.replace(/\bQ2\b/g, 'second quarter');
+  clean = clean.replace(/\bQ3\b/g, 'third quarter');
+  clean = clean.replace(/\bQ4\b/g, 'fourth quarter');
+  clean = clean.replace(/\bYoY\b/gi, 'year over year');
+  clean = clean.replace(/\bMoM\b/gi, 'month over month');
+  clean = clean.replace(/\bBRICS\b/g, 'BRICKS');
+  clean = clean.replace(/\bFed\b/g, 'the Fed');
+  clean = clean.replace(/\bIMF\b/g, 'the I M F');
+  clean = clean.replace(/\bGDP\b/g, 'G D P');
+  clean = clean.replace(/\bCPI\b/g, 'C P I');
+  clean = clean.replace(/\bPPI\b/g, 'P P I');
+  clean = clean.replace(/\bBLS\b/g, 'B L S');
+  clean = clean.replace(/\bEIA\b/g, 'E I A');
+  clean = clean.replace(/\bWTI\b/g, 'W T I crude');
+  clean = clean.replace(/\bM2\b/g, 'M 2 money supply');
+  clean = clean.replace(/\b1971\b/g, 'nineteen seventy-one');
+  clean = clean.replace(/\b2008\b/g, 'two thousand eight');
+  clean = clean.replace(/\b1934\b/g, 'nineteen thirty-four');
+
+  // Ranges and dashes
+  clean = clean.replace(/(\d+)\s*[-–—]\s*(\d+)/g, '$1 to $2');
+
+  // Plus/minus signs
+  clean = clean.replace(/\+(\d)/g, 'plus $1');
+  clean = clean.replace(/-(\d)/g, 'minus $1');
+
+  // Parenthetical percentages — remove parens, they cause awkward pauses
+  clean = clean.replace(/\(([+-]?\d+\.?\d*%?)\)/g, ', $1,');
+
+  // Multiple periods/ellipsis — natural pause
+  clean = clean.replace(/\.{2,}/g, '.');
+
+  // Remove URLs — don't read links aloud
+  clean = clean.replace(/https?:\/\/[^\s]+/g, '');
+
   // Strip .00 decimals (10.00 → 10)
   clean = clean.replace(/(\d+)\.00\b/g, '$1');
   clean = clean.replace(/(\d+\.\d)0\b/g, '$1');
@@ -811,6 +860,9 @@ function sanitizeTTSText(text) {
   // Remove bullet points and special characters
   clean = clean.replace(/[•·→←▲▼■]/g, '');
   clean = clean.replace(/\n{3,}/g, '\n\n');
+
+  // Clean up multiple spaces
+  clean = clean.replace(/\s{2,}/g, ' ');
 
   return clean.trim();
 }
