@@ -859,7 +859,7 @@ router.post('/speak', async (req, res) => {
     console.log('🔊 [TTS] Passed tier gate');
 
     // Voice usage cap (shared with /transcribe)
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     const tier = profile.subscription_tier;
     const dailyLimit = (tier === 'gold' || tier === 'lifetime') ? 20 : 1;
     const capKey = `voice_usage_${userId}_${today}`;
@@ -955,7 +955,7 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
     console.log('🎤 [STT] Audio size:', req.file.size, 'bytes, mimetype:', req.file.mimetype);
 
     // Check voice usage cap
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     const { data: profile } = await supabase
       .from('profiles')
       .select('subscription_tier')
