@@ -507,6 +507,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | **Stripe** | Billing, subscriptions | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_GOLD_MONTHLY_PRICE_ID`, `STRIPE_GOLD_YEARLY_PRICE_ID`, `STRIPE_GOLD_LIFETIME_PRICE_ID` | stripe.js |
 | **RevenueCat** | iOS in-app purchase webhooks | `REVENUECAT_WEBHOOK_SECRET` | stripe.js |
 | **Expo Push** | Mobile push notifications | None (expo-server-sdk) | push.js, index.js, stack-signal-push.js, comex-scraper.js, price-alert-checker.js |
+| **X (Twitter)** | Auto-tweet Stack Signal articles (@troystack_) | `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | auto-tweet.js |
 | **CME Group** | COMEX warehouse XLS reports | None (public URLs) | comex-scraper.js |
 | **Dealer websites** | Price scraping (APMEX, JM Bullion, SD Bullion) | `APMEX_AFFILIATE_ID`, `JMB_AFFILIATE_ID`, `SDB_AFFILIATE_ID` | dealerScraper.js |
 
@@ -540,6 +541,10 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `MIN_VERSION_ANDROID` | No | min-version.js | Minimum Android app version |
 | `MIN_VERSION_MESSAGE` | No | min-version.js | Force-update message text |
 | `MIN_VERSION_ENFORCED` | No | min-version.js | "true" to enforce version gate |
+| `X_CONSUMER_KEY` | No | auto-tweet.js | X (Twitter) API consumer key |
+| `X_CONSUMER_SECRET` | No | auto-tweet.js | X (Twitter) API consumer secret |
+| `X_ACCESS_TOKEN` | No | auto-tweet.js | X (Twitter) API access token |
+| `X_ACCESS_SECRET` | No | auto-tweet.js | X (Twitter) API access secret |
 
 ---
 
@@ -586,13 +591,14 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 4. **Feed articles:** `writeFeedReaction()` (Gemini Flash) writes 400-800 word feed articles with depth requirements (historical context, physical market connection, purchasing power framing, forward-looking close)
    - Save guard filters articles with `troy_commentary.length < 2500` chars
 5. Generates/assigns image (DALL-E gated by `USE_DALLE = false` flag; pool fallback)
-6. Saves feed articles to `stack_signal_articles` table (`is_stack_signal=false`)
+6. Saves feed articles to `stack_signal_articles` table (`is_stack_signal=false`). After each successful save, `postArticleTweet()` fires to X (fire-and-forget, dedup by slug, 5/day cap).
 7. Sends push notification if score ≥85 (via stack-signal-push.js)
 8. **Claude daily synthesis editorial** — `generateClaudeDailySynthesis()` runs opportunistically at the end of every pipeline cycle:
    - Deduped by date (EST): only one synthesis per day (`is_stack_signal=true AND category='synthesis'`)
    - Requires ≥ 3 feed articles saved for today; otherwise skips
    - Gathers today's feed articles and builds a pseudo-cluster passed to `writeSynthesisArticle()` (Claude Sonnet, 1500-2500 words, 6-8 paragraphs)
    - Saves with distinct title `The Stack Signal: <Month Day, Year>`, `is_stack_signal=true`, `category='synthesis'`, `relevance_score=95`
+   - After save, `postArticleTweet()` fires to X (same dedup/cap as feed articles)
 
 ### Synthesis Types
 - **daily** (6:15 AM EST): Morning market digest
@@ -728,6 +734,15 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 - **Exports:** `runStackSignalPipeline()`, `generateStackSignal(type)`
 - **Dependencies:** supabase, ai-router, rss-fetcher, price-fetcher, stack-signal-push
 - **Last modified:** 2026-03-28
+
+### src/services/auto-tweet.js
+- **Purpose:** Post Stack Signal articles to X (@troystack_) — fire-and-forget, never blocks article saves
+- **Exports:** `postArticleTweet(article)` — returns tweet id or null
+- **Dependencies:** twitter-api-v2, supabase
+- **Dedup:** `app_state` key `tweeted_signal_${slug}` holds the tweet id
+- **Daily cap:** 5 tweets/day via `app_state` key `tweet_count_${YYYY-MM-DD}` (America/New_York boundary)
+- **Tweet format:** `<title>\n\n<troy_one_liner>\n\n<https://troystack.ai/signal/slug>` truncated to 280 chars
+- **Credential check:** skips silently if X_* env vars missing
 
 ### src/services/stack-signal-push.js
 - **Purpose:** Push notifications for high-scoring Stack Signal articles

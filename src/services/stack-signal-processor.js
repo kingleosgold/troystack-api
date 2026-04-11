@@ -3,6 +3,7 @@ const supabase = require('../lib/supabase');
 const { callGemini, callClaude, generateImage, MODELS } = require('./ai-router');
 const { fetchNewArticles } = require('./rss-fetcher');
 const { getCachedPrices } = require('./price-fetcher');
+const { postArticleTweet } = require('./auto-tweet');
 
 // ============================================
 // HELPERS
@@ -741,6 +742,12 @@ async function saveArticles(articles) {
         console.log(`[Save] Failed: "${article.title.slice(0, 40)}": ${error.message}`);
       } else {
         saved++;
+        // Fire-and-forget tweet — must never block or throw into save loop
+        try {
+          await postArticleTweet(row);
+        } catch (tweetErr) {
+          console.log(`[Save] Tweet error (non-fatal): ${tweetErr.message}`);
+        }
       }
     } catch (err) {
       console.log(`[Save] Error: "${article.title.slice(0, 40)}": ${err.message}`);
@@ -1067,6 +1074,14 @@ async function generateClaudeDailySynthesis() {
   }
 
   console.log(`[Claude Synthesis] Saved: "${title}" (${articleText.length} chars, ${todayArticles.length} source articles)`);
+
+  // Fire-and-forget tweet — must never block or throw
+  try {
+    await postArticleTweet({ title, slug, troy_one_liner: oneLiner });
+  } catch (tweetErr) {
+    console.log(`[Claude Synthesis] Tweet error (non-fatal): ${tweetErr.message}`);
+  }
+
   return saved;
 }
 
