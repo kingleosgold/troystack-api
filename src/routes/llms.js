@@ -2,6 +2,79 @@ const express = require('express');
 const router = express.Router();
 
 // ============================================================
+// robots.txt — allow AI crawlers to discover discovery endpoints
+// ============================================================
+router.get('/robots.txt', (req, res) => {
+  res.type('text/plain').send(`# AI Crawlers
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: Claude-Web
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: *
+Allow: /.well-known/
+Allow: /llms.txt
+Allow: /openapi.json
+Allow: /mcp
+Allow: /sitemap.xml
+
+Sitemap: https://api.troystack.ai/sitemap.xml
+`);
+});
+
+// ============================================================
+// /mcp → redirect to /.well-known/mcp.json
+// Some MCP registries look for /mcp directly
+// ============================================================
+router.get('/mcp', (req, res) => {
+  res.redirect(302, '/.well-known/mcp.json');
+});
+
+// ============================================================
+// sitemap.xml — lists all public endpoints for crawler discovery
+// ============================================================
+router.get('/sitemap.xml', (req, res) => {
+  const base = 'https://api.troystack.ai';
+  const lastmod = new Date().toISOString().split('T')[0];
+  const urls = [
+    '/',
+    '/health',
+    '/llms.txt',
+    '/openapi.json',
+    '/.well-known/ai-plugin.json',
+    '/.well-known/mcp.json',
+    '/mcp',
+    '/v1/prices',
+    '/v1/prices/history',
+    '/v1/market-intel',
+    '/v1/vault-watch',
+    '/v1/vault-watch/history',
+    '/v1/speculation',
+    '/v1/stack-signal',
+    '/v1/stack-signal/latest',
+    '/v1/junk-silver',
+    '/v1/dealer-prices',
+    '/v1/dealer-prices/products',
+  ];
+
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls.map(u => `  <url>
+    <loc>${base}${u}</loc>
+    <lastmod>${lastmod}</lastmod>
+    <changefreq>daily</changefreq>
+  </url>`).join('\n')}
+</urlset>
+`;
+
+  res.type('application/xml').send(body);
+});
+
+// ============================================================
 // llms.txt - The AI-readable description of TroyStack
 // https://llmstxt.org/
 // ============================================================

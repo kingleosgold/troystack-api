@@ -189,9 +189,13 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     name: 'TroyStack API',
-    version: '1.0.0',
-    description: 'Precious metals portfolio tracking, live spot prices, COMEX vault data, and market intelligence.',
-    documentation: 'https://api.troystack.ai/docs',
+    version: '3.0.1',
+    description: 'AI-powered precious metals portfolio tracking and market intelligence',
+    docs: 'https://troystack.ai/developers',
+    mcp: 'https://api.troystack.ai/.well-known/mcp.json',
+    openapi: 'https://api.troystack.ai/openapi.json',
+    llms: 'https://api.troystack.ai/llms.txt',
+    sitemap: 'https://api.troystack.ai/sitemap.xml',
     endpoints: {
       public: {
         'GET /v1/prices': 'Live spot prices for Au, Ag, Pt, Pd',
