@@ -1,6 +1,6 @@
-# Stack Tracker Gold API
+# TroyStack API
 
-REST API + MCP Server for Stack Tracker Gold. Provides live precious metals data, 
+REST API + MCP Server for TroyStack. Provides live precious metals data, 
 portfolio management, and AI/LLM integration.
 
 ## Quick Start
@@ -21,7 +21,7 @@ npm run dev
    - `PORT` (Railway sets automatically)
 4. Deploy
 
-Custom domain: `api.stacktrackergold.com`
+Custom domain: `api.troystack.ai`
 
 ## Database Setup
 
@@ -57,11 +57,11 @@ Run `migrations/001_api_keys.sql` in Supabase SQL editor.
 ## Architecture
 
 ```
-User's iPhone → Stack Tracker Gold app (local SQLite)
+User's iPhone → TroyStack app (local SQLite)
                           ↕ sync
                     Supabase (server-side storage)
                           ↕
-                    STG API (Railway)
+                    TroyStack API (Railway)
                       ↕         ↕
                   AI Agents    X/Twitter Bot
                 (Claude, GPT)  (auto-tweets)

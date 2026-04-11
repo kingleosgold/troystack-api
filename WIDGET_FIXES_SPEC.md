@@ -1,4 +1,4 @@
-# Stack Tracker Gold v2.1 — Widget Fixes Spec
+# TroyStack v2.1 — Widget Fixes Spec
 # Give this to Claude Code for implementation
 
 ## Bug 1: Widget Data Consistency (CRITICAL)

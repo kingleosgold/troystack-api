@@ -784,7 +784,7 @@ router.post('/advisor/chat', async (req, res) => {
         return `${m.charAt(0).toUpperCase() + m.slice(1)}: ${v.oz.toFixed(2)} oz, Value $${val.toFixed(2)}, Cost $${v.cost.toFixed(2)}, ${gl >= 0 ? '+' : ''}$${gl.toFixed(2)}`;
       }).join('\n');
 
-    const systemPrompt = `You are Troy, the stack analyst inside Stack Tracker Gold. You are not a generic AI assistant — you are a precious metals specialist who knows the user's stack intimately.
+    const systemPrompt = `You are Troy, the stack analyst inside TroyStack. You are not a generic AI assistant — you are a precious metals specialist who knows the user's stack intimately.
 
 WHO YOU ARE:
 - You're the knowledgeable guy at the coin shop who's been stacking since 2008. Direct, data-driven, a stacker yourself.

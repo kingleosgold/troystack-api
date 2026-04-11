@@ -7,7 +7,7 @@ async function authenticateApiKey(req, res, next) {
     return res.status(401).json({
       error: 'Authentication required',
       message: 'Include your API key as: Authorization: Bearer YOUR_API_KEY',
-      signup: 'Generate API keys in Stack Tracker Gold app → Settings → Developer Access'
+      signup: 'Generate API keys in TroyStack app → Settings → Developer Access'
     });
   }
 

@@ -43,7 +43,7 @@ app.use(helmet({
 }));
 
 // ============================================================
-// CORS — locked to stacktrackergold.com domains
+// CORS — locked to troystack.ai + stacktrackergold.com domains
 // LLM discovery endpoints allow all origins
 // ============================================================
 const ALLOWED_ORIGINS = [
@@ -175,10 +175,10 @@ app.get('/health', (req, res) => {
 
 app.get('/', (req, res) => {
   res.json({
-    name: 'Stack Tracker Gold API',
+    name: 'TroyStack API',
     version: '1.0.0',
     description: 'Precious metals portfolio tracking, live spot prices, COMEX vault data, and market intelligence.',
-    documentation: 'https://api.stacktrackergold.com/docs',
+    documentation: 'https://api.troystack.ai/docs',
     endpoints: {
       public: {
         'GET /v1/prices': 'Live spot prices for Au, Ag, Pt, Pd',
@@ -233,7 +233,7 @@ app.get('/', (req, res) => {
     authentication: {
       type: 'Bearer token',
       header: 'Authorization: Bearer YOUR_API_KEY',
-      signup: 'Generate API keys in Stack Tracker Gold app → Settings → Developer Access'
+      signup: 'Generate API keys in TroyStack app → Settings → Developer Access'
     }
   });
 });
@@ -253,11 +253,11 @@ app.use((err, req, res, next) => {
 // STARTUP + CRON SCHEDULES
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`\n🪙 Stack Tracker Gold API running on port ${PORT}`);
+  console.log(`\n🪙 TroyStack API running on port ${PORT}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('🧠 Gemini:', process.env.GEMINI_API_KEY ? 'ENABLED' : 'DISABLED');
   console.log('💳 Stripe:', process.env.STRIPE_SECRET_KEY ? 'ENABLED' : 'DISABLED');
-  console.log('🔒 CORS: Locked to stacktrackergold.com domains');
+  console.log('🔒 CORS: Locked to troystack.ai + stacktrackergold.com domains');
   console.log('⚡ Rate Limits: Public 100/min, Auth 30/min, Dev tier-based');
 
   // ── Intelligence cron: daily at 6:30 AM EST (11:30 UTC) ──

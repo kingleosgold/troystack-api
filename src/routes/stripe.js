@@ -244,8 +244,8 @@ router.post('/create-checkout-session', async (req, res) => {
       mode: isLifetime ? 'payment' : 'subscription',
       customer: customerId,
       line_items: [{ price: price_id, quantity: 1 }],
-      success_url: success_url || 'https://stacktrackergold.com/settings?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: cancel_url || 'https://stacktrackergold.com/settings',
+      success_url: success_url || 'https://troystack.ai/settings?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: cancel_url || 'https://troystack.ai/settings',
       client_reference_id: user_id,
       metadata: { user_id, tier },
     };
@@ -371,7 +371,7 @@ router.post('/customer-portal', async (req, res) => {
 
     const session = await stripe.billingPortal.sessions.create({
       customer: profile.stripe_customer_id,
-      return_url: return_url || 'https://stacktrackergold.com/settings',
+      return_url: return_url || 'https://troystack.ai/settings',
     });
 
     console.log(`💳 [Stripe] Customer portal session created for user ${user_id}`);

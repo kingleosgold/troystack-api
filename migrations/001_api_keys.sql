@@ -1,4 +1,4 @@
--- Stack Tracker Gold API Keys table
+-- TroyStack API Keys table
 -- Run this in Supabase SQL editor
 
 CREATE TABLE IF NOT EXISTS api_keys (

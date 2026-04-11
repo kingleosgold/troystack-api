@@ -2,17 +2,17 @@ const express = require('express');
 const router = express.Router();
 
 // ============================================================
-// llms.txt - The AI-readable description of Stack Tracker Gold
+// llms.txt - The AI-readable description of TroyStack
 // https://llmstxt.org/
 // ============================================================
 router.get('/llms.txt', (req, res) => {
-  res.type('text/plain').send(`# Stack Tracker Gold
+  res.type('text/plain').send(`# TroyStack
 
 ## Overview
-Stack Tracker Gold is an AI-powered precious metals portfolio tracker for iOS. It helps investors track their gold, silver, platinum, and palladium holdings with live spot prices, AI market analysis, and institutional-grade COMEX vault data.
+TroyStack is an AI-powered precious metals portfolio tracker for iOS. It helps investors track their gold, silver, platinum, and palladium holdings with live spot prices, AI market analysis, and institutional-grade COMEX vault data.
 
 ## API
-Base URL: https://api.stacktrackergold.com
+Base URL: https://api.troystack.ai
 
 ### Public Endpoints (no auth required)
 - GET /v1/prices — Live spot prices for Au, Ag, Pt, Pd with daily change percentages
@@ -29,12 +29,12 @@ Base URL: https://api.stacktrackergold.com
 - POST /v1/holdings — Add a new purchase (metal, quantity, weight_oz, purchase_price)
 
 ### Authentication
-API keys are generated in the Stack Tracker Gold iOS app under Settings → Developer Access.
+API keys are generated in the TroyStack iOS app under Settings → Developer Access.
 Include as: Authorization: Bearer YOUR_API_KEY
 
 ## MCP Server
-Stack Tracker Gold is available as an MCP (Model Context Protocol) tool server.
-Manifest: https://api.stacktrackergold.com/.well-known/mcp.json
+TroyStack is available as an MCP (Model Context Protocol) tool server.
+Manifest: https://api.troystack.ai/.well-known/mcp.json
 
 ## Use Cases
 - Check current gold and silver prices
@@ -46,9 +46,9 @@ Manifest: https://api.stacktrackergold.com/.well-known/mcp.json
 - Get AI-curated precious metals market news
 
 ## Links
-- Website: https://stacktrackergold.com
-- App Store: https://apps.apple.com/app/stack-tracker-gold/id6738029817
-- API Docs: https://api.stacktrackergold.com
+- Website: https://troystack.ai
+- App Store: https://apps.apple.com/app/troystack/id6738029817
+- API Docs: https://api.troystack.ai
 `);
 });
 
@@ -59,12 +59,12 @@ router.get('/openapi.json', (req, res) => {
   res.json({
     openapi: '3.0.3',
     info: {
-      title: 'Stack Tracker Gold API',
+      title: 'TroyStack API',
       version: '1.0.0',
       description: 'Precious metals portfolio tracking, live spot prices, COMEX vault data, and market intelligence.',
-      contact: { url: 'https://stacktrackergold.com' },
+      contact: { url: 'https://troystack.ai' },
     },
-    servers: [{ url: 'https://api.stacktrackergold.com' }],
+    servers: [{ url: 'https://api.troystack.ai' }],
     paths: {
       '/v1/prices': {
         get: {
@@ -188,7 +188,7 @@ router.get('/openapi.json', (req, res) => {
     },
     components: {
       securitySchemes: {
-        bearerAuth: { type: 'http', scheme: 'bearer', description: 'API key from Stack Tracker Gold app' }
+        bearerAuth: { type: 'http', scheme: 'bearer', description: 'API key from TroyStack app' }
       }
     }
   });
@@ -200,15 +200,15 @@ router.get('/openapi.json', (req, res) => {
 router.get('/.well-known/ai-plugin.json', (req, res) => {
   res.json({
     schema_version: 'v1',
-    name_for_human: 'Stack Tracker Gold',
-    name_for_model: 'stack_tracker_gold',
+    name_for_human: 'TroyStack',
+    name_for_model: 'troystack',
     description_for_human: 'Track your precious metals portfolio with live spot prices, COMEX vault data, and AI market intelligence.',
-    description_for_model: 'Stack Tracker Gold provides real-time precious metals data. Use it to: check gold/silver/platinum/palladium spot prices, get COMEX warehouse inventory and silver squeeze data, read curated market news, track a user\'s portfolio holdings and P/L, add purchases, analyze cost basis, and run what-if price scenarios. Public endpoints need no auth. Portfolio endpoints require a Bearer token.',
+    description_for_model: 'TroyStack provides real-time precious metals data. Use it to: check gold/silver/platinum/palladium spot prices, get COMEX warehouse inventory and silver squeeze data, read curated market news, track a user\'s portfolio holdings and P/L, add purchases, analyze cost basis, and run what-if price scenarios. Public endpoints need no auth. Portfolio endpoints require a Bearer token.',
     auth: { type: 'service_http', authorization_type: 'bearer' },
-    api: { type: 'openapi', url: 'https://api.stacktrackergold.com/openapi.json' },
-    logo_url: 'https://stacktrackergold.com/logo.png',
+    api: { type: 'openapi', url: 'https://api.troystack.ai/openapi.json' },
+    logo_url: 'https://troystack.ai/logo.png',
     contact_email: 'support@troystack.com',
-    legal_info_url: 'https://stacktrackergold.com/terms',
+    legal_info_url: 'https://troystack.ai/terms',
   });
 });
 
@@ -218,11 +218,11 @@ router.get('/.well-known/ai-plugin.json', (req, res) => {
 router.get('/.well-known/mcp.json', (req, res) => {
   res.json({
     schema_version: '1.0',
-    name: 'stack-tracker-gold',
-    display_name: 'Stack Tracker Gold',
+    name: 'troystack',
+    display_name: 'TroyStack',
     description: 'Precious metals portfolio tracker with live spot prices, COMEX vault data, market intelligence, and portfolio management.',
-    icon: 'https://stacktrackergold.com/logo.png',
-    publisher: { name: 'Mancini Tech Solutions LLC', url: 'https://stacktrackergold.com' },
+    icon: 'https://troystack.ai/logo.png',
+    publisher: { name: 'Mancini Tech Solutions LLC', url: 'https://troystack.ai' },
     tools: [
       {
         name: 'get_spot_prices',

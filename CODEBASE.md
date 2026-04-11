@@ -2,7 +2,7 @@
 
 > **Standing instruction:** If any task creates, deletes, or moves files, routes, or database columns, update this file before committing.
 
-Express 5 REST API powering the TroyStack (Stack Tracker Gold) precious metals portfolio app. Deployed on Railway. Database on Supabase (PostgreSQL). Node >=20.
+Express 5 REST API powering the TroyStack precious metals portfolio app. Deployed on Railway. Database on Supabase (PostgreSQL). Node >=20.
 
 ---
 
@@ -299,7 +299,7 @@ Express 5 REST API powering the TroyStack (Stack Tracker Gold) precious metals p
 - **Last modified:** 2026-02-18
 
 ### CORS (in index.js)
-- Allowed origins: `stacktrackergold.com` (root, www, app), `troystack.ai` (root, www), `localhost:5173`, `localhost:3000`
+- Allowed origins: `troystack.ai` (root, www), `stacktrackergold.com` (root, www, app — legacy), `localhost:5173`, `localhost:3000`
 - LLM discovery endpoints use open CORS
 - Mobile apps, curl, server-to-server allowed (no origin)
 
