@@ -953,15 +953,134 @@ Return ONLY valid JSON.`;
 // ============================================
 
 /**
+ * Claude daily synthesis editorial.
+ *
+ * Runs opportunistically from the Stack Signal pipeline. Gathers today's
+ * saved feed articles (is_stack_signal=false) and synthesizes them into a
+ * single long-form editorial via Claude Sonnet. Deduped by date — only
+ * one synthesis per day (EST). Requires >= 3 feed articles for the day.
+ * The synthesis is saved with is_stack_signal=true and category='synthesis'.
+ */
+async function generateClaudeDailySynthesis() {
+  // America/New_York date boundary
+  const todayEST = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const startOfDayUTC = new Date(`${todayEST}T00:00:00-05:00`).toISOString();
+
+  // Dedup: check if a Claude synthesis already exists for today
+  const { data: existing } = await supabase
+    .from('stack_signal_articles')
+    .select('id')
+    .eq('is_stack_signal', true)
+    .eq('category', 'synthesis')
+    .gte('published_at', startOfDayUTC)
+    .limit(1);
+
+  if (existing && existing.length > 0) {
+    console.log('[Claude Synthesis] Already generated for today — skipping');
+    return null;
+  }
+
+  // Fetch today's feed articles (Gemini Flash output)
+  const { data: todayArticles, error: fetchErr } = await supabase
+    .from('stack_signal_articles')
+    .select('id, title, troy_commentary, troy_one_liner, category, sources, relevance_score')
+    .eq('is_stack_signal', false)
+    .gte('published_at', startOfDayUTC)
+    .order('relevance_score', { ascending: false });
+
+  if (fetchErr) {
+    console.log(`[Claude Synthesis] Fetch error: ${fetchErr.message}`);
+    return null;
+  }
+
+  if (!todayArticles || todayArticles.length < 3) {
+    console.log(`[Claude Synthesis] Only ${todayArticles?.length || 0} feed articles today — need 3+, skipping`);
+    return null;
+  }
+
+  console.log(`[Claude Synthesis] Synthesizing ${todayArticles.length} feed articles via Claude Sonnet`);
+
+  // Build a synthetic cluster from today's feed articles to match writeSynthesisArticle's signature
+  const pseudoCluster = {
+    theme: `Daily Stack Signal Editorial — ${todayEST}`,
+    suggested_angle: 'Synthesize the key themes across today\'s market coverage into a cohesive editorial for physical metal holders. Connect the dots between individual stories and reveal the larger pattern.',
+    importance: Math.max(...todayArticles.map(a => a.relevance_score || 50)),
+    category: 'synthesis',
+    articles: todayArticles.map(a => ({
+      source: 'Stack Signal Feed',
+      title: a.title,
+      description: a.troy_commentary,
+      link: null,
+    })),
+  };
+
+  const prices = getCachedPrices();
+  let articleText;
+  try {
+    articleText = await writeSynthesisArticle(pseudoCluster, prices);
+  } catch (err) {
+    console.log(`[Claude Synthesis] Claude error: ${err.message}`);
+    return null;
+  }
+
+  if (!articleText || articleText.length < 2500) {
+    console.log(`[Claude Synthesis] Output too short: ${articleText?.length || 0} chars`);
+    return null;
+  }
+
+  // Generate one-liner via existing helper
+  let oneLiner;
+  try {
+    const metadata = await generateArticleMetadata(pseudoCluster, articleText);
+    oneLiner = metadata.troy_one_liner;
+  } catch (err) {
+    oneLiner = `Today's market synthesis — ${todayEST}`;
+  }
+
+  // Distinct title that won't match any feed article
+  const prettyDate = new Date(`${todayEST}T12:00:00Z`).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'long', day: 'numeric', year: 'numeric' });
+  const title = `The Stack Signal: ${prettyDate}`;
+  const slug = generateSlug(title);
+
+  const { data: saved, error: saveErr } = await supabase
+    .from('stack_signal_articles')
+    .insert({
+      slug,
+      title,
+      troy_commentary: articleText,
+      troy_one_liner: oneLiner,
+      category: 'synthesis',
+      sources: todayArticles.map(a => ({ name: 'Stack Signal Feed', url: null, title: a.title })),
+      image_url: null,
+      relevance_score: 95,
+      is_stack_signal: true,
+      published_at: new Date().toISOString(),
+      gold_price_at_publish: prices?.gold || null,
+      silver_price_at_publish: prices?.silver || null,
+    })
+    .select()
+    .single();
+
+  if (saveErr) {
+    console.error(`[Claude Synthesis] Save error: ${saveErr.message}`);
+    return null;
+  }
+
+  console.log(`[Claude Synthesis] Saved: "${title}" (${articleText.length} chars, ${todayArticles.length} source articles)`);
+  return saved;
+}
+
+/**
  * Run the full Stack Signal v2 pipeline.
  *
  * Phase 0: Fetch RSS feeds
  * Phase 1: Score articles individually (Gemini Flash)
  * Phase 2: Cluster scored articles by theme (Gemini Flash)
- * Phase 3: Write synthesis article per cluster (Claude Sonnet)
- * Phase 4: Generate images (DALL-E 3)
- * Phase 5: Save to database
+ * Phase 3: Write feed articles per cluster (Gemini Flash — writeFeedReaction)
+ * Phase 4: Generate images (DALL-E 3 / pool)
+ * Phase 5: Save feed articles to database
  * Phase 6: Push notification for top article
+ * Phase 7: Claude daily synthesis editorial (once per day, if ≥ 3 feed articles)
  */
 async function runStackSignalPipeline() {
   const startTime = Date.now();
@@ -1078,6 +1197,14 @@ async function runStackSignalPipeline() {
       console.log(`[Pipeline] Push phase error: ${err.message}`);
     }
 
+    // Phase 7: Claude daily synthesis editorial (once per day)
+    console.log('\n[Pipeline] Phase 7: Checking for Claude daily synthesis...');
+    try {
+      await generateClaudeDailySynthesis();
+    } catch (err) {
+      console.log(`[Pipeline] Claude synthesis error: ${err.message}`);
+    }
+
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n${'━'.repeat(50)}`);
     console.log(`  Pipeline Complete`);
@@ -1097,6 +1224,7 @@ module.exports = {
   scoreArticles,
   clusterArticles,
   writeSynthesisArticle,
+  generateClaudeDailySynthesis,
   generateArticleImages,
   saveArticles,
   generateStackSignal,

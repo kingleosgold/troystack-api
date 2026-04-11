@@ -583,12 +583,16 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 1. `rss-fetcher.js` fetches from 8 RSS feeds (Kitco, Seeking Alpha, Mining.com, Reuters, Zero Hedge, Yahoo Finance, Google News)
 2. Deduplicates against existing articles in DB (by URL)
 3. Clusters related articles via Gemini
-4. **Active path:** `writeFeedReaction()` (Gemini Flash) writes 400-800 word feed articles with depth requirements (historical context, physical market connection, purchasing power framing, forward-looking close)
-   - **Alternate path:** `writeSynthesisArticle()` (Claude Sonnet, 1500-2500 words, 6-8 paragraphs, maxTokens 4000) is defined but not currently wired into the pipeline
+4. **Feed articles:** `writeFeedReaction()` (Gemini Flash) writes 400-800 word feed articles with depth requirements (historical context, physical market connection, purchasing power framing, forward-looking close)
    - Save guard filters articles with `troy_commentary.length < 2500` chars
 5. Generates/assigns image (DALL-E gated by `USE_DALLE = false` flag; pool fallback)
-6. Saves to `stack_signal_articles` table
+6. Saves feed articles to `stack_signal_articles` table (`is_stack_signal=false`)
 7. Sends push notification if score ≥85 (via stack-signal-push.js)
+8. **Claude daily synthesis editorial** — `generateClaudeDailySynthesis()` runs opportunistically at the end of every pipeline cycle:
+   - Deduped by date (EST): only one synthesis per day (`is_stack_signal=true AND category='synthesis'`)
+   - Requires ≥ 3 feed articles saved for today; otherwise skips
+   - Gathers today's feed articles and builds a pseudo-cluster passed to `writeSynthesisArticle()` (Claude Sonnet, 1500-2500 words, 6-8 paragraphs)
+   - Saves with distinct title `The Stack Signal: <Month Day, Year>`, `is_stack_signal=true`, `category='synthesis'`, `relevance_score=95`
 
 ### Synthesis Types
 - **daily** (6:15 AM EST): Morning market digest
