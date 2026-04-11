@@ -1,20 +1,22 @@
 /**
  * MCP (Model Context Protocol) server endpoint.
  *
- * Speaks the SSE-based MCP protocol via @modelcontextprotocol/sdk. Exposes
- * 6 tools that wrap existing service/route logic without HTTP self-requests.
+ * Speaks the Streamable HTTP MCP transport via @modelcontextprotocol/sdk.
+ * Exposes 6 tools that wrap existing service/route logic without HTTP
+ * self-requests.
  *
- * Transport endpoints (mounted in index.js):
- *   GET  /mcp/sse       — opens the SSE stream, returns a sessionId
- *   POST /mcp/messages  — client → server JSON-RPC messages (sessionId in query)
+ * Transport endpoints (all mounted at /mcp in index.js):
+ *   POST /mcp   — JSON-RPC request from client (may upgrade to SSE stream)
+ *   GET  /mcp   — client opens SSE stream for server→client notifications
+ *   DELETE /mcp — client terminates its session
  *
- * Note: the existing GET /mcp route in llms.js (302 → /.well-known/mcp.json)
- * is unchanged. It sits on the base /mcp path while our MCP endpoints live
- * at /mcp/sse and /mcp/messages.
+ * Sessions are managed internally by StreamableHTTPServerTransport —
+ * no manual session map required.
  */
 
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
-const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
+const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
+const { randomUUID } = require('crypto');
 const { z } = require('zod');
 
 const supabase = require('../lib/supabase');
@@ -280,58 +282,52 @@ function createMcpServer() {
 }
 
 // ============================================
-// SSE TRANSPORT — session management
+// STREAMABLE HTTP TRANSPORT
+// Single shared transport multiplexes sessions internally via Mcp-Session-Id header
 // ============================================
 
-// Map sessionId → { server, transport } so POST /mcp/messages can route
-// messages back to the correct live connection.
-const sessions = new Map();
+let _server = null;
+let _transport = null;
+let _initPromise = null;
 
-async function handleMcpSse(req, res) {
+async function ensureInit() {
+  if (_server && _transport) return;
+  if (_initPromise) return _initPromise;
+
+  _initPromise = (async () => {
+    _server = createMcpServer();
+    _transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (sessionId) => {
+        console.log(`[MCP] Session initialized: ${sessionId}`);
+      },
+      onsessionclosed: (sessionId) => {
+        console.log(`[MCP] Session closed: ${sessionId}`);
+      },
+    });
+    await _server.connect(_transport);
+    console.log('[MCP] Streamable HTTP transport ready');
+  })();
+
+  return _initPromise;
+}
+
+async function handleMcp(req, res) {
   try {
-    const transport = new SSEServerTransport('/mcp/messages', res);
-    const server = createMcpServer();
+    await ensureInit();
 
-    sessions.set(transport.sessionId, { server, transport });
-
-    const cleanup = () => {
-      sessions.delete(transport.sessionId);
-      try { server.close?.(); } catch { /* ignore */ }
-    };
-
-    res.on('close', cleanup);
-    res.on('error', cleanup);
-
-    await server.connect(transport);
-    console.log(`[MCP] SSE session opened: ${transport.sessionId}`);
+    // POST uses the pre-parsed body from express.json(); GET and DELETE don't need one
+    if (req.method === 'POST') {
+      await _transport.handleRequest(req, res, req.body);
+    } else {
+      await _transport.handleRequest(req, res);
+    }
   } catch (err) {
-    console.error('[MCP] SSE connect error:', err);
+    console.error('[MCP] Request error:', err);
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to open MCP SSE stream', detail: err.message });
+      res.status(500).json({ error: 'MCP request failed', detail: err.message });
     }
   }
 }
 
-async function handleMcpMessages(req, res) {
-  try {
-    const sessionId = req.query.sessionId;
-    if (!sessionId || typeof sessionId !== 'string') {
-      return res.status(400).json({ error: 'Missing sessionId query parameter' });
-    }
-
-    const session = sessions.get(sessionId);
-    if (!session) {
-      return res.status(404).json({ error: 'No active MCP session for sessionId' });
-    }
-
-    // express.json() has already parsed the body — pass it through so the transport doesn't re-read the stream
-    await session.transport.handlePostMessage(req, res, req.body);
-  } catch (err) {
-    console.error('[MCP] Message handler error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to handle MCP message', detail: err.message });
-    }
-  }
-}
-
-module.exports = { handleMcpSse, handleMcpMessages, createMcpServer };
+module.exports = { handleMcp, createMcpServer };

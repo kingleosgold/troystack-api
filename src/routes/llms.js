@@ -19,19 +19,10 @@ User-agent: *
 Allow: /.well-known/
 Allow: /llms.txt
 Allow: /openapi.json
-Allow: /mcp
 Allow: /sitemap.xml
 
 Sitemap: https://api.troystack.ai/sitemap.xml
 `);
-});
-
-// ============================================================
-// /mcp → redirect to /.well-known/mcp.json
-// Some MCP registries look for /mcp directly
-// ============================================================
-router.get('/mcp', (req, res) => {
-  res.redirect(302, '/.well-known/mcp.json');
 });
 
 // ============================================================
@@ -47,7 +38,7 @@ router.get('/sitemap.xml', (req, res) => {
     '/openapi.json',
     '/.well-known/ai-plugin.json',
     '/.well-known/mcp.json',
-    '/mcp',
+    '/.well-known/mcp/server-card.json',
     '/v1/prices',
     '/v1/prices/history',
     '/v1/market-intel',
@@ -419,8 +410,8 @@ router.get('/.well-known/mcp/server-card.json', (req, res) => {
   res.json({
     name: 'TroyStack',
     description: 'AI-powered precious metals data — live spot prices, COMEX vault inventory, market intelligence, junk silver calculator, and historical price data',
-    url: 'https://api.troystack.ai/mcp/sse',
-    transport: 'sse',
+    url: 'https://api.troystack.ai/mcp',
+    transport: 'streamable-http',
     version: '3.0.1',
     tools: [
       { name: 'get_spot_prices', description: 'Live gold, silver, platinum, palladium spot prices' },

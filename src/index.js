@@ -29,7 +29,7 @@ const dealerPricesRouter = require('./routes/dealerPrices');
 const junkSilverRouter = require('./routes/junk-silver');
 const apiKeysRouter = require('./routes/api-keys');
 const { apiKeyAuth } = require('./middleware/api-key-auth');
-const { handleMcpSse, handleMcpMessages } = require('./routes/mcp');
+const { handleMcp } = require('./routes/mcp');
 
 const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase, areMarketsClosed } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
@@ -174,11 +174,15 @@ app.use('/v1/junk-silver', publicLimiter, junkSilverRouter);
 // API key management — Supabase JWT auth inside the router (not apiKeyAuth)
 app.use('/v1/api-keys', publicLimiter, apiKeysRouter);
 
-// MCP (Model Context Protocol) SSE endpoint — wraps 6 public tools
-// GET /mcp/sse opens the stream; POST /mcp/messages?sessionId=... carries JSON-RPC
-// Note: existing GET /mcp (302 → /.well-known/mcp.json) in llms.js is untouched
-app.get('/mcp/sse', handleMcpSse);
-app.post('/mcp/messages', handleMcpMessages);
+// MCP (Model Context Protocol) — Streamable HTTP transport, 6 public tools
+// Single /mcp endpoint handles POST (client→server), GET (server→client SSE),
+// and DELETE (session termination). Sessions managed via Mcp-Session-Id header.
+// NOTE: The GET /mcp redirect that used to live in llms.js was removed because
+// it conflicts with the transport's GET handler. Discovery still works via
+// /.well-known/mcp.json and /.well-known/mcp/server-card.json.
+app.post('/mcp', handleMcp);
+app.get('/mcp', handleMcp);
+app.delete('/mcp', handleMcp);
 
 // ============================================================
 // HEALTH + API ROOT

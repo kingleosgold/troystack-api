@@ -248,15 +248,18 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | DELETE | /v1/api-keys/:id | Supabase JWT | Revoke key — 404 if not owned by caller |
 
 ### src/routes/mcp.js
-- **Purpose:** Model Context Protocol (MCP) SSE server — wraps 6 public tools for AI agent consumption
-- **Exports:** `handleMcpSse`, `handleMcpMessages`, `createMcpServer`
-- **Dependencies:** `@modelcontextprotocol/sdk` (McpServer + SSEServerTransport), zod, supabase, price-fetcher
+- **Purpose:** Model Context Protocol (MCP) server — wraps 6 public tools for AI agent consumption via the Streamable HTTP transport
+- **Exports:** `handleMcp`, `createMcpServer`
+- **Dependencies:** `@modelcontextprotocol/sdk` (McpServer + StreamableHTTPServerTransport), zod, crypto (randomUUID), supabase, price-fetcher
 - **Last modified:** 2026-04-11
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | /mcp/sse | Public | Opens SSE stream, assigns sessionId, speaks MCP JSON-RPC over SSE |
-| POST | /mcp/messages?sessionId=... | Public | Client→server JSON-RPC messages, routed to the matching transport |
+| POST | /mcp | Public | JSON-RPC request (client→server); may upgrade to SSE stream |
+| GET | /mcp | Public | Opens SSE stream for server→client notifications |
+| DELETE | /mcp | Public | Terminates the client's session |
+
+All three methods route to the single `handleMcp` function which calls `transport.handleRequest(req, res[, req.body])`.
 
 **Tools registered on the McpServer:**
 - `get_spot_prices` — calls `getSpotPrices()` directly
@@ -266,9 +269,9 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 - `get_junk_silver` — params: `dimes`, `quarters`, `half_dollars`, `kennedy_40`, `dollars`, `war_nickels`; duplicates the coin constants from junk-silver.js route (per "don't modify existing routes")
 - `get_speculation` — params: `gold`, `silver`, `platinum`, `palladium` (target prices); returns multipliers and change_pct per metal
 
-**Session management:** In-memory `sessions` Map keyed by `transport.sessionId`. Each SSE connection creates its own McpServer instance. Cleaned up on `res.close` / `res.error`.
+**Session management:** `StreamableHTTPServerTransport` handles sessions internally via the `Mcp-Session-Id` response/request header. Stateful mode with `sessionIdGenerator: () => randomUUID()`. No manual session map. A single shared `McpServer` + `Transport` pair is lazy-initialized on first request and reused for all subsequent requests.
 
-**Note:** Coexists with the existing `GET /mcp` route in `llms.js` (302 redirect to `/.well-known/mcp.json`). The SSE transport uses sub-paths `/mcp/sse` + `/mcp/messages` to avoid conflict.
+**Breaking change from prior SSE transport:** the old `/mcp/sse` + `/mcp/messages?sessionId=...` endpoints and the per-session transport map are gone. Clients must upgrade to speak Streamable HTTP at `/mcp`. The prior `GET /mcp` → `/.well-known/mcp.json` redirect in `llms.js` was removed because it conflicted with the new transport's GET handler. Discovery still works via `/.well-known/mcp.json` and `/.well-known/mcp/server-card.json`.
 
 ### src/routes/junk-silver.js
 - **Purpose:** Junk silver melt value calculator for pre-1965 US coinage
@@ -336,7 +339,6 @@ Silver content per coin (troy oz): dimes 0.07234, quarters 0.18084, half_dollars
 | GET | /robots.txt | Public (open CORS) | Allow list for AI crawlers (ChatGPT-User, Claude-Web, PerplexityBot) + Sitemap directive |
 | GET | /sitemap.xml | Public (open CORS) | XML sitemap of all public endpoints for crawler discovery |
 | GET | /llms.txt | Public (open CORS) | LLM-readable app description |
-| GET | /mcp | Public (open CORS) | 302 redirect to `/.well-known/mcp.json` for registries that probe `/mcp` directly |
 | GET | /openapi.json | Public (open CORS) | OpenAPI 3.0 spec — covers prices, price history, stack-signal, stack-signal/latest, market-intel, vault-watch, junk-silver, speculation, portfolio, holdings, analytics |
 | GET | /.well-known/ai-plugin.json | Public (open CORS) | AI plugin manifest (TroyStack branding, troystack.com logo/legal, support@troystack.com) |
 | GET | /.well-known/mcp.json | Public (open CORS) | MCP server manifest — 6 public tools: get_spot_prices, get_price_history, get_stack_signal, get_vault_watch, get_junk_silver, get_speculation |
