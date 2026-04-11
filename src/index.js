@@ -536,41 +536,43 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('⚡ [Stack Signal Year-End Review] Scheduled: January 1 at 10:00 AM EST (15:00 UTC)');
 
+  // DISABLED: Dealer scraper cron — re-enable when affiliate integrations are ready
   // ── Dealer price scraping: every hour at :05 ──
-  cron.schedule('5 * * * *', async () => {
-    console.log(`\n[DealerScraper Cron] Starting hourly scrape at ${new Date().toISOString()}`);
-    try {
-      const { getCachedPrices } = require('./services/price-fetcher');
-      const { scrapeAllDealers } = require('./services/dealerScraper');
-      const supabase = require('./lib/supabase');
-
-      const cached = getCachedPrices();
-      const spotPrices = {
-        gold: cached?.gold || null,
-        silver: cached?.silver || null,
-      };
-
-      const results = await scrapeAllDealers(spotPrices);
-
-      if (results.length === 0) {
-        console.log('[DealerScraper Cron] No results scraped — skipping insert');
-        return;
-      }
-
-      const { error } = await supabase
-        .from('dealer_prices')
-        .insert(results);
-
-      if (error) {
-        console.error('[DealerScraper Cron] Supabase insert error:', error.message);
-      } else {
-        console.log(`[DealerScraper Cron] Saved ${results.length} prices`);
-      }
-    } catch (err) {
-      console.error('[DealerScraper Cron] Failed:', err.message);
-    }
-  }, { timezone: 'UTC' });
-  console.log('[DealerScraper Cron] Scheduled: every hour at :05');
+  // cron.schedule('5 * * * *', async () => {
+  //   console.log(`\n[DealerScraper Cron] Starting hourly scrape at ${new Date().toISOString()}`);
+  //   try {
+  //     const { getCachedPrices } = require('./services/price-fetcher');
+  //     const { scrapeAllDealers } = require('./services/dealerScraper');
+  //     const supabase = require('./lib/supabase');
+  //
+  //     const cached = getCachedPrices();
+  //     const spotPrices = {
+  //       gold: cached?.gold || null,
+  //       silver: cached?.silver || null,
+  //     };
+  //
+  //     const results = await scrapeAllDealers(spotPrices);
+  //
+  //     if (results.length === 0) {
+  //       console.log('[DealerScraper Cron] No results scraped — skipping insert');
+  //       return;
+  //     }
+  //
+  //     const { error } = await supabase
+  //       .from('dealer_prices')
+  //       .insert(results);
+  //
+  //     if (error) {
+  //       console.error('[DealerScraper Cron] Supabase insert error:', error.message);
+  //     } else {
+  //       console.log(`[DealerScraper Cron] Saved ${results.length} prices`);
+  //     }
+  //   } catch (err) {
+  //     console.error('[DealerScraper Cron] Failed:', err.message);
+  //   }
+  // }, { timezone: 'UTC' });
+  // console.log('[DealerScraper Cron] Scheduled: every hour at :05');
+  console.log('[DealerScraper Cron] DISABLED — re-enable when affiliate integrations are ready');
 
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 });

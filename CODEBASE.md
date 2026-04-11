@@ -327,7 +327,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `15 11 * * 1` | 6:15 AM (Mon) | Weekly preview | `generateStackSignal('weekly_preview')` |
 | `0 22 28-31 * *` | 5:00 PM (last day) | Monthly recap | `generateStackSignal('monthly_recap')` |
 | `0 15 1 1 *` | 10:00 AM (Jan 1) | Yearly recap | `generateStackSignal('yearly_recap')` |
-| `5 * * * *` | Every hour at :05 | Dealer price scraping | dealerScraper.js `scrapeAllDealers()` |
+| ~~`5 * * * *`~~ | ~~Every hour at :05~~ | **DISABLED** — Dealer price scraping (re-enable when affiliate integrations ready) | dealerScraper.js `scrapeAllDealers()` |
 
 ---
 
