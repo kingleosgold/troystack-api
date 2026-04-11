@@ -583,10 +583,10 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 1. `rss-fetcher.js` fetches from 8 RSS feeds (Kitco, Seeking Alpha, Mining.com, Reuters, Zero Hedge, Yahoo Finance, Google News)
 2. Deduplicates against existing articles in DB (by URL)
 3. Clusters related articles via Gemini
-4. Writes original long-form synthesis articles via Claude Sonnet (1500-2500 words, 6-8 paragraphs, maxTokens 4000):
-   - Must include historical parallels, purchasing power framing, physical vs paper disconnect, COMEX supply context, and forward-looking watch list
+4. **Active path:** `writeFeedReaction()` (Gemini Flash) writes 400-800 word feed articles with depth requirements (historical context, physical market connection, purchasing power framing, forward-looking close)
+   - **Alternate path:** `writeSynthesisArticle()` (Claude Sonnet, 1500-2500 words, 6-8 paragraphs, maxTokens 4000) is defined but not currently wired into the pipeline
    - Save guard filters articles with `troy_commentary.length < 2500` chars
-5. Generates/assigns image (DALL-E, 3/day cap, then pool fallback)
+5. Generates/assigns image (DALL-E gated by `USE_DALLE = false` flag; pool fallback)
 6. Saves to `stack_signal_articles` table
 7. Sends push notification if score ≥85 (via stack-signal-push.js)
 
