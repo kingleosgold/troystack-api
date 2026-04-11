@@ -271,6 +271,8 @@ All three methods route to the single `handleMcp` function which calls `transpor
 
 **Session management:** `StreamableHTTPServerTransport` handles sessions internally via the `Mcp-Session-Id` response/request header. Stateful mode with `sessionIdGenerator: () => randomUUID()`. No manual session map. A single shared `McpServer` + `Transport` pair is lazy-initialized on first request and reused for all subsequent requests.
 
+**Body parsing:** `/mcp` routes are mounted in `index.js` BEFORE the global `express.json()` middleware (alongside the Stripe webhook) so malformed or empty POST bodies don't get rejected by the global JSON parser. The `handleMcp` function uses its own `readRawBody()` helper that reads the raw stream, attempts `JSON.parse`, and falls back to `{}` on failure — the MCP transport then handles the error path with a proper JSON-RPC error response.
+
 **Breaking change from prior SSE transport:** the old `/mcp/sse` + `/mcp/messages?sessionId=...` endpoints and the per-session transport map are gone. Clients must upgrade to speak Streamable HTTP at `/mcp`. The prior `GET /mcp` → `/.well-known/mcp.json` redirect in `llms.js` was removed because it conflicted with the new transport's GET handler. Discovery still works via `/.well-known/mcp.json` and `/.well-known/mcp/server-card.json`.
 
 ### src/routes/junk-silver.js

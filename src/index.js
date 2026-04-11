@@ -80,6 +80,16 @@ const openCors = cors();
 // ============================================================
 app.post('/v1/webhooks/stripe', cors(corsOptions), express.raw({ type: 'application/json' }), stripeWebhookHandler);
 
+// ============================================================
+// MCP (Model Context Protocol) — MUST come BEFORE express.json()
+// The Streamable HTTP transport parses its own body so malformed/empty
+// POST bodies don't get rejected by the global JSON parser. Single /mcp
+// endpoint handles POST (client→server), GET (SSE stream), DELETE (session end).
+// ============================================================
+app.post('/mcp', cors(corsOptions), handleMcp);
+app.get('/mcp', cors(corsOptions), handleMcp);
+app.delete('/mcp', cors(corsOptions), handleMcp);
+
 // Apply CORS and JSON parsing for everything else
 app.use(cors(corsOptions));
 app.use((req, res, next) => {
@@ -182,15 +192,8 @@ app.use('/v1/junk-silver', publicLimiter, junkSilverRouter);
 // API key management — Supabase JWT auth inside the router (not apiKeyAuth)
 app.use('/v1/api-keys', publicLimiter, apiKeysRouter);
 
-// MCP (Model Context Protocol) — Streamable HTTP transport, 6 public tools
-// Single /mcp endpoint handles POST (client→server), GET (server→client SSE),
-// and DELETE (session termination). Sessions managed via Mcp-Session-Id header.
-// NOTE: The GET /mcp redirect that used to live in llms.js was removed because
-// it conflicts with the transport's GET handler. Discovery still works via
-// /.well-known/mcp.json and /.well-known/mcp/server-card.json.
-app.post('/mcp', handleMcp);
-app.get('/mcp', handleMcp);
-app.delete('/mcp', handleMcp);
+// MCP routes are mounted above (before express.json()) so the transport
+// can parse its own body — see Streamable HTTP block near Stripe webhook.
 
 // ============================================================
 // HEALTH + API ROOT

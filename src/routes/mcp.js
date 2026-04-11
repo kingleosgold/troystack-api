@@ -312,14 +312,45 @@ async function ensureInit() {
   return _initPromise;
 }
 
+/**
+ * Read the raw request body as a string. Resolves even if the body is empty.
+ * Used instead of express.json() so malformed or empty POST bodies don't get
+ * rejected before reaching the MCP transport.
+ */
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    // If something upstream already parsed the body, reuse it (defensive)
+    if (req.body !== undefined && req.body !== null && typeof req.body !== 'string') {
+      return resolve(req.body);
+    }
+
+    let raw = '';
+    req.setEncoding('utf8');
+    req.on('data', chunk => { raw += chunk; });
+    req.on('end', () => {
+      if (!raw) return resolve({});
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        // Malformed JSON → empty object so the transport can return a proper MCP error
+        resolve({});
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
 async function handleMcp(req, res) {
   try {
     await ensureInit();
 
-    // POST uses the pre-parsed body from express.json(); GET and DELETE don't need one
     if (req.method === 'POST') {
-      await _transport.handleRequest(req, res, req.body);
+      // Manually parse body — this route is mounted BEFORE express.json()
+      // so malformed/empty bodies don't get rejected upstream
+      const body = await readRawBody(req);
+      await _transport.handleRequest(req, res, body);
     } else {
+      // GET (SSE stream) and DELETE (session end) don't need a body
       await _transport.handleRequest(req, res);
     }
   } catch (err) {
