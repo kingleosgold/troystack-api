@@ -9,7 +9,7 @@ router.get('/llms.txt', (req, res) => {
   res.type('text/plain').send(`# TroyStack
 
 ## Overview
-TroyStack is an AI-powered precious metals portfolio tracker for iOS. It helps investors track their gold, silver, platinum, and palladium holdings with live spot prices, AI market analysis, and institutional-grade COMEX vault data.
+TroyStack is an AI-powered precious metals portfolio tracking and market intelligence platform. It helps investors track their gold, silver, platinum, and palladium holdings with live spot prices, AI-curated Stack Signal market analysis, institutional-grade COMEX vault data, and junk silver melt value tools.
 
 ## API
 Base URL: https://api.troystack.ai
@@ -17,9 +17,12 @@ Base URL: https://api.troystack.ai
 ### Public Endpoints (no auth required)
 - GET /v1/prices — Live spot prices for Au, Ag, Pt, Pd with daily change percentages
 - GET /v1/prices/history?metal=silver&range=1Y — Historical price data (1M, 3M, 6M, 1Y, 5Y, ALL)
-- GET /v1/market-intel — Latest precious metals news headlines and AI analysis
+- GET /v1/stack-signal — Latest Stack Signal market intelligence articles (Troy's curated precious metals analysis)
+- GET /v1/stack-signal/latest — Most recent Stack Signal daily synthesis editorial
+- GET /v1/market-intel — Latest precious metals news headlines
 - GET /v1/vault-watch?metal=silver — COMEX warehouse inventory (registered, eligible, oversubscribed ratio)
 - GET /v1/vault-watch/history?metal=silver&days=30 — Vault drain history
+- GET /v1/junk-silver?dimes=50&quarters=40 — Pre-1965 US coin melt value calculator
 - GET /v1/speculation?silver=1000&gold=25000 — What-if price scenario projections
 
 ### Authenticated Endpoints (Bearer token required)
@@ -38,17 +41,18 @@ Manifest: https://api.troystack.ai/.well-known/mcp.json
 
 ## Use Cases
 - Check current gold and silver prices
+- Read Troy's Stack Signal market intelligence and daily editorials
 - Get COMEX vault inventory and silver squeeze data
+- Calculate melt value of pre-1965 US junk silver coins
 - Track a precious metals portfolio programmatically
-- Add purchases via API or AI assistant
 - Analyze cost basis and break-even prices
 - Run what-if scenarios for future metal prices
-- Get AI-curated precious metals market news
 
 ## Links
-- Website: https://troystack.ai
+- Website: https://troystack.com
 - App Store: https://apps.apple.com/app/troystack/id6738029817
 - API Docs: https://api.troystack.ai
+- Contact: support@troystack.com
 `);
 });
 
@@ -61,8 +65,8 @@ router.get('/openapi.json', (req, res) => {
     info: {
       title: 'TroyStack API',
       version: '1.0.0',
-      description: 'Precious metals portfolio tracking, live spot prices, COMEX vault data, and market intelligence.',
-      contact: { url: 'https://troystack.ai' },
+      description: 'AI-powered precious metals portfolio tracking and market intelligence. Live spot prices, COMEX vault data, Stack Signal editorial, and junk silver melt value tools.',
+      contact: { url: 'https://troystack.com', email: 'support@troystack.com' },
     },
     servers: [{ url: 'https://api.troystack.ai' }],
     paths: {
@@ -89,6 +93,29 @@ router.get('/openapi.json', (req, res) => {
           responses: { '200': { description: 'Historical price data' } }
         }
       },
+      '/v1/stack-signal': {
+        get: {
+          summary: 'Get Stack Signal articles',
+          description: 'Returns curated Stack Signal precious metals intelligence articles with Troy\'s commentary.',
+          operationId: 'getStackSignal',
+          tags: ['Stack Signal'],
+          parameters: [
+            { name: 'limit', in: 'query', schema: { type: 'integer', default: 20, minimum: 1, maximum: 50 } },
+            { name: 'offset', in: 'query', schema: { type: 'integer', default: 0 } },
+            { name: 'category', in: 'query', schema: { type: 'string' } }
+          ],
+          responses: { '200': { description: 'Stack Signal articles with Troy commentary and source references' } }
+        }
+      },
+      '/v1/stack-signal/latest': {
+        get: {
+          summary: 'Get latest Stack Signal synthesis',
+          description: 'Returns the most recent Stack Signal daily synthesis editorial.',
+          operationId: 'getStackSignalLatest',
+          tags: ['Stack Signal'],
+          responses: { '200': { description: 'Latest daily synthesis article' } }
+        }
+      },
       '/v1/market-intel': {
         get: {
           summary: 'Get market intelligence',
@@ -112,6 +139,23 @@ router.get('/openapi.json', (req, res) => {
             { name: 'metal', in: 'query', schema: { type: 'string', enum: ['gold', 'silver', 'platinum', 'palladium'], default: 'silver' } }
           ],
           responses: { '200': { description: 'COMEX warehouse inventory data' } }
+        }
+      },
+      '/v1/junk-silver': {
+        get: {
+          summary: 'Junk silver melt value calculator',
+          description: 'Calculates silver melt value for pre-1965 US coinage. All quantity params are optional non-negative integers.',
+          operationId: 'getJunkSilver',
+          tags: ['Tools'],
+          parameters: [
+            { name: 'dimes', in: 'query', schema: { type: 'integer', minimum: 0 }, description: 'Roosevelt/Mercury dimes (0.07234 oz Ag each)' },
+            { name: 'quarters', in: 'query', schema: { type: 'integer', minimum: 0 }, description: 'Washington quarters (0.18084 oz Ag each)' },
+            { name: 'half_dollars', in: 'query', schema: { type: 'integer', minimum: 0 }, description: 'Walking Liberty/Franklin/Kennedy 1964 half dollars (0.36169 oz Ag each)' },
+            { name: 'kennedy_40', in: 'query', schema: { type: 'integer', minimum: 0 }, description: 'Kennedy 1965-1970 40% silver halves (0.14792 oz Ag each)' },
+            { name: 'dollars', in: 'query', schema: { type: 'integer', minimum: 0 }, description: 'Morgan/Peace dollars (0.77344 oz Ag each)' },
+            { name: 'war_nickels', in: 'query', schema: { type: 'integer', minimum: 0 }, description: 'Jefferson 1942-1945 war nickels (0.05626 oz Ag each)' }
+          ],
+          responses: { '200': { description: 'Melt value breakdown by coin type + totals' } }
         }
       },
       '/v1/speculation': {
@@ -202,13 +246,13 @@ router.get('/.well-known/ai-plugin.json', (req, res) => {
     schema_version: 'v1',
     name_for_human: 'TroyStack',
     name_for_model: 'troystack',
-    description_for_human: 'Track your precious metals portfolio with live spot prices, COMEX vault data, and AI market intelligence.',
-    description_for_model: 'TroyStack provides real-time precious metals data. Use it to: check gold/silver/platinum/palladium spot prices, get COMEX warehouse inventory and silver squeeze data, read curated market news, track a user\'s portfolio holdings and P/L, add purchases, analyze cost basis, and run what-if price scenarios. Public endpoints need no auth. Portfolio endpoints require a Bearer token.',
+    description_for_human: 'AI-powered precious metals portfolio tracking and market intelligence.',
+    description_for_model: 'TroyStack provides AI-powered precious metals portfolio tracking and market intelligence. Use it to: check gold/silver/platinum/palladium spot prices, read Stack Signal market intelligence articles and daily synthesis editorials, get COMEX warehouse inventory and silver squeeze data, calculate melt value of pre-1965 US junk silver coins, track a user\'s portfolio holdings and P/L, analyze cost basis, and run what-if price scenarios. Public endpoints need no auth. Portfolio endpoints require a Bearer token.',
     auth: { type: 'service_http', authorization_type: 'bearer' },
     api: { type: 'openapi', url: 'https://api.troystack.ai/openapi.json' },
-    logo_url: 'https://troystack.ai/logo.png',
+    logo_url: 'https://troystack.com/logo.png',
     contact_email: 'support@troystack.com',
-    legal_info_url: 'https://troystack.ai/terms',
+    legal_info_url: 'https://troystack.com/terms',
   });
 });
 
@@ -220,9 +264,11 @@ router.get('/.well-known/mcp.json', (req, res) => {
     schema_version: '1.0',
     name: 'troystack',
     display_name: 'TroyStack',
-    description: 'Precious metals portfolio tracker with live spot prices, COMEX vault data, market intelligence, and portfolio management.',
-    icon: 'https://troystack.ai/logo.png',
-    publisher: { name: 'Mancini Tech Solutions LLC', url: 'https://troystack.ai' },
+    description: 'AI-powered precious metals portfolio tracking and market intelligence',
+    icon: 'https://troystack.com/logo.png',
+    publisher: { name: 'Mancini Tech Solutions LLC', url: 'https://troystack.com' },
+    contact_email: 'support@troystack.com',
+    api_base_url: 'https://api.troystack.ai',
     tools: [
       {
         name: 'get_spot_prices',
@@ -241,10 +287,15 @@ router.get('/.well-known/mcp.json', (req, res) => {
         }
       },
       {
-        name: 'get_market_intel',
-        description: 'Get latest precious metals news headlines and AI analysis',
-        endpoint: 'GET /v1/market-intel',
+        name: 'get_stack_signal',
+        description: 'Get the latest Stack Signal market intelligence articles — Troy\'s curated precious metals analysis with commentary and sourced reporting',
+        endpoint: 'GET /v1/stack-signal',
         auth_required: false,
+        parameters: {
+          limit: { type: 'integer', description: 'Max articles to return (1-50)', default: 20 },
+          offset: { type: 'integer', description: 'Pagination offset', default: 0 },
+          category: { type: 'string', description: 'Filter by article category' },
+        }
       },
       {
         name: 'get_vault_watch',
@@ -256,46 +307,29 @@ router.get('/.well-known/mcp.json', (req, res) => {
         }
       },
       {
-        name: 'run_speculation',
+        name: 'get_junk_silver',
+        description: 'Calculate silver melt value for pre-1965 US coinage (dimes, quarters, half dollars, Kennedy 40% halves, Morgan/Peace dollars, war nickels)',
+        endpoint: 'GET /v1/junk-silver',
+        auth_required: false,
+        parameters: {
+          dimes: { type: 'integer', description: 'Roosevelt/Mercury dime count' },
+          quarters: { type: 'integer', description: 'Washington quarter count' },
+          half_dollars: { type: 'integer', description: 'Walking Liberty/Franklin/1964 Kennedy half count' },
+          kennedy_40: { type: 'integer', description: 'Kennedy 1965-1970 (40% silver) half count' },
+          dollars: { type: 'integer', description: 'Morgan/Peace silver dollar count' },
+          war_nickels: { type: 'integer', description: '1942-1945 Jefferson war nickel count' },
+        }
+      },
+      {
+        name: 'get_speculation',
         description: 'Calculate portfolio projections at hypothetical future metal prices (e.g., what if silver hits $1000)',
         endpoint: 'GET /v1/speculation',
         auth_required: false,
         parameters: {
-          silver: { type: 'number', description: 'Target silver price' },
-          gold: { type: 'number', description: 'Target gold price' },
-        }
-      },
-      {
-        name: 'get_portfolio',
-        description: 'Get user portfolio summary with live valuation and unrealized P/L',
-        endpoint: 'GET /v1/portfolio',
-        auth_required: true,
-      },
-      {
-        name: 'get_analytics',
-        description: 'Get portfolio cost basis, break-even, and allocation analysis',
-        endpoint: 'GET /v1/analytics',
-        auth_required: true,
-      },
-      {
-        name: 'list_holdings',
-        description: 'List all portfolio holdings with purchase details',
-        endpoint: 'GET /v1/holdings',
-        auth_required: true,
-      },
-      {
-        name: 'add_holding',
-        description: 'Add a new precious metals purchase to the portfolio',
-        endpoint: 'POST /v1/holdings',
-        auth_required: true,
-        parameters: {
-          metal: { type: 'string', required: true, enum: ['gold', 'silver', 'platinum', 'palladium'] },
-          quantity: { type: 'integer', required: true },
-          weight_oz: { type: 'number', required: true },
-          purchase_price: { type: 'number', required: true },
-          product_name: { type: 'string' },
-          dealer: { type: 'string' },
-          purchase_date: { type: 'string', format: 'date' },
+          silver: { type: 'number', description: 'Target silver price per oz' },
+          gold: { type: 'number', description: 'Target gold price per oz' },
+          platinum: { type: 'number', description: 'Target platinum price per oz' },
+          palladium: { type: 'number', description: 'Target palladium price per oz' },
         }
       }
     ],
