@@ -327,7 +327,7 @@ CRITICAL: Return ONLY the JSON array. No markdown, no code fences, no explanatio
 /**
  * Write an original long-form article synthesizing all sources in a cluster.
  * Uses Claude Sonnet via the existing callClaude function.
- * Returns the article text (800-1200 words, 4-6 paragraphs) or null on failure.
+ * Returns the article text (1500-2500 words, 6-8 paragraphs) or null on failure.
  */
 async function writeSynthesisArticle(cluster, currentPrices) {
   const sourceMaterial = cluster.articles.map(a =>
@@ -355,24 +355,27 @@ VOICE RULES (apply to ALL output):
 - Respects physical metal over paper markets
 - Aware of COMEX manipulation, silver derivatives, central bank accumulation
 
-STRUCTURE — Write EXACTLY 4-6 paragraphs. Total length: 800-1200 words.
+STRUCTURE — Write 6-8 paragraphs. Total length: 1500-2500 words.
 
-PARAGRAPH 1 — THE STORY (150-200 words)
-Lead with the most important development. Hook the reader. Include specific numbers in **bold**. This should read like the opening of a Reuters wire story but with Troy's stacker perspective.
+PARAGRAPH 1 — THE STORY (250-350 words)
+Lead with the most important development. Hook the reader. Include specific numbers in **bold**. This should read like the opening of a Reuters wire story but with Troy's stacker perspective. Immediately expand into WHY it matters for physical metal holders.
 
-PARAGRAPH 2 — THE CONTEXT (150-200 words)
-Why does this matter historically? When did we last see this pattern? What followed? Reference specific dates and price levels if the sources provide them. Connect today's news to broader trends.
+PARAGRAPH 2 — THE CONTEXT (250-350 words)
+Why does this matter historically? When did we last see this pattern? What followed? Reference specific dates and price levels. Include at least one historical parallel with specific dates and data (e.g., "The last time monthly CPI exceeded 0.8% for three consecutive months was 1981, and gold tripled within 18 months").
 
-PARAGRAPH 3 — THE PHYSICAL MARKET (150-200 words)
-What's happening in physical vs paper? COMEX inventory, dealer premiums, delivery demand, vault drawdowns, mine supply. This is Troy's edge — the physical market intelligence nobody else synthesizes. If sources don't mention physical data, use your knowledge to add relevant physical market context.
+PARAGRAPH 3 — THE PHYSICAL MARKET (250-350 words)
+What's happening in physical vs paper? COMEX inventory, dealer premiums, delivery demand, vault drawdowns, mine supply. This is Troy's edge — the physical market intelligence nobody else synthesizes. Address the paper vs physical disconnect when relevant: what is spot doing vs what are dealers actually charging? What does the premium environment suggest about real demand?
 
-PARAGRAPH 4 — CONNECTING THE DOTS (150-200 words)
-Cross-reference data from multiple sources. Show patterns the individual articles miss. "Reuters reports X, while COMEX data shows Y — together these suggest..."
+PARAGRAPH 4 — CONNECTING THE DOTS (250-350 words)
+Cross-reference data from multiple sources. Show patterns the individual articles miss. "Reuters reports X, while COMEX data shows Y — together these suggest..." Include COMEX/supply context when relevant: registered inventory trends, delivery volumes, mining output pressures.
 
-PARAGRAPH 5 — WHAT TO WATCH (100-150 words)
-Specific dates, price levels, thresholds, upcoming events. Be precise: "Watch the March 5 COMEX delivery report" not "watch upcoming data."
+PARAGRAPH 5 — PURCHASING POWER (200-300 words)
+What does this data mean in terms of barrels of oil, months of rent, or hours of labor that gold/silver can buy? Frame the price action in real-world purchasing power terms, not just dollars. The dollars change. The metal's purchasing power holds.
 
-PARAGRAPH 6 (optional) — THE STACKER'S EDGE (75-100 words)
+PARAGRAPH 6 — WHAT TO WATCH (200-300 words)
+Specific dates, price levels, thresholds, upcoming events. Be precise: "Watch the March 5 COMEX delivery report" not "watch upcoming data." What triggers would escalate the situation? What would de-escalate it?
+
+PARAGRAPH 7 (optional) — THE STACKER'S EDGE (150-200 words)
 Direct take on what this means for someone building a physical stack.
 
 CRITICAL FORMAT RULES:
@@ -380,7 +383,21 @@ CRITICAL FORMAT RULES:
 - DO NOT write one long block of text
 - DO NOT use headers, labels, or section titles before paragraphs
 - Each paragraph must be a distinct block separated by a blank line
-- This is non-negotiable`;
+- This is non-negotiable
+
+ARTICLE DEPTH REQUIREMENTS:
+- Open with the core story, then immediately expand into WHY it matters for physical metal holders
+- Include at least one historical parallel with specific dates and data (e.g., "The last time monthly CPI exceeded 0.8% for three consecutive months was 1981, and gold tripled within 18 months")
+- Include purchasing power context: what does this data mean in terms of barrels of oil, months of rent, or hours of labor that gold/silver can buy?
+- Address the paper vs physical disconnect when relevant: what is spot doing vs what are dealers actually charging? What does the premium environment suggest about real demand?
+- Include a COMEX/supply context paragraph when relevant: registered inventory trends, delivery volumes, mining output pressures
+- End with a forward-looking paragraph: what to watch next, what triggers would escalate or de-escalate the situation
+- Write with Troy's voice: direct, opinionated, no hedging, no "not financial advice", no emojis, no exclamation points
+- Use "your stack" not "your portfolio"
+- Bold key numbers and figures using markdown bold
+- No bullet points or lists — write in flowing paragraphs
+- Reference specific metals data: spot price, ratio, percentage moves, historical comparisons with specific dates
+- The tone is confident and informed, like a seasoned analyst writing a private briefing for serious investors`;
 
   const userMessage = `ARTICLE THEME: ${cluster.theme}
 SUGGESTED ANGLE: ${cluster.suggested_angle}
@@ -390,10 +407,10 @@ SOURCE MATERIAL (${cluster.articles.length} sources):
 
 ${sourceMaterial}
 
-Write the article. Remember: 4-6 paragraphs, 800-1200 words total, separated by blank lines.`;
+Write the article. Remember: 6-8 paragraphs, 1500-2500 words total, separated by blank lines.`;
 
   try {
-    return await callClaude(systemPrompt, userMessage, { maxTokens: 2000 });
+    return await callClaude(systemPrompt, userMessage, { maxTokens: 4000 });
   } catch (err) {
     console.error(`[Synthesis] Claude error for "${cluster.theme}": ${err.message}`);
     return null;
@@ -640,7 +657,7 @@ async function saveArticles(articles) {
   }
 
   const validArticles = articles.filter(a => {
-    if (!a.troy_commentary || a.troy_commentary.length < 500) {
+    if (!a.troy_commentary || a.troy_commentary.length < 2500) {
       console.log(`[Save] Filtered out short article: "${a.title?.substring(0, 50)}" (${a.troy_commentary?.length || 0} chars)`);
       return false;
     }
@@ -648,7 +665,7 @@ async function saveArticles(articles) {
   });
 
   if (!validArticles.length) {
-    console.log(`[Save] All ${articles.length} articles filtered out (< 500 chars)`);
+    console.log(`[Save] All ${articles.length} articles filtered out (< 2500 chars)`);
     return 0;
   }
 
@@ -756,7 +773,7 @@ async function generateStackSignal(timeOfDay = 'morning') {
 
   const prices = getCachedPrices();
 
-  // Use one-liners + first 500 chars of each article (full text is now 800-1200 words)
+  // Use one-liners + first 500 chars of each article (full text is now 1500-2500 words)
   const articleSummaries = recentArticles.map((a, i) =>
     `${i + 1}. [${a.category}] "${a.title}" (Score: ${a.relevance_score})\n   Troy's take: ${a.troy_one_liner || 'N/A'}\n   ${(a.troy_commentary || 'No commentary').substring(0, 500)}`
   ).join('\n\n');

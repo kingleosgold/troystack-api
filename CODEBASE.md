@@ -583,10 +583,9 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 1. `rss-fetcher.js` fetches from 8 RSS feeds (Kitco, Seeking Alpha, Mining.com, Reuters, Zero Hedge, Yahoo Finance, Google News)
 2. Deduplicates against existing articles in DB (by URL)
 3. Clusters related articles via Gemini
-4. Generates Troy commentary via Claude (Gemini fallback):
-   - Score 0-69: 1 paragraph
-   - Score 70-84: 2 paragraphs
-   - Score 85-100: 3 paragraphs
+4. Writes original long-form synthesis articles via Claude Sonnet (1500-2500 words, 6-8 paragraphs, maxTokens 4000):
+   - Must include historical parallels, purchasing power framing, physical vs paper disconnect, COMEX supply context, and forward-looking watch list
+   - Save guard filters articles with `troy_commentary.length < 2500` chars
 5. Generates/assigns image (DALL-E, 3/day cap, then pool fallback)
 6. Saves to `stack_signal_articles` table
 7. Sends push notification if score ≥85 (via stack-signal-push.js)
