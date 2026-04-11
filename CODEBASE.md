@@ -340,6 +340,7 @@ Silver content per coin (troy oz): dimes 0.07234, quarters 0.18084, half_dollars
 | GET | /openapi.json | Public (open CORS) | OpenAPI 3.0 spec — covers prices, price history, stack-signal, stack-signal/latest, market-intel, vault-watch, junk-silver, speculation, portfolio, holdings, analytics |
 | GET | /.well-known/ai-plugin.json | Public (open CORS) | AI plugin manifest (TroyStack branding, troystack.com logo/legal, support@troystack.com) |
 | GET | /.well-known/mcp.json | Public (open CORS) | MCP server manifest — 6 public tools: get_spot_prices, get_price_history, get_stack_signal, get_vault_watch, get_junk_silver, get_speculation |
+| GET | /.well-known/mcp/server-card.json | Public (open CORS) | MCP server card for registries — points at `/mcp/sse` transport URL with tool summaries, contact, website, logo |
 
 Root response `GET /` now includes top-level `mcp`, `openapi`, `llms`, `sitemap`, `docs` URLs for crawler discovery alongside the existing endpoint catalog.
 

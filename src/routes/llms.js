@@ -411,4 +411,29 @@ router.get('/.well-known/mcp.json', (req, res) => {
   });
 });
 
+// ============================================================
+// MCP Server Card — discoverable metadata for MCP registries
+// Distinct path from /.well-known/mcp.json (which is the tool manifest)
+// ============================================================
+router.get('/.well-known/mcp/server-card.json', (req, res) => {
+  res.json({
+    name: 'TroyStack',
+    description: 'AI-powered precious metals data — live spot prices, COMEX vault inventory, market intelligence, junk silver calculator, and historical price data',
+    url: 'https://api.troystack.ai/mcp/sse',
+    transport: 'sse',
+    version: '3.0.1',
+    tools: [
+      { name: 'get_spot_prices', description: 'Live gold, silver, platinum, palladium spot prices' },
+      { name: 'get_price_history', description: 'Historical price data with configurable range' },
+      { name: 'get_stack_signal', description: 'AI-generated precious metals market intelligence articles' },
+      { name: 'get_vault_watch', description: 'COMEX warehouse inventory data' },
+      { name: 'get_junk_silver', description: 'Pre-1965 US coin silver melt value calculator' },
+      { name: 'get_speculation', description: 'What-if price scenario calculator' },
+    ],
+    contact: 'support@troystack.com',
+    website: 'https://troystack.com',
+    logo: 'https://troystack.com/logo.png',
+  });
+});
+
 module.exports = router;
