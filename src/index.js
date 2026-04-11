@@ -29,6 +29,7 @@ const dealerPricesRouter = require('./routes/dealerPrices');
 const junkSilverRouter = require('./routes/junk-silver');
 const apiKeysRouter = require('./routes/api-keys');
 const { apiKeyAuth } = require('./middleware/api-key-auth');
+const { handleMcpSse, handleMcpMessages } = require('./routes/mcp');
 
 const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase, areMarketsClosed } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
@@ -172,6 +173,12 @@ app.use('/v1/junk-silver', publicLimiter, junkSilverRouter);
 
 // API key management — Supabase JWT auth inside the router (not apiKeyAuth)
 app.use('/v1/api-keys', publicLimiter, apiKeysRouter);
+
+// MCP (Model Context Protocol) SSE endpoint — wraps 6 public tools
+// GET /mcp/sse opens the stream; POST /mcp/messages?sessionId=... carries JSON-RPC
+// Note: existing GET /mcp (302 → /.well-known/mcp.json) in llms.js is untouched
+app.get('/mcp/sse', handleMcpSse);
+app.post('/mcp/messages', handleMcpMessages);
 
 // ============================================================
 // HEALTH + API ROOT

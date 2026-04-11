@@ -247,6 +247,29 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | GET | /v1/api-keys | Supabase JWT | List user's keys with `key_preview` (last 8 chars of hash), tier, rate_limit, last_used_at, request_count |
 | DELETE | /v1/api-keys/:id | Supabase JWT | Revoke key — 404 if not owned by caller |
 
+### src/routes/mcp.js
+- **Purpose:** Model Context Protocol (MCP) SSE server — wraps 6 public tools for AI agent consumption
+- **Exports:** `handleMcpSse`, `handleMcpMessages`, `createMcpServer`
+- **Dependencies:** `@modelcontextprotocol/sdk` (McpServer + SSEServerTransport), zod, supabase, price-fetcher
+- **Last modified:** 2026-04-11
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | /mcp/sse | Public | Opens SSE stream, assigns sessionId, speaks MCP JSON-RPC over SSE |
+| POST | /mcp/messages?sessionId=... | Public | Client→server JSON-RPC messages, routed to the matching transport |
+
+**Tools registered on the McpServer:**
+- `get_spot_prices` — calls `getSpotPrices()` directly
+- `get_price_history` — params: `metal`, `range` (1M|3M|6M|1Y|5Y|ALL); queries `price_log` table
+- `get_stack_signal` — params: `limit`, `offset`, `category`; queries `stack_signal_articles`
+- `get_vault_watch` — optional `metal` param; queries `vault_data` (latest per metal)
+- `get_junk_silver` — params: `dimes`, `quarters`, `half_dollars`, `kennedy_40`, `dollars`, `war_nickels`; duplicates the coin constants from junk-silver.js route (per "don't modify existing routes")
+- `get_speculation` — params: `gold`, `silver`, `platinum`, `palladium` (target prices); returns multipliers and change_pct per metal
+
+**Session management:** In-memory `sessions` Map keyed by `transport.sessionId`. Each SSE connection creates its own McpServer instance. Cleaned up on `res.close` / `res.error`.
+
+**Note:** Coexists with the existing `GET /mcp` route in `llms.js` (302 redirect to `/.well-known/mcp.json`). The SSE transport uses sub-paths `/mcp/sse` + `/mcp/messages` to avoid conflict.
+
 ### src/routes/junk-silver.js
 - **Purpose:** Junk silver melt value calculator for pre-1965 US coinage
 - **Exports:** Express router
