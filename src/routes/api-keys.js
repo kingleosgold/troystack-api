@@ -81,6 +81,7 @@ router.post('/generate', async (req, res) => {
       .insert({
         user_id: user.id,
         key_hash: keyHash,
+        key_prefix: rawKey.substring(0, 12),
         tier: DEFAULT_TIER,
         rate_limit: DEFAULT_RATE_LIMIT,
         request_count: 0,
