@@ -97,6 +97,7 @@ router.post('/generate', async (req, res) => {
     // Return raw key ONCE — never retrievable again
     res.status(201).json({
       id: inserted.id,
+      api_key: rawKey,
       key: rawKey,
       tier: inserted.tier,
       rate_limit: inserted.rate_limit,
