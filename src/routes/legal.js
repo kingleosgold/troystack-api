@@ -242,7 +242,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
     </p>
 
     <div class="footer">
-      <p>Questions about privacy? Contact us at <a href="mailto:stacktrackergold@gmail.com">stacktrackergold@gmail.com</a></p>
+      <p>Questions about privacy? Contact us at <a href="mailto:support@troystack.com">support@troystack.com</a></p>
       <p style="margin-top: 10px;">Built with privacy in mind. Your data, your control. &#x1F512;</p>
     </div>
   </div>
@@ -471,11 +471,11 @@ const TERMS_HTML = `<!DOCTYPE html>
 
     <h2>14. Contact Us</h2>
     <p>
-      If you have questions about these Terms of Use, please contact us at <a href="mailto:stacktrackergold@gmail.com">stacktrackergold@gmail.com</a>.
+      If you have questions about these Terms of Use, please contact us at <a href="mailto:support@troystack.com">support@troystack.com</a>.
     </p>
 
     <div class="footer">
-      <p>Questions? Contact us at <a href="mailto:stacktrackergold@gmail.com">stacktrackergold@gmail.com</a></p>
+      <p>Questions? Contact us at <a href="mailto:support@troystack.com">support@troystack.com</a></p>
       <p style="margin-top: 10px;">TroyStack - Track your stack with confidence. &#x1FA99;</p>
     </div>
   </div>
@@ -514,7 +514,7 @@ router.get('/api/privacy', (req, res) => {
         technical: 'Full JSON/CSV export, complete local deletion, server backup deletion via API.',
       },
     ],
-    contact: 'privacy@stacktrackerpro.com',
+    contact: 'support@troystack.com',
   });
 });
 

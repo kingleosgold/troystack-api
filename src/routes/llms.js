@@ -207,7 +207,7 @@ router.get('/.well-known/ai-plugin.json', (req, res) => {
     auth: { type: 'service_http', authorization_type: 'bearer' },
     api: { type: 'openapi', url: 'https://api.stacktrackergold.com/openapi.json' },
     logo_url: 'https://stacktrackergold.com/logo.png',
-    contact_email: 'support@stacktrackergold.com',
+    contact_email: 'support@troystack.com',
     legal_info_url: 'https://stacktrackergold.com/terms',
   });
 });

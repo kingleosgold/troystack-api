@@ -256,10 +256,10 @@ Express 5 REST API powering the TroyStack (Stack Tracker Gold) precious metals p
 | GET | /v1/min-version | Public (no rate limit) | Minimum app version check |
 
 ### src/routes/legal.js
-- **Purpose:** Privacy policy and terms of use pages
+- **Purpose:** Privacy policy and terms of use pages (TroyStack branded, support@troystack.com)
 - **Exports:** Express router
 - **Dependencies:** None
-- **Last modified:** 2026-03-29
+- **Last modified:** 2026-04-11
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -268,10 +268,10 @@ Express 5 REST API powering the TroyStack (Stack Tracker Gold) precious metals p
 | GET | /api/privacy | Public | Privacy principles (JSON) |
 
 ### src/routes/llms.js
-- **Purpose:** LLM discoverability endpoints
+- **Purpose:** LLM discoverability endpoints (contact: support@troystack.com)
 - **Exports:** Express router
 - **Dependencies:** None
-- **Last modified:** 2026-02-18
+- **Last modified:** 2026-04-11
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
