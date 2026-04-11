@@ -128,6 +128,15 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 - `sanitizeTTSText(text)` — preprocesses text for natural TTS: markdown removal, abbreviation expansion, number-to-words conversion, slash patterns, acronyms, URL removal
 - `getQuotaStatus(userId, tier)` — checks daily question quota
 
+**Constants:**
+- `PURCHASING_POWER_BENCHMARKS` — today's values (oil $70/bbl, gas $3.50/gal, rent $1800/mo, labor $30/hr) + 1971 Nixon Shock values (gold $35, silver $1.29, oil $3.60, gas $0.36, rent $150, labor $3.60)
+
+**contextData fields injected into system prompt:**
+- `holdings`, `totalValue`, `totalCost`, `totalGain`, `totalGainPercent`
+- `goldPrice`, `silverPrice`, `goldSilverRatio`
+- `purchasingPower` — today's comparisons (barrels of oil, gallons of gas, months of rent, hours of labor)
+- `purchasingPowerComparison` — 1971 vs today for user's actual gold/silver holdings (oz, 1971 value, today value, barrels/gallons then vs now, multiplier ratio)
+
 ### src/routes/scan-receipt.js
 - **Purpose:** AI receipt scanning via Gemini vision
 - **Exports:** Express router

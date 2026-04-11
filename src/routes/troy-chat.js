@@ -17,6 +17,21 @@ const FREE_DAILY_LIMIT = 3;
 const GOLD_DAILY_LIMIT = 30;
 const QUESTION_PERIOD_DAYS = 1;
 
+// Purchasing power benchmarks — today's values + 1971 (Nixon Shock) values
+const PURCHASING_POWER_BENCHMARKS = {
+  oil_per_barrel: 70,
+  gas_per_gallon: 3.50,
+  rent_monthly: 1800,
+  labor_hourly: 30,
+  // 1971 values (Nixon Shock)
+  gold_1971: 35,
+  silver_1971: 1.29,
+  oil_1971: 3.60,
+  gas_1971: 0.36,
+  rent_1971: 150,
+  labor_1971: 3.60,
+};
+
 // ============================================
 // HELPERS
 // ============================================
@@ -474,6 +489,20 @@ router.post('/conversations/:id/messages', async (req, res) => {
     const totalCost = Object.keys(metalTotals).reduce((sum, m) => sum + metalTotals[m].cost, 0);
     const gsRatio = prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1) : 'N/A';
 
+    // Aggregate oz per metal for 1971 comparison
+    const goldOzTotal = metalTotals.gold?.oz || 0;
+    const silverOzTotal = metalTotals.silver?.oz || 0;
+
+    const B = PURCHASING_POWER_BENCHMARKS;
+    const gold1971Value = goldOzTotal * B.gold_1971;
+    const silver1971Value = silverOzTotal * B.silver_1971;
+    const goldTodayValue = goldOzTotal * prices.gold;
+    const silverTodayValue = silverOzTotal * prices.silver;
+    const goldBarrels1971 = gold1971Value / B.oil_1971;
+    const goldBarrelsToday = goldTodayValue / B.oil_per_barrel;
+    const silverGallons1971 = silver1971Value / B.gas_1971;
+    const silverGallonsToday = silverTodayValue / B.gas_per_gallon;
+
     const contextData = {
       holdings: holdingDetails,
       totalValue,
@@ -489,6 +518,29 @@ router.post('/conversations/:id/messages', async (req, res) => {
         stackBarrelsOfOil: totalValue / 85,
         stackMonthsOfRent: totalValue / 1850,
         stackHoursOfLabor: totalValue / 29,
+      },
+      purchasingPowerComparison: {
+        gold: {
+          oz: goldOzTotal,
+          value1971: gold1971Value,
+          valueToday: goldTodayValue,
+          barrelsOfOil1971: goldBarrels1971,
+          barrelsOfOilToday: goldBarrelsToday,
+          ratio: goldBarrels1971 > 0 ? goldBarrelsToday / goldBarrels1971 : 0,
+        },
+        silver: {
+          oz: silverOzTotal,
+          value1971: silver1971Value,
+          valueToday: silverTodayValue,
+          gallonsOfGas1971: silverGallons1971,
+          gallonsOfGasToday: silverGallonsToday,
+          ratio: silverGallons1971 > 0 ? silverGallonsToday / silverGallons1971 : 0,
+        },
+        stackToday: {
+          barrelsOfOil: totalValue / B.oil_per_barrel,
+          monthsOfRent: totalValue / B.rent_monthly,
+          hoursOfLabor: totalValue / B.labor_hourly,
+        },
       },
     };
 
@@ -592,6 +644,11 @@ CURRENT SPOT:
 Gold: $${prices.gold}, Silver: $${prices.silver}, Platinum: $${prices.platinum}, Palladium: $${prices.palladium}
 Gold/Silver Ratio: ${gsRatio}
 
+PURCHASING POWER (1971 vs TODAY):
+${goldOzTotal > 0 ? `- User's gold: ${goldOzTotal.toFixed(2)} oz → 1971 value: $${gold1971Value.toFixed(2)} → today: $${goldTodayValue.toFixed(2)} → bought ${goldBarrels1971.toFixed(1)} barrels of oil then, buys ${goldBarrelsToday.toFixed(1)} barrels now (${goldBarrels1971 > 0 ? (goldBarrelsToday / goldBarrels1971).toFixed(1) : '0'}x)` : '- User holds no gold'}
+${silverOzTotal > 0 ? `- User's silver: ${silverOzTotal.toFixed(2)} oz → 1971 value: $${silver1971Value.toFixed(2)} → today: $${silverTodayValue.toFixed(2)} → bought ${silverGallons1971.toFixed(1)} gallons of gas then, buys ${silverGallonsToday.toFixed(1)} gallons now (${silverGallons1971 > 0 ? (silverGallonsToday / silverGallons1971).toFixed(1) : '0'}x)` : '- User holds no silver'}
+- Total stack buys: ${(totalValue / B.oil_per_barrel).toFixed(1)} barrels of oil, ${(totalValue / B.rent_monthly).toFixed(1)} months of rent, ${(totalValue / B.labor_hourly).toFixed(1)} hours of median US labor today
+
 APP GUIDE (when users ask how to do things in the app):
 - Add holding: Three ways to get your stack into the app: (1) Tap the "+" button at the TOP of the Portfolio tab — select metal, enter quantity, cost per oz, purchase date, and item details. (2) Receipt Scanner in the Tools tab — this is the fastest way. Take a photo of a dealer receipt, package slip, screenshot, or even a handwritten note — Troy's AI reads it and extracts all the details automatically. Seriously, try it — it's like magic. (3) CSV Import in the Tools tab — bulk import your entire stack from a spreadsheet.
 - Price alerts: Tools tab > Price Alerts. Set target prices for any metal and get push notifications when hit.
@@ -644,6 +701,17 @@ Purchasing power benchmarks to reference:
 - The classic: a good men's suit has cost roughly 1 oz of gold for over a century
 
 When users ask "how's my stack doing?" — give the dollar number, then immediately reframe in real terms. That's the insight no other app provides.
+
+PURCHASING POWER FRAMING — USE THIS IN EVERY PORTFOLIO DISCUSSION:
+When discussing the user's stack value or gains, always frame in purchasing power terms, not just dollars.
+
+- "Your stack buys [N] barrels of oil, [N] months of rent, [N] hours of median US labor"
+- Compare to 1971: "In 1971 your [X]oz of silver was worth $[Y]. But oil was $3.60 a barrel then. Your silver bought [M] barrels. Today it buys [N] barrels — [ratio]x more. The dollars changed. The purchasing power held."
+- Use the line: "The dollars are losing value, not the metals gaining it" when contextually appropriate
+- Prefer "gallons of gas" for silver discussions, "barrels of oil" for gold discussions
+- Always lead with the real-world comparison, then the dollar figure — not the other way around
+
+The PURCHASING POWER section of the injected context gives you the exact 1971 vs today numbers for this user's actual holdings. Use them verbatim — do not estimate.
 
 PHYSICAL MARKET AWARENESS:
 You understand the difference between the paper price and the physical price, and you make sure users do too.
