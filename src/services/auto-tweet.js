@@ -76,7 +76,7 @@ async function postArticleTweet(article) {
     }
 
     // Build tweet body
-    const url = `https://troystack.ai/signal/${article.slug}`;
+    const url = `https://troystack.com/signal/${article.slug}`;
     const title = article.title.trim();
     const oneLiner = (article.troy_one_liner || '').trim();
 

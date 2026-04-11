@@ -741,7 +741,7 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 - **Dependencies:** twitter-api-v2, supabase
 - **Dedup:** `app_state` key `tweeted_signal_${slug}` holds the tweet id
 - **Daily cap:** 5 tweets/day via `app_state` key `tweet_count_${YYYY-MM-DD}` (America/New_York boundary)
-- **Tweet format:** `<title>\n\n<troy_one_liner>\n\n<https://troystack.ai/signal/slug>` truncated to 280 chars
+- **Tweet format:** `<title>\n\n<troy_one_liner>\n\n<https://troystack.com/signal/slug>` truncated to 280 chars
 - **Credential check:** skips silently if X_* env vars missing
 
 ### src/services/stack-signal-push.js
