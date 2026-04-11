@@ -346,6 +346,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `30 21 * * 1-5` | 4:30 PM (weekdays) | Stack Signal evening digest | `generateStackSignal('evening')` |
 | `0 22 * * 5` | 5:00 PM (Fri) | Weekly recap | `generateStackSignal('weekly_recap')` |
 | `15 11 * * 1` | 6:15 AM (Mon) | Weekly preview | `generateStackSignal('weekly_preview')` |
+| `0 22 * * 0` | 6:00 PM (Sun) | Weekly X thread to @troystack_ | weekly-thread.js `generateAndPostWeeklyThread()` |
 | `0 22 28-31 * *` | 5:00 PM (last day) | Monthly recap | `generateStackSignal('monthly_recap')` |
 | `0 15 1 1 *` | 10:00 AM (Jan 1) | Yearly recap | `generateStackSignal('yearly_recap')` |
 | ~~`5 * * * *`~~ | ~~Every hour at :05~~ | **DISABLED** — Dealer price scraping (re-enable when affiliate integrations ready) | dealerScraper.js `scrapeAllDealers()` |
@@ -749,12 +750,19 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 
 ### src/services/auto-tweet.js
 - **Purpose:** Post Stack Signal articles to X (@troystack_) — fire-and-forget, never blocks article saves
-- **Exports:** `postArticleTweet(article)` — returns tweet id or null
+- **Exports:** `postArticleTweet(article)`, `getClient()` — returns shared TwitterApi client
 - **Dependencies:** twitter-api-v2, supabase
 - **Dedup:** `app_state` key `tweeted_signal_${slug}` holds the tweet id
 - **Daily cap:** 5 tweets/day via `app_state` key `tweet_count_${YYYY-MM-DD}` (America/New_York boundary)
 - **Tweet format:** `<title>\n\n<troy_one_liner>\n\n<https://troystack.com/signal/slug>` truncated to 280 chars
 - **Credential check:** skips silently if X_* env vars missing
+
+### src/services/weekly-thread.js
+- **Purpose:** Generate and post a 5-7 tweet weekly recap thread to @troystack_ every Sunday 6 PM ET
+- **Exports:** `generateAndPostWeeklyThread()`, `isoWeekKey(date?)`
+- **Dependencies:** supabase, ai-router (Gemini Flash), price-fetcher, auto-tweet (reuses client)
+- **Flow:** dedup by ISO week (`weekly_thread_${YYYY-WW}`) → fetch top 10 Stack Signal articles from last 7 days → fetch current spot + 7-day-ago price_log for weekly change → Gemini Flash JSON array of tweets → post thread (first standalone, rest via `in_reply_to_tweet_id`) with 1s delay between tweets → save root tweet id to app_state
+- **Cron:** `0 22 * * 0` (Sundays 22:00 UTC = 6 PM ET)
 
 ### src/services/stack-signal-push.js
 - **Purpose:** Push notifications for high-scoring Stack Signal articles

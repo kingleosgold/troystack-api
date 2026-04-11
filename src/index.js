@@ -512,6 +512,18 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('⚡ [Stack Signal Weekly Preview] Scheduled: Mondays at 6:15 AM EST (11:15 UTC)');
 
+  // Weekly X thread — Sunday 6:00 PM EST / 22:00 UTC
+  cron.schedule('0 22 * * 0', async () => {
+    console.log('🐦 [Weekly Thread] Running Sunday weekly X thread...');
+    try {
+      const { generateAndPostWeeklyThread } = require('./services/weekly-thread');
+      await generateAndPostWeeklyThread();
+    } catch (err) {
+      console.error('🐦 [Weekly Thread] Failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('🐦 [Weekly Thread] Scheduled: Sundays at 6:00 PM EST (22:00 UTC)');
+
   // Month-End Review — 5:00 PM EST / 22:00 UTC on last business day of month
   // Runs on 28th-31st, checks if tomorrow is a new month
   cron.schedule('0 22 28-31 * *', async () => {

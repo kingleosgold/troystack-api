@@ -122,4 +122,4 @@ async function postArticleTweet(article) {
   }
 }
 
-module.exports = { postArticleTweet };
+module.exports = { postArticleTweet, getClient };
