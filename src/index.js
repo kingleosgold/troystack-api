@@ -26,6 +26,7 @@ const troyChatRouter = require('./routes/troy-chat');
 const stackSignalRouter = require('./routes/stack-signal');
 const socialRouter = require('./routes/social');
 const dealerPricesRouter = require('./routes/dealerPrices');
+const junkSilverRouter = require('./routes/junk-silver');
 
 const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase, areMarketsClosed } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
@@ -159,6 +160,9 @@ app.use('/v1/stack-signal', publicLimiter, socialRouter);
 
 // Dealer price comparison
 app.use('/v1/dealer-prices', publicLimiter, dealerPricesRouter);
+
+// Junk silver melt value calculator
+app.use('/v1/junk-silver', publicLimiter, junkSilverRouter);
 
 // ============================================================
 // HEALTH + API ROOT

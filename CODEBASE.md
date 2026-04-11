@@ -233,6 +233,18 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | GET | /v1/dealer-prices/products | Public | List tracked products |
 | POST | /v1/dealer-prices/click | Public | Log affiliate click |
 
+### src/routes/junk-silver.js
+- **Purpose:** Junk silver melt value calculator for pre-1965 US coinage
+- **Exports:** Express router
+- **Dependencies:** price-fetcher (getSpotPrices)
+- **Last modified:** 2026-04-11
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | /v1/junk-silver | Public | Calculate melt value; query params: dimes, quarters, half_dollars, kennedy_40, dollars, war_nickels (all optional integers) |
+
+Silver content per coin (troy oz): dimes 0.07234, quarters 0.18084, half_dollars 0.36169, kennedy_40 0.14792 (40% silver), dollars 0.77344, war_nickels 0.05626. Returns total silver oz, total melt value, and per-$1-face breakdown per coin type.
+
 ### src/routes/snapshots.js
 - **Purpose:** Daily portfolio snapshots for historical charts
 - **Exports:** Express router
