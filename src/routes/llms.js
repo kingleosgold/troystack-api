@@ -427,4 +427,21 @@ router.get('/.well-known/mcp/server-card.json', (req, res) => {
   });
 });
 
+// ============================================================
+// OAuth Protected Resource metadata — signals "no auth required"
+// Empty authorization_servers array per MCP OAuth spec
+// ============================================================
+const oauthProtectedResource = {
+  resource: 'https://api.troystack.ai/mcp',
+  authorization_servers: [],
+};
+
+router.get('/.well-known/oauth-protected-resource', (req, res) => {
+  res.type('application/json').json(oauthProtectedResource);
+});
+
+router.get('/.well-known/oauth-protected-resource/mcp', (req, res) => {
+  res.type('application/json').json(oauthProtectedResource);
+});
+
 module.exports = router;
