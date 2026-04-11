@@ -299,7 +299,7 @@ Express 5 REST API powering the TroyStack (Stack Tracker Gold) precious metals p
 - **Last modified:** 2026-02-18
 
 ### CORS (in index.js)
-- Locked to `stacktrackergold.com` domains (app, www, root)
+- Allowed origins: `stacktrackergold.com` (root, www, app), `troystack.ai` (root, www), `localhost:5173`, `localhost:3000`
 - LLM discovery endpoints use open CORS
 - Mobile apps, curl, server-to-server allowed (no origin)
 

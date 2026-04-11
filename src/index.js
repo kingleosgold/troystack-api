@@ -50,6 +50,10 @@ const ALLOWED_ORIGINS = [
   'https://stacktrackergold.com',
   'https://app.stacktrackergold.com',
   'https://www.stacktrackergold.com',
+  'https://troystack.ai',
+  'https://www.troystack.ai',
+  'http://localhost:5173',
+  'http://localhost:3000',
 ];
 
 const corsOptions = {
