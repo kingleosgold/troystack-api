@@ -88,6 +88,14 @@ app.use((req, res, next) => {
   express.json({ limit: '20mb' })(req, res, next);
 });
 
+// JSON parse error handler — must run after express.json() and before routes
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Invalid JSON' });
+  }
+  next(err);
+});
+
 // Request logging
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
