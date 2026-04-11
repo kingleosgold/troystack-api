@@ -27,6 +27,8 @@ const stackSignalRouter = require('./routes/stack-signal');
 const socialRouter = require('./routes/social');
 const dealerPricesRouter = require('./routes/dealerPrices');
 const junkSilverRouter = require('./routes/junk-silver');
+const apiKeysRouter = require('./routes/api-keys');
+const { apiKeyAuth } = require('./middleware/api-key-auth');
 
 const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase, areMarketsClosed } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
@@ -90,6 +92,10 @@ app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
   next();
 });
+
+// Global API key auth — permissive: validates keys if present, passes through if not.
+// Does NOT replace authenticateApiKey for strict-auth routes (/v1/portfolio, etc).
+app.use(apiKeyAuth);
 
 // ============================================================
 // PUBLIC ENDPOINTS (no auth required)
@@ -163,6 +169,9 @@ app.use('/v1/dealer-prices', publicLimiter, dealerPricesRouter);
 
 // Junk silver melt value calculator
 app.use('/v1/junk-silver', publicLimiter, junkSilverRouter);
+
+// API key management — Supabase JWT auth inside the router (not apiKeyAuth)
+app.use('/v1/api-keys', publicLimiter, apiKeysRouter);
 
 // ============================================================
 // HEALTH + API ROOT

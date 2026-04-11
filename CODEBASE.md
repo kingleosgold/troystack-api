@@ -233,6 +233,20 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | GET | /v1/dealer-prices/products | Public | List tracked products |
 | POST | /v1/dealer-prices/click | Public | Log affiliate click |
 
+### src/routes/api-keys.js
+- **Purpose:** User-facing API key management (generate, list, revoke)
+- **Exports:** Express router
+- **Dependencies:** supabase, crypto, middleware/api-key-auth (hashKey)
+- **Last modified:** 2026-04-11
+- **Auth:** Supabase session JWT via `Authorization: Bearer <jwt>` — validated inline via `supabase.auth.getUser(jwt)`. Not authenticated via the API keys it manages (chicken-and-egg avoidance)
+- **Limits:** Max 3 keys per user; default tier `free`, default rate_limit 100/hr
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | /v1/api-keys/generate | Supabase JWT | Generate new key `ts_live_<48 hex>` — returns raw key ONCE, then only the hash is stored |
+| GET | /v1/api-keys | Supabase JWT | List user's keys with `key_preview` (last 8 chars of hash), tier, rate_limit, last_used_at, request_count |
+| DELETE | /v1/api-keys/:id | Supabase JWT | Revoke key — 404 if not owned by caller |
+
 ### src/routes/junk-silver.js
 - **Purpose:** Junk silver melt value calculator for pre-1965 US coinage
 - **Exports:** Express router
@@ -306,12 +320,24 @@ Silver content per coin (troy oz): dimes 0.07234, quarters 0.18084, half_dollars
 ## 2. Middleware
 
 ### src/middleware/auth.js
-- **Purpose:** API key authentication — Bearer token → SHA-256 hash → api_keys table lookup
+- **Purpose:** Strict API key authentication — Bearer token → SHA-256 hash → api_keys table lookup. Returns 401 if no key present.
 - **Exports:** `authenticateApiKey(req, res, next)`, `hashApiKey(key)`
 - **Dependencies:** supabase, crypto
 - **Last modified:** 2026-02-18
 - **Attaches to req:** `userId`, `apiKeyId`, `tier`, `rateLimit`
 - **Used by:** /v1/portfolio, /v1/analytics, /v1/holdings
+
+### src/middleware/api-key-auth.js
+- **Purpose:** Permissive global API key middleware — validates if a key is present, passes through if not
+- **Exports:** `apiKeyAuth(req, res, next)`, `hashKey(key)`
+- **Dependencies:** supabase, crypto
+- **Last modified:** 2026-04-11
+- **Extracts key from:** `x-api-key` header (preferred), or `Authorization: Bearer ts_live_...` (only tokens starting with `ts_live_` are treated as API keys, so Supabase JWTs pass through)
+- **Rate limit:** Hourly via `app_state` key `api_key_hourly_${keyId}_${YYYY-MM-DDTHH}` — auto-resets each hour. Returns 429 with `{error, limit, reset}` when exceeded
+- **Side effects:** Fire-and-forget increment of hourly bucket + update `api_keys.last_used_at` + `api_keys.request_count`
+- **Attaches to req:** `req.apiKey = { id, user_id, tier, rate_limit }` on success
+- **Applied:** Globally via `app.use(apiKeyAuth)` in index.js (after body parsing, before routes)
+- **Coexists with auth.js:** Both can run on the same request — this one silently validates globally, `authenticateApiKey` still enforces strict auth on portfolio/analytics/holdings routes
 
 ### src/middleware/rateLimit.js
 - **Purpose:** Three-tier rate limiting
