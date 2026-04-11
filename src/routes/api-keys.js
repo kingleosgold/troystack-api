@@ -53,10 +53,10 @@ async function authenticateUser(req, res) {
 // POST /v1/api-keys/generate — create a new key
 // ============================================
 router.post('/generate', async (req, res) => {
-  const user = await authenticateUser(req, res);
-  if (!user) return;
-
   try {
+    const user = await authenticateUser(req, res);
+    if (!user) return;
+
     // Cap at 3 keys per user
     const { count, error: countErr } = await supabase
       .from('api_keys')
@@ -64,8 +64,8 @@ router.post('/generate', async (req, res) => {
       .eq('user_id', user.id);
 
     if (countErr) {
-      console.error('[api-keys] Count error:', countErr.message);
-      return res.status(500).json({ error: 'Failed to check existing keys' });
+      console.error('[API Keys] Count error:', countErr);
+      return res.status(500).json({ error: 'Internal server error', detail: countErr.message });
     }
 
     if ((count || 0) >= MAX_KEYS_PER_USER) {
@@ -89,8 +89,8 @@ router.post('/generate', async (req, res) => {
       .single();
 
     if (insertErr) {
-      console.error('[api-keys] Insert error:', insertErr.message);
-      return res.status(500).json({ error: 'Failed to create API key' });
+      console.error('[API Keys] Insert error:', insertErr);
+      return res.status(500).json({ error: 'Internal server error', detail: insertErr.message });
     }
 
     // Return raw key ONCE — never retrievable again
@@ -101,8 +101,10 @@ router.post('/generate', async (req, res) => {
       rate_limit: inserted.rate_limit,
     });
   } catch (err) {
-    console.error('[api-keys] Generate error:', err.message);
-    res.status(500).json({ error: 'Failed to generate API key' });
+    console.error('[API Keys] Generate error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal server error', detail: err.message });
+    }
   }
 });
 
@@ -110,10 +112,10 @@ router.post('/generate', async (req, res) => {
 // GET /v1/api-keys — list the user's keys
 // ============================================
 router.get('/', async (req, res) => {
-  const user = await authenticateUser(req, res);
-  if (!user) return;
-
   try {
+    const user = await authenticateUser(req, res);
+    if (!user) return;
+
     const { data, error } = await supabase
       .from('api_keys')
       .select('id, tier, rate_limit, last_used_at, request_count, created_at, key_hash')
@@ -121,8 +123,8 @@ router.get('/', async (req, res) => {
       .order('created_at', { ascending: false });
 
     if (error) {
-      console.error('[api-keys] List error:', error.message);
-      return res.status(500).json({ error: 'Failed to list API keys' });
+      console.error('[API Keys] List error:', error);
+      return res.status(500).json({ error: 'Internal server error', detail: error.message });
     }
 
     // key_preview = last 8 chars of the hash (stable identifier, never the raw key)
@@ -138,8 +140,10 @@ router.get('/', async (req, res) => {
 
     res.json({ keys });
   } catch (err) {
-    console.error('[api-keys] List error:', err.message);
-    res.status(500).json({ error: 'Failed to list API keys' });
+    console.error('[API Keys] List error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal server error', detail: err.message });
+    }
   }
 });
 
@@ -147,12 +151,12 @@ router.get('/', async (req, res) => {
 // DELETE /v1/api-keys/:id — revoke a key
 // ============================================
 router.delete('/:id', async (req, res) => {
-  const user = await authenticateUser(req, res);
-  if (!user) return;
-
-  const { id } = req.params;
-
   try {
+    const user = await authenticateUser(req, res);
+    if (!user) return;
+
+    const { id } = req.params;
+
     // Verify ownership before delete — 404 if not found or not owned
     const { data: existing, error: fetchErr } = await supabase
       .from('api_keys')
@@ -172,14 +176,16 @@ router.delete('/:id', async (req, res) => {
       .eq('user_id', user.id);
 
     if (deleteErr) {
-      console.error('[api-keys] Delete error:', deleteErr.message);
-      return res.status(500).json({ error: 'Failed to delete API key' });
+      console.error('[API Keys] Delete error:', deleteErr);
+      return res.status(500).json({ error: 'Internal server error', detail: deleteErr.message });
     }
 
     res.json({ success: true, deleted: id });
   } catch (err) {
-    console.error('[api-keys] Delete error:', err.message);
-    res.status(500).json({ error: 'Failed to delete API key' });
+    console.error('[API Keys] Delete error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal server error', detail: err.message });
+    }
   }
 });
 
