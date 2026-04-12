@@ -196,6 +196,39 @@ app.use('/v1/api-keys', publicLimiter, apiKeysRouter);
 // can parse its own body — see Streamable HTTP block near Stripe webhook.
 
 // ============================================================
+// TEMPORARY TEST ROUTES
+// ============================================================
+app.get('/v1/test-tweet', async (req, res) => {
+  try {
+    const supabase = require('./lib/supabase');
+
+    const { data: articles } = await supabase
+      .from('stack_signal_articles')
+      .select('*')
+      .order('published_at', { ascending: false })
+      .limit(1);
+
+    if (!articles || articles.length === 0) {
+      return res.json({ error: 'No articles found' });
+    }
+
+    const article = articles[0];
+
+    const { postArticleTweet } = require('./services/auto-tweet');
+    const tweetId = await postArticleTweet(article);
+
+    res.json({
+      article_title: article.title,
+      article_slug: article.slug,
+      tweet_id: tweetId,
+      status: tweetId ? 'posted' : 'skipped (dedup or cap)',
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
 // HEALTH + API ROOT
 // ============================================================
 app.get('/health', (req, res) => {
