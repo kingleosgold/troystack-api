@@ -186,67 +186,104 @@ app.use('/v1/stack-signal', publicLimiter, socialRouter);
 // Dealer price comparison
 app.use('/v1/dealer-prices', publicLimiter, dealerPricesRouter);
 
-// ── Temporary test route ──
-// ?force=true to re-tweet an already-tweeted article
+// ── Temporary test route — bypasses postArticleTweet entirely ──
+// ?post=true to actually send to Twitter; default is dry-run (generate only)
 app.get('/v1/test-tweet', async (req, res) => {
   try {
     const supabase = require('./lib/supabase');
-    const { postArticleTweet } = require('./services/auto-tweet');
-    const force = req.query.force === 'true';
+    const { callGemini, MODELS } = require('./services/ai-router');
+    const { getClient } = require('./services/auto-tweet');
+    const shouldPost = req.query.post === 'true';
 
+    // 1. Fetch most recent article
     const { data: articles } = await supabase
       .from('stack_signal_articles')
       .select('*')
       .order('published_at', { ascending: false })
-      .limit(10);
+      .limit(1);
 
     if (!articles || articles.length === 0) {
       return res.json({ error: 'No articles found' });
     }
+    const article = articles[0];
 
-    let article = null;
+    // 2. Build summary (same fallback chain as auto-tweet.js)
+    const summary = article.troy_commentary?.substring(0, 500) || article.troy_one_liner || article.title;
 
-    if (force) {
-      // Force mode: use the most recent article, clear dedup + daily cap keys
-      article = articles[0];
-      const dedupKey = `tweeted_signal_${article.slug}`;
-      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-      const capKey = `tweet_count_${today}`;
-      await supabase.from('app_state').delete().eq('key', dedupKey);
-      await supabase.from('app_state').delete().eq('key', capKey);
-      console.log(`[test-tweet] Force mode: cleared dedup key ${dedupKey} and cap key ${capKey}`);
-    } else {
-      // Normal mode: find the first un-tweeted article
-      for (const a of articles) {
-        const { data: existing } = await supabase
-          .from('app_state')
-          .select('value')
-          .eq('key', `tweeted_signal_${a.slug}`)
-          .single();
-        if (!existing) {
-          article = a;
-          break;
-        }
-      }
+    // 3. Same system prompt as auto-tweet.js (verbatim)
+    const systemPrompt = `You are Troy, a sharp precious metals analyst on X. You write short, punchy, opinionated tweets about gold and silver news. You sound like the smartest guy at the coin shop, not a news aggregator.
 
-      if (!article) {
-        return res.json({
-          error: 'All recent articles already tweeted',
-          suggestion: 'Wait for new articles or use ?force=true to re-tweet the latest',
-        });
-      }
+RULES:
+- Write ONE tweet, 240 characters max
+- Be opinionated and provocative — take a position
+- Reference specific numbers when available (spot price, percentage moves, ratios)
+- No emojis, no exclamation points, no hashtags
+- No "not financial advice" or hedging language
+- Never recommend selling
+- Say "stack" not "portfolio"
+- Dry humor welcome
+- Do NOT restate the headline — give your REACTION to it
+- Do NOT wrap your response in quotes
+- Do NOT include any meta-commentary, reasoning, or thinking
+- Return ONLY the tweet text, nothing else
+
+EXAMPLES OF GOOD TROY TWEETS:
+"CPI prints 3.3% and the Fed is still pretending rate cuts are on the table. Gold at $4,780 says the market isn't buying it either."
+"Silver down 37% from January highs while industrial demand hits records. Paper market gift-wrapping physical for anyone paying attention."
+"Gold/silver ratio at 63. Last time it compressed below 50, silver ran 40% in 8 weeks. The ratio doesn't lie."
+"Central banks bought 19 metric tons of gold in February. They're not buying it because it's a barbarous relic."
+"$88 billion a month in debt interest. That's not a number you fix with a ceasefire. That's a number you hedge with metal."`;
+
+    const userPrompt = `Write a Troy tweet reacting to this article:\nTitle: ${article.title}\nSummary: ${summary}`;
+
+    // 4. Call Gemini
+    const rawResponse = await callGemini(MODELS.flash, systemPrompt, userPrompt, { temperature: 0.9, maxOutputTokens: 200 });
+    console.log('[TestTweet] Raw Gemini:', rawResponse);
+
+    // 5. Sanitize (same logic as auto-tweet.js)
+    let tweetText = (rawResponse || '').trim();
+    tweetText = tweetText.replace(/^["']|["']$/g, '');
+    tweetText = tweetText.replace(/^(SILENT THOUGHT|THOUGHT|THINKING|REASONING|NOTE|INTERNAL)[:\s].*$/gmi, '').trim();
+    const lines = tweetText.split('\n').filter(l => l.trim() && !l.match(/^(SILENT|THOUGHT|THINKING|REASONING|NOTE|INTERNAL)/i));
+    tweetText = lines.join(' ').trim();
+    tweetText = tweetText.replace(/(?<!\w)"(?!\w)/g, '').replace(/(?<!\w)'(?!\w)/g, '').trim();
+    tweetText = tweetText.replace(/\s{2,}/g, ' ');
+    if (!tweetText || tweetText.length < 20) {
+      tweetText = article.title.length > 200 ? article.title.substring(0, 200) + '...' : article.title;
     }
+    console.log('[TestTweet] Sanitized:', tweetText);
 
-    const tweetId = await postArticleTweet(article);
+    // 6. Append URL + trim to 280
+    const url = `https://troystack.com/signal/${article.slug}`;
+    const maxTextLen = 280 - url.length - 2;
+    if (tweetText.length > maxTextLen) {
+      tweetText = tweetText.substring(0, maxTextLen - 3) + '...';
+    }
+    const finalTweet = `${tweetText}\n\n${url}`;
+
+    // 7. Optionally post
+    let tweetId = null;
+    if (shouldPost) {
+      const twitter = getClient();
+      if (!twitter) {
+        return res.json({ error: 'X credentials not configured' });
+      }
+      const result = await twitter.v2.tweet(finalTweet);
+      tweetId = result?.data?.id || null;
+      console.log(`[TestTweet] Posted: ${tweetId}`);
+    }
 
     res.json({
       article_title: article.title,
-      article_slug: article.slug,
+      summary_sent: summary.substring(0, 200),
+      raw_gemini: rawResponse,
+      sanitized_tweet: tweetText,
+      final_tweet: finalTweet,
       tweet_id: tweetId,
-      status: tweetId ? 'posted' : 'skipped (dedup or cap)',
-      force,
+      posted: shouldPost && !!tweetId,
     });
   } catch (err) {
+    console.error('[TestTweet] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
