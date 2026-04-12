@@ -187,23 +187,53 @@ app.use('/v1/stack-signal', publicLimiter, socialRouter);
 app.use('/v1/dealer-prices', publicLimiter, dealerPricesRouter);
 
 // ── Temporary test route ──
+// ?force=true to re-tweet an already-tweeted article
 app.get('/v1/test-tweet', async (req, res) => {
   try {
     const supabase = require('./lib/supabase');
+    const { postArticleTweet } = require('./services/auto-tweet');
+    const force = req.query.force === 'true';
 
     const { data: articles } = await supabase
       .from('stack_signal_articles')
       .select('*')
       .order('published_at', { ascending: false })
-      .limit(1);
+      .limit(10);
 
     if (!articles || articles.length === 0) {
       return res.json({ error: 'No articles found' });
     }
 
-    const article = articles[0];
+    let article = null;
 
-    const { postArticleTweet } = require('./services/auto-tweet');
+    if (force) {
+      // Force mode: use the most recent article, clear its dedup key first
+      article = articles[0];
+      const dedupKey = `tweeted_signal_${article.slug}`;
+      await supabase.from('app_state').delete().eq('key', dedupKey);
+      console.log(`[test-tweet] Force mode: cleared dedup key ${dedupKey}`);
+    } else {
+      // Normal mode: find the first un-tweeted article
+      for (const a of articles) {
+        const { data: existing } = await supabase
+          .from('app_state')
+          .select('value')
+          .eq('key', `tweeted_signal_${a.slug}`)
+          .single();
+        if (!existing) {
+          article = a;
+          break;
+        }
+      }
+
+      if (!article) {
+        return res.json({
+          error: 'All recent articles already tweeted',
+          suggestion: 'Wait for new articles or use ?force=true to re-tweet the latest',
+        });
+      }
+    }
+
     const tweetId = await postArticleTweet(article);
 
     res.json({
@@ -211,6 +241,7 @@ app.get('/v1/test-tweet', async (req, res) => {
       article_slug: article.slug,
       tweet_id: tweetId,
       status: tweetId ? 'posted' : 'skipped (dedup or cap)',
+      force,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
