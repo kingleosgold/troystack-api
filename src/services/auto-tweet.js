@@ -71,6 +71,7 @@ async function postArticleTweet(article) {
       .single();
 
     const count = capData ? parseInt(capData.value) : 0;
+    console.log(`[AutoTweet] Daily cap check: ${count} / ${DAILY_TWEET_CAP}`);
     if (count >= DAILY_TWEET_CAP) {
       console.log(`[AutoTweet] Daily cap reached (${count}/${DAILY_TWEET_CAP}), skipping`);
       return null;

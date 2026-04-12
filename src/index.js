@@ -207,11 +207,14 @@ app.get('/v1/test-tweet', async (req, res) => {
     let article = null;
 
     if (force) {
-      // Force mode: use the most recent article, clear its dedup key first
+      // Force mode: use the most recent article, clear dedup + daily cap keys
       article = articles[0];
       const dedupKey = `tweeted_signal_${article.slug}`;
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const capKey = `tweet_count_${today}`;
       await supabase.from('app_state').delete().eq('key', dedupKey);
-      console.log(`[test-tweet] Force mode: cleared dedup key ${dedupKey}`);
+      await supabase.from('app_state').delete().eq('key', capKey);
+      console.log(`[test-tweet] Force mode: cleared dedup key ${dedupKey} and cap key ${capKey}`);
     } else {
       // Normal mode: find the first un-tweeted article
       for (const a of articles) {
