@@ -118,7 +118,10 @@ EXAMPLES OF GOOD TROY TWEETS:
     } else {
       const userPrompt = `Write a Troy tweet reacting to this article:\nTitle: ${article.title}\nSummary: ${summary}`;
       try {
-        generatedText = await callGemini(MODELS.flash, systemPrompt, userPrompt, { temperature: 0.9, maxOutputTokens: 200 });
+        generatedText = await callGemini(MODELS.flash, systemPrompt, userPrompt, { temperature: 0.9, maxOutputTokens: 256 });
+        if (generatedText && !/[.?!)"'\w]$/.test(generatedText.trim())) {
+          console.log('[AutoTweet] Warning: Gemini response appears truncated:', generatedText);
+        }
       } catch (geminiErr) {
         console.log(`[AutoTweet] Gemini failed, falling back to title: ${geminiErr.message}`);
         generatedText = null;
