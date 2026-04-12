@@ -9,6 +9,9 @@
  * maximum 5 tweets per day.
  */
 
+// callGemini signature: callGemini(model, systemPrompt, userMessage, options)
+// options: { temperature, maxOutputTokens, responseMimeType, timeout }
+// Returns: string (raw text response)
 const { TwitterApi } = require('twitter-api-v2');
 const supabase = require('../lib/supabase');
 const { callGemini, MODELS } = require('./ai-router');
@@ -131,8 +134,8 @@ EXAMPLES OF GOOD TROY TWEETS:
     tweetText = tweetText.replace(/(?<!\w)"(?!\w)/g, '').replace(/(?<!\w)'(?!\w)/g, '').trim();  // dangling stray quotes
     tweetText = tweetText.replace(/\s{2,}/g, ' ');                               // collapse double spaces
 
-    // Fallback: if Gemini gave us nothing usable, truncate the title
-    if (!tweetText || tweetText.length < 20) {
+    // Fallback: only if Gemini returned nothing at all (empty/null). A short tweet is fine.
+    if (!tweetText) {
       tweetText = article.title.length > 200 ? article.title.substring(0, 200) + '...' : article.title;
     }
 

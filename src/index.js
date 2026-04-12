@@ -248,7 +248,8 @@ EXAMPLES OF GOOD TROY TWEETS:
     tweetText = lines.join(' ').trim();
     tweetText = tweetText.replace(/(?<!\w)"(?!\w)/g, '').replace(/(?<!\w)'(?!\w)/g, '').trim();
     tweetText = tweetText.replace(/\s{2,}/g, ' ');
-    if (!tweetText || tweetText.length < 20) {
+    // Fallback: only if Gemini returned nothing at all. A short tweet is fine.
+    if (!tweetText) {
       tweetText = article.title.length > 200 ? article.title.substring(0, 200) + '...' : article.title;
     }
     console.log('[TestTweet] Sanitized:', tweetText);
