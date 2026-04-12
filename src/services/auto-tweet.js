@@ -78,23 +78,25 @@ async function postArticleTweet(article) {
 
     // Generate tweet text via Gemini Flash — Troy's hot take, not a headline repost
     const url = `https://troystack.com/signal/${article.slug}`;
-    const summaryContext = article.troy_one_liner || article.troy_commentary?.substring(0, 500) || '';
 
-    const tweetPrompt = `You are Troy, the TroyStack precious metals analyst. Write a single tweet (under 260 characters) about this article.
+    const tweetPrompt = `You are Troy, a sharp precious metals analyst who posts on X. Write a tweet reacting to this news.
 
-Article title: ${article.title}
-Article summary: ${summaryContext}
+Headline: ${article.title}
+Context: ${article.troy_one_liner || article.troy_commentary?.substring(0, 500)}
 
-Rules:
-- Write as Troy — direct, opinionated, no hedging
-- DO NOT just repeat the headline. Give your take on what it means for stackers.
-- No emojis, no exclamation points, no hashtags
-- No "not financial advice"
-- Use "your stack" not "your portfolio" if referencing holdings
-- Sound like a knowledgeable analyst sharing a hot take, not a bot reposting headlines
-- Under 260 characters (leave room for the link)
-
-Return ONLY the tweet text, nothing else.`;
+RULES:
+- This is YOUR hot take, not a headline repost. Never repeat the article title.
+- Sound like a real person on X — short, punchy, conversational
+- One or two sentences max. Under 240 characters.
+- Have an opinion. Be provocative. Take a side.
+- Examples of good Troy tweets:
+  "Gold at $4,750 while the Fed pretends 0.9% monthly CPI is fine. Your stack knows what they won't say."
+  "COMEX registered silver just hit a 3-year low. Paper shorts are running out of metal to hide behind."
+  "Silver up 200% since 2022 and still nobody on CNBC mentions it. That's how you know it's real."
+  "They printed $4.6 trillion in 3 years and wonder why gold keeps climbing. Your stack isn't going up. Their dollar is going down."
+- No emojis, no exclamation points, no hashtags, no "not financial advice"
+- No meta-commentary, no thinking out loud, no "SILENT THOUGHT" or reasoning
+- Output ONLY the tweet text. Nothing else. No quotes around it.`;
 
     let generatedText;
     try {
@@ -104,10 +106,17 @@ Return ONLY the tweet text, nothing else.`;
       generatedText = article.title;
     }
 
-    const trimmedText = (generatedText || article.title).trim().replace(/^["']|["']$/g, '');
-    const fullTweet = `${trimmedText}\n\n${url}`;
+    // Clean up Gemini output — strip quotes, reasoning artifacts, empty lines
+    let cleaned = (generatedText || '').trim();
+    cleaned = cleaned.replace(/^["']|["']$/g, '');
+    cleaned = cleaned.replace(/^(SILENT THOUGHT|THOUGHT|THINKING|REASONING|NOTE|INTERNAL)[:\s].*$/gmi, '').trim();
+    const lines = cleaned.split('\n').filter(l => l.trim() && !l.match(/^(SILENT|THOUGHT|THINKING|REASONING|NOTE|INTERNAL)/i));
+    cleaned = lines.join(' ').trim();
+    if (!cleaned || cleaned.length < 20) cleaned = article.title;
+
+    const fullTweet = `${cleaned}\n\n${url}`;
     const finalText = fullTweet.length > 280
-      ? `${trimmedText.substring(0, 280 - url.length - 5)}...\n\n${url}`
+      ? `${cleaned.substring(0, 280 - url.length - 5)}...\n\n${url}`
       : fullTweet;
 
     // Post
