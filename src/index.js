@@ -186,18 +186,7 @@ app.use('/v1/stack-signal', publicLimiter, socialRouter);
 // Dealer price comparison
 app.use('/v1/dealer-prices', publicLimiter, dealerPricesRouter);
 
-// Junk silver melt value calculator
-app.use('/v1/junk-silver', publicLimiter, junkSilverRouter);
-
-// API key management — Supabase JWT auth inside the router (not apiKeyAuth)
-app.use('/v1/api-keys', publicLimiter, apiKeysRouter);
-
-// MCP routes are mounted above (before express.json()) so the transport
-// can parse its own body — see Streamable HTTP block near Stripe webhook.
-
-// ============================================================
-// TEMPORARY TEST ROUTES
-// ============================================================
+// ── Temporary test route ──
 app.get('/v1/test-tweet', async (req, res) => {
   try {
     const supabase = require('./lib/supabase');
@@ -227,6 +216,15 @@ app.get('/v1/test-tweet', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Junk silver melt value calculator
+app.use('/v1/junk-silver', publicLimiter, junkSilverRouter);
+
+// API key management — Supabase JWT auth inside the router (not apiKeyAuth)
+app.use('/v1/api-keys', publicLimiter, apiKeysRouter);
+
+// MCP routes are mounted above (before express.json()) so the transport
+// can parse its own body — see Streamable HTTP block near Stripe webhook.
 
 // ============================================================
 // HEALTH + API ROOT
