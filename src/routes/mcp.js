@@ -341,6 +341,12 @@ function readRawBody(req) {
 }
 
 async function handleMcp(req, res) {
+  // Force-set Accept header — StreamableHTTPServerTransport returns 400
+  // "Not Acceptable" without both application/json and text/event-stream
+  if (!req.headers.accept || !req.headers.accept.includes('text/event-stream')) {
+    req.headers.accept = 'application/json, text/event-stream';
+  }
+
   try {
     await ensureInit();
 
