@@ -102,16 +102,23 @@ EXAMPLES OF GOOD TROY TWEETS:
 "Central banks bought 19 metric tons of gold in February. They're not buying it because it's a barbarous relic."
 "$88 billion a month in debt interest. That's not a number you fix with a ceasefire. That's a number you hedge with metal."`;
 
-    const userPrompt = `Write a Troy tweet reacting to this article:
-Title: ${article.title}
-Summary: ${article.troy_one_liner || article.troy_commentary?.substring(0, 300) || ''}`;
+    const summary = article.troy_commentary?.substring(0, 500) || article.troy_one_liner || article.summary || article.title;
+    console.log('[AutoTweet] Prompt summary:', summary.substring(0, 100));
 
     let generatedText;
-    try {
-      generatedText = await callGemini(MODELS.flash, systemPrompt, userPrompt, { temperature: 0.9, maxOutputTokens: 200 });
-    } catch (geminiErr) {
-      console.log(`[AutoTweet] Gemini failed, falling back to title: ${geminiErr.message}`);
+
+    // If summary is just the title (all content fields empty), skip Gemini — it'll just parrot it back
+    if (summary === article.title) {
+      console.log('[AutoTweet] Warning: no article content available, skipping Gemini');
       generatedText = null;
+    } else {
+      const userPrompt = `Write a Troy tweet reacting to this article:\nTitle: ${article.title}\nSummary: ${summary}`;
+      try {
+        generatedText = await callGemini(MODELS.flash, systemPrompt, userPrompt, { temperature: 0.9, maxOutputTokens: 200 });
+      } catch (geminiErr) {
+        console.log(`[AutoTweet] Gemini failed, falling back to title: ${geminiErr.message}`);
+        generatedText = null;
+      }
     }
 
     // Clean up Gemini output — strip quotes, reasoning artifacts, dangling quotes, empty lines
