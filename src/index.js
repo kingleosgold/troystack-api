@@ -237,7 +237,7 @@ EXAMPLES OF GOOD TROY TWEETS:
     const userPrompt = `Write a Troy tweet reacting to this article:\nTitle: ${article.title}\nSummary: ${summary}`;
 
     // 4. Call Gemini
-    const rawResponse = await callGemini(MODELS.flash, systemPrompt, userPrompt, { temperature: 0.9, maxOutputTokens: 256 });
+    const rawResponse = await callGemini(MODELS.flash, systemPrompt, userPrompt, { temperature: 0.9, maxOutputTokens: 1024 });
     console.log('[TestTweet] Raw Gemini:', rawResponse);
     if (rawResponse && !/[.?!)"'\w]$/.test(rawResponse.trim())) {
       console.log('[TestTweet] Warning: Gemini response appears truncated:', rawResponse);
