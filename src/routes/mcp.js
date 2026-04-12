@@ -19,8 +19,11 @@ const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/ser
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
 
+const axios = require('axios');
 const supabase = require('../lib/supabase');
-const { getSpotPrices } = require('../services/price-fetcher');
+const { getSpotPrices, getCachedPrices } = require('../services/price-fetcher');
+const { callGemini, MODELS } = require('../services/ai-router');
+const { hashKey } = require('../middleware/api-key-auth');
 
 // ============================================
 // TOOL IMPLEMENTATIONS
@@ -184,6 +187,318 @@ async function tool_getSpeculation({ gold, silver, platinum, palladium }) {
 }
 
 // ============================================
+// AUTH HELPER — shared by all authenticated MCP tools
+// ============================================
+
+const AUTH_ERROR = { error: 'Invalid API key. Generate one at troystack.ai/developers/keys' };
+
+/**
+ * Validate an api_key param: hash it, look up in api_keys table.
+ * Returns { userId, keyRow } on success or { error } on failure.
+ * Also bumps last_used_at and request_count.
+ */
+async function validateApiKey(apiKey) {
+  if (!apiKey || typeof apiKey !== 'string') return AUTH_ERROR;
+
+  const keyHash = hashKey(apiKey);
+  const { data: keyRow, error } = await supabase
+    .from('api_keys')
+    .select('id, user_id, tier, rate_limit, request_count')
+    .eq('key_hash', keyHash)
+    .single();
+
+  if (error || !keyRow) return AUTH_ERROR;
+
+  // Fire-and-forget update
+  supabase
+    .from('api_keys')
+    .update({ last_used_at: new Date().toISOString(), request_count: (keyRow.request_count || 0) + 1 })
+    .eq('id', keyRow.id)
+    .then()
+    .catch(err => console.error('[MCP] Key usage update error:', err.message));
+
+  return { userId: keyRow.user_id, keyRow };
+}
+
+/**
+ * Fetch holdings for a user. Returns array (may be empty).
+ */
+async function fetchHoldings(userId) {
+  const { data, error } = await supabase
+    .from('holdings')
+    .select('id, metal, type, weight, weight_unit, quantity, purchase_price, purchase_date, notes')
+    .eq('user_id', userId)
+    .is('deleted_at', null)
+    .order('created_at', { ascending: false });
+
+  if (error) throw new Error(`Holdings query failed: ${error.message}`);
+  return data || [];
+}
+
+// ============================================
+// AUTHENTICATED TOOL IMPLEMENTATIONS
+// ============================================
+
+async function tool_chatWithTroy({ message, api_key }) {
+  let prices = getCachedPrices() || {};
+  if (!prices.gold) {
+    try { prices = (await getSpotPrices()).prices; } catch { /* use cached */ }
+  }
+
+  const gsRatio = prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1) : 'N/A';
+  let stackContext = '';
+
+  // If api_key, enrich with portfolio data
+  if (api_key) {
+    const auth = await validateApiKey(api_key);
+    if (!auth.error) {
+      const holdings = await fetchHoldings(auth.userId);
+      const metalTotals = { gold: { oz: 0, cost: 0 }, silver: { oz: 0, cost: 0 }, platinum: { oz: 0, cost: 0 }, palladium: { oz: 0, cost: 0 } };
+
+      for (const h of holdings) {
+        const m = h.metal;
+        if (!metalTotals[m]) continue;
+        const totalOz = (h.weight || 0) * (h.quantity || 1);
+        const totalCost = (h.purchase_price || 0) * (h.quantity || 1);
+        metalTotals[m].oz += totalOz;
+        metalTotals[m].cost += totalCost;
+      }
+
+      const totalValue = Object.keys(metalTotals).reduce((s, m) => s + metalTotals[m].oz * (prices[m] || 0), 0);
+      const totalCost = Object.keys(metalTotals).reduce((s, m) => s + metalTotals[m].cost, 0);
+
+      const metalSummary = Object.entries(metalTotals)
+        .filter(([, v]) => v.oz > 0)
+        .map(([m, v]) => {
+          const val = v.oz * (prices[m] || 0);
+          return `${m}: ${v.oz.toFixed(2)} oz ($${val.toFixed(2)}, cost $${v.cost.toFixed(2)})`;
+        }).join(', ');
+
+      stackContext = `\n\nUSER'S STACK:\nTotal Value: $${totalValue.toFixed(2)} | Cost: $${totalCost.toFixed(2)} | ${totalValue >= totalCost ? 'Gain' : 'Loss'}: $${Math.abs(totalValue - totalCost).toFixed(2)}\nHoldings: ${metalSummary || 'Empty stack'}`;
+    }
+  }
+
+  const systemPrompt = `You are Troy, a sharp precious metals analyst. Direct, opinionated, data-driven. Say "your stack" not "your portfolio". No emojis, no exclamation points, no "not financial advice". Dips are buying opportunities. You never recommend selling.
+
+CURRENT MARKET:
+Gold: $${prices.gold || 'N/A'}, Silver: $${prices.silver || 'N/A'}, G/S Ratio: ${gsRatio}${stackContext}`;
+
+  const response = await callGemini(MODELS.flash, systemPrompt, message, { temperature: 0.8, maxOutputTokens: 1000 });
+  return { response: response.trim() };
+}
+
+async function tool_getPortfolio({ api_key }) {
+  const auth = await validateApiKey(api_key);
+  if (auth.error) return auth;
+
+  const holdings = await fetchHoldings(auth.userId);
+  const spotData = await getSpotPrices();
+  const prices = spotData?.prices || {};
+
+  const metals = {};
+  for (const h of holdings) {
+    const m = h.metal;
+    if (!metals[m]) metals[m] = { oz: 0, value: 0, cost: 0 };
+    const totalOz = (h.weight || 0) * (h.quantity || 1);
+    const totalCost = (h.purchase_price || 0) * (h.quantity || 1);
+    metals[m].oz += totalOz;
+    metals[m].value += totalOz * (prices[m] || 0);
+    metals[m].cost += totalCost;
+  }
+
+  // Round metal values
+  for (const m of Object.keys(metals)) {
+    metals[m].oz = Math.round(metals[m].oz * 10000) / 10000;
+    metals[m].value = Math.round(metals[m].value * 100) / 100;
+    metals[m].cost = Math.round(metals[m].cost * 100) / 100;
+  }
+
+  const totalValue = Object.values(metals).reduce((s, v) => s + v.value, 0);
+  const totalCost = Object.values(metals).reduce((s, v) => s + v.cost, 0);
+  const gainLoss = Math.round((totalValue - totalCost) * 100) / 100;
+  const gainPct = totalCost > 0 ? Math.round(((totalValue - totalCost) / totalCost) * 10000) / 100 : 0;
+
+  const holdingsList = holdings.map(h => ({
+    type: h.type || `${h.metal} purchase`,
+    metal: h.metal,
+    quantity: h.quantity,
+    weight_oz: h.weight,
+    total_oz: Math.round((h.weight || 0) * (h.quantity || 1) * 10000) / 10000,
+    purchase_price: h.purchase_price,
+    purchase_date: h.purchase_date,
+  }));
+
+  return { total_value: Math.round(totalValue * 100) / 100, cost_basis: Math.round(totalCost * 100) / 100, gain_loss: gainLoss, gain_pct: gainPct, metals, holdings: holdingsList };
+}
+
+async function tool_addHolding({ api_key, metal, type, quantity, weight_oz, purchase_price, purchase_date }) {
+  const auth = await validateApiKey(api_key);
+  if (auth.error) return auth;
+
+  const VALID = ['gold', 'silver', 'platinum', 'palladium'];
+  const m = (metal || '').toLowerCase();
+  if (!VALID.includes(m)) return { error: `Invalid metal. Use: ${VALID.join(', ')}` };
+  if (!quantity || !weight_oz || !purchase_price) return { error: 'quantity, weight_oz, and purchase_price are required' };
+
+  const totalOz = parseFloat(weight_oz) * parseInt(quantity, 10);
+
+  const { data, error } = await supabase
+    .from('holdings')
+    .insert({
+      user_id: auth.userId,
+      metal: m,
+      type: type || `${m} purchase`,
+      weight: parseFloat(weight_oz),
+      quantity: parseInt(quantity, 10),
+      purchase_price: parseFloat(purchase_price),
+      purchase_date: purchase_date || new Date().toISOString().split('T')[0],
+      weight_unit: 'oz',
+      notes: JSON.stringify({ source: 'mcp' }),
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(`Insert failed: ${error.message}`);
+  return { success: true, holding: data, total_oz: Math.round(totalOz * 10000) / 10000 };
+}
+
+async function tool_getAnalytics({ api_key }) {
+  const auth = await validateApiKey(api_key);
+  if (auth.error) return auth;
+
+  const holdings = await fetchHoldings(auth.userId);
+  const spotData = await getSpotPrices();
+  const prices = spotData?.prices || {};
+
+  const analytics = {};
+  const METALS = ['gold', 'silver', 'platinum', 'palladium'];
+
+  for (const metal of METALS) {
+    const metalHoldings = holdings.filter(h => h.metal === metal);
+    const totalOz = metalHoldings.reduce((s, h) => s + (h.weight || 0) * (h.quantity || 1), 0);
+    const totalCost = metalHoldings.reduce((s, h) => s + (h.purchase_price || 0) * (h.quantity || 1), 0);
+    const spot = prices[metal] || 0;
+    const marketValue = totalOz * spot;
+
+    if (totalOz > 0) {
+      const dates = metalHoldings.map(h => h.purchase_date).filter(Boolean).sort();
+      analytics[metal] = {
+        total_oz: Math.round(totalOz * 10000) / 10000,
+        avg_cost_per_oz: Math.round((totalCost / totalOz) * 100) / 100,
+        break_even_price: Math.round((totalCost / totalOz) * 100) / 100,
+        current_spot: spot,
+        market_value: Math.round(marketValue * 100) / 100,
+        total_cost: Math.round(totalCost * 100) / 100,
+        unrealized_pl: Math.round((marketValue - totalCost) * 100) / 100,
+        unrealized_pl_pct: totalCost > 0 ? Math.round(((marketValue - totalCost) / totalCost) * 10000) / 100 : 0,
+        is_profitable: marketValue >= totalCost,
+        purchase_count: metalHoldings.length,
+        first_purchase: dates[0] || null,
+        latest_purchase: dates[dates.length - 1] || null,
+      };
+    }
+  }
+
+  return { analytics };
+}
+
+async function tool_scanReceipt({ api_key, image_base64 }) {
+  const auth = await validateApiKey(api_key);
+  if (auth.error) return auth;
+
+  if (!image_base64) return { error: 'image_base64 is required' };
+
+  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+  if (!GEMINI_API_KEY) return { error: 'Receipt scanner not configured' };
+
+  const prompt = `Extract precious metals purchase data from this receipt image. Read every number EXACTLY as printed.
+
+RULES:
+1. ONLY include precious metal products: coins, bars, rounds
+2. EXCLUDE accessories: tubes, capsules, boxes, cases, albums, flips, holders
+3. EXCLUDE items under $10 (accessories)
+4. Read prices EXACTLY - do not estimate
+5. Extract purchase TIME if visible
+
+Return ONLY valid JSON (no markdown, no explanation):
+{
+  "dealer": "dealer name",
+  "purchaseDate": "YYYY-MM-DD",
+  "purchaseTime": "HH:MM",
+  "items": [
+    {
+      "description": "product name exactly as printed",
+      "quantity": 1,
+      "unitPrice": 123.45,
+      "extPrice": 123.45,
+      "metal": "silver",
+      "ozt": 1.0
+    }
+  ]
+}
+
+If a field is unreadable, use null. Metal must be: gold, silver, platinum, or palladium.`;
+
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+  const geminiResp = await axios.post(geminiUrl, {
+    contents: [{
+      parts: [
+        { text: prompt },
+        { inline_data: { mime_type: 'image/jpeg', data: image_base64 } },
+      ],
+    }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
+  }, { headers: { 'Content-Type': 'application/json' }, timeout: 60000 });
+
+  const responseText = geminiResp.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!responseText) return { error: 'No response from scanner' };
+
+  const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return { error: 'Could not parse receipt data' };
+
+  return { success: true, data: JSON.parse(jsonMatch[0]) };
+}
+
+async function tool_getDailyBrief({ api_key }) {
+  const todayEST = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+  // If api_key provided, fetch personalized brief
+  if (api_key) {
+    const auth = await validateApiKey(api_key);
+    if (auth.error) return auth;
+
+    const { data, error } = await supabase
+      .from('daily_briefs')
+      .select('brief_text, generated_at, date')
+      .eq('user_id', auth.userId)
+      .order('date', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error || !data) {
+      return { success: true, brief: null, message: 'No daily brief available. Briefs are generated for Gold/Lifetime subscribers.' };
+    }
+
+    return { success: true, brief: { brief_text: data.brief_text, generated_at: data.generated_at, date: data.date, is_current: data.date === todayEST } };
+  }
+
+  // No api_key — return latest Stack Signal synthesis as a generic market brief
+  const { data: signal } = await supabase
+    .from('stack_signal_articles')
+    .select('title, troy_commentary, troy_one_liner, published_at')
+    .eq('is_stack_signal', true)
+    .order('published_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (!signal) {
+    return { success: true, brief: null, message: 'No market brief available today' };
+  }
+
+  return { success: true, brief: { title: signal.title, brief_text: signal.troy_commentary, date: signal.published_at?.split('T')[0], summary: signal.troy_one_liner } };
+}
+
+// ============================================
 // MCP SERVER FACTORY
 // ============================================
 
@@ -276,6 +591,88 @@ function createMcpServer() {
       },
     },
     async (args) => jsonResult(await tool_getSpeculation(args || {}))
+  );
+
+  // ── Authenticated tools (optional or required api_key) ──
+
+  server.registerTool(
+    'chat_with_troy',
+    {
+      title: 'Chat with Troy',
+      description: 'Ask Troy anything about precious metals, markets, your stack. Provide api_key for personalized portfolio-aware answers, or omit for general market analysis.',
+      inputSchema: {
+        message: z.string().describe('Your question or message for Troy'),
+        api_key: z.string().optional().describe('TroyStack API key for portfolio-aware responses (optional)'),
+      },
+    },
+    async (args) => jsonResult(await tool_chatWithTroy(args))
+  );
+
+  server.registerTool(
+    'get_portfolio',
+    {
+      title: 'Get Portfolio',
+      description: 'Returns your precious metals portfolio: total value, cost basis, gain/loss, per-metal breakdown, and individual holdings',
+      inputSchema: {
+        api_key: z.string().describe('TroyStack API key (required)'),
+      },
+    },
+    async (args) => jsonResult(await tool_getPortfolio(args))
+  );
+
+  server.registerTool(
+    'add_holding',
+    {
+      title: 'Add Holding',
+      description: 'Add a precious metals purchase to your portfolio',
+      inputSchema: {
+        api_key: z.string().describe('TroyStack API key (required)'),
+        metal: z.enum(['gold', 'silver', 'platinum', 'palladium']).describe('Metal type'),
+        type: z.string().optional().describe('Product name (e.g. "2024 American Silver Eagle")'),
+        quantity: z.number().int().min(1).describe('Number of pieces'),
+        weight_oz: z.number().min(0.001).describe('Weight per piece in troy ounces'),
+        purchase_price: z.number().min(0.01).describe('Price per piece in USD'),
+        purchase_date: z.string().optional().describe('Purchase date YYYY-MM-DD (default: today)'),
+      },
+    },
+    async (args) => jsonResult(await tool_addHolding(args))
+  );
+
+  server.registerTool(
+    'get_analytics',
+    {
+      title: 'Get Portfolio Analytics',
+      description: 'Cost basis, average cost per oz, break-even price, unrealized P/L per metal',
+      inputSchema: {
+        api_key: z.string().describe('TroyStack API key (required)'),
+      },
+    },
+    async (args) => jsonResult(await tool_getAnalytics(args))
+  );
+
+  server.registerTool(
+    'scan_receipt',
+    {
+      title: 'Scan Receipt',
+      description: 'Extract precious metals purchase data from a receipt image using AI vision',
+      inputSchema: {
+        api_key: z.string().describe('TroyStack API key (required)'),
+        image_base64: z.string().describe('Base64-encoded receipt image (JPEG)'),
+      },
+    },
+    async (args) => jsonResult(await tool_scanReceipt(args))
+  );
+
+  server.registerTool(
+    'get_daily_brief',
+    {
+      title: 'Get Daily Brief',
+      description: 'Troy\'s daily market brief. Provide api_key for personalized brief, or omit for the latest Stack Signal market synthesis.',
+      inputSchema: {
+        api_key: z.string().optional().describe('TroyStack API key for personalized brief (optional)'),
+      },
+    },
+    async (args) => jsonResult(await tool_getDailyBrief(args || {}))
   );
 
   return server;

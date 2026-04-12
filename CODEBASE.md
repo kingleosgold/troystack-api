@@ -261,13 +261,25 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 
 All three methods route to the single `handleMcp` function which calls `transport.handleRequest(req, res[, req.body])`.
 
-**Tools registered on the McpServer:**
+**Public tools (no auth):**
 - `get_spot_prices` — calls `getSpotPrices()` directly
 - `get_price_history` — params: `metal`, `range` (1M|3M|6M|1Y|5Y|ALL); queries `price_log` table
 - `get_stack_signal` — params: `limit`, `offset`, `category`; queries `stack_signal_articles`
 - `get_vault_watch` — optional `metal` param; queries `vault_data` (latest per metal)
-- `get_junk_silver` — params: `dimes`, `quarters`, `half_dollars`, `kennedy_40`, `dollars`, `war_nickels`; duplicates the coin constants from junk-silver.js route (per "don't modify existing routes")
+- `get_junk_silver` — params: `dimes`, `quarters`, `half_dollars`, `kennedy_40`, `dollars`, `war_nickels`
 - `get_speculation` — params: `gold`, `silver`, `platinum`, `palladium` (target prices); returns multipliers and change_pct per metal
+
+**Authenticated tools (api_key param, validated via SHA-256 → api_keys table):**
+- `chat_with_troy` — params: `message`, `api_key?`; with key: enriches Troy prompt with user's holdings + spot prices; without key: market-only context. Uses Gemini Flash.
+- `get_portfolio` — params: `api_key` (required); queries holdings, calculates per-metal breakdown (oz, value, cost), total value/cost/gain. Returns 401 error object if key invalid.
+- `add_holding` — params: `api_key`, `metal`, `type?`, `quantity`, `weight_oz`, `purchase_price`, `purchase_date?`; inserts into holdings table, returns created record
+- `get_analytics` — params: `api_key`; per-metal cost basis, avg cost/oz, break-even, unrealized P/L, purchase count, first/latest purchase dates
+- `scan_receipt` — params: `api_key`, `image_base64`; sends to Gemini 2.5 Flash vision, extracts dealer/items/prices/metals. Same prompt as REST scan-receipt.js
+- `get_daily_brief` — params: `api_key?`; with key: personalized brief from `daily_briefs` table; without key: latest Stack Signal synthesis editorial
+
+**Auth helper:** `validateApiKey(apiKey)` hashes with SHA-256 via `hashKey()` from `middleware/api-key-auth.js`, looks up in `api_keys` table, bumps `last_used_at` + `request_count` (fire-and-forget). Returns `{ userId, keyRow }` or `{ error }`.
+
+**Shared helper:** `fetchHoldings(userId)` queries `holdings` table filtered by `user_id` + `deleted_at IS NULL`, ordered by `created_at DESC`.
 
 **Session management:** `StreamableHTTPServerTransport` handles sessions internally via the `Mcp-Session-Id` response/request header. Stateful mode with `sessionIdGenerator: () => randomUUID()`. No manual session map. A single shared `McpServer` + `Transport` pair is lazy-initialized on first request and reused for all subsequent requests.
 
