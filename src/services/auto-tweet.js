@@ -11,6 +11,7 @@
 
 const { TwitterApi } = require('twitter-api-v2');
 const supabase = require('../lib/supabase');
+const { callGemini, MODELS } = require('./ai-router');
 
 const DAILY_TWEET_CAP = 5;
 
@@ -75,25 +76,39 @@ async function postArticleTweet(article) {
       return null;
     }
 
-    // Build tweet body
+    // Generate tweet text via Gemini Flash — Troy's hot take, not a headline repost
     const url = `https://troystack.com/signal/${article.slug}`;
-    const title = article.title.trim();
-    const oneLiner = (article.troy_one_liner || '').trim();
+    const summaryContext = article.troy_one_liner || article.troy_commentary?.substring(0, 500) || '';
 
-    // 280 char budget: title + "\n\n" + summary + "\n\n" + url
-    const fixedLen = title.length + url.length + 4; // 4 for the two "\n\n"
-    const summaryBudget = 280 - fixedLen;
+    const tweetPrompt = `You are Troy, the TroyStack precious metals analyst. Write a single tweet (under 260 characters) about this article.
 
-    let summary = oneLiner;
-    if (summary && summary.length > summaryBudget) {
-      summary = summaryBudget > 3 ? summary.substring(0, summaryBudget - 3) + '...' : '';
+Article title: ${article.title}
+Article summary: ${summaryContext}
+
+Rules:
+- Write as Troy — direct, opinionated, no hedging
+- DO NOT just repeat the headline. Give your take on what it means for stackers.
+- No emojis, no exclamation points, no hashtags
+- No "not financial advice"
+- Use "your stack" not "your portfolio" if referencing holdings
+- Sound like a knowledgeable analyst sharing a hot take, not a bot reposting headlines
+- Under 260 characters (leave room for the link)
+
+Return ONLY the tweet text, nothing else.`;
+
+    let generatedText;
+    try {
+      generatedText = await callGemini(MODELS.flash, tweetPrompt, '', { temperature: 0.9, maxOutputTokens: 200 });
+    } catch (geminiErr) {
+      console.log(`[AutoTweet] Gemini failed, falling back to title: ${geminiErr.message}`);
+      generatedText = article.title;
     }
 
-    const tweetText = summary
-      ? `${title}\n\n${summary}\n\n${url}`
-      : `${title}\n\n${url}`;
-
-    const finalText = tweetText.length > 280 ? tweetText.substring(0, 277) + '...' : tweetText;
+    const trimmedText = (generatedText || article.title).trim().replace(/^["']|["']$/g, '');
+    const fullTweet = `${trimmedText}\n\n${url}`;
+    const finalText = fullTweet.length > 280
+      ? `${trimmedText.substring(0, 280 - url.length - 5)}...\n\n${url}`
+      : fullTweet;
 
     // Post
     const result = await twitter.v2.tweet(finalText);

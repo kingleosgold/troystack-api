@@ -812,10 +812,10 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 ### src/services/auto-tweet.js
 - **Purpose:** Post Stack Signal articles to X (@troystack_) — fire-and-forget, never blocks article saves
 - **Exports:** `postArticleTweet(article)`, `getClient()` — returns shared TwitterApi client
-- **Dependencies:** twitter-api-v2, supabase
+- **Dependencies:** twitter-api-v2, supabase, ai-router (Gemini Flash for tweet generation)
 - **Dedup:** `app_state` key `tweeted_signal_${slug}` holds the tweet id
 - **Daily cap:** 5 tweets/day via `app_state` key `tweet_count_${YYYY-MM-DD}` (America/New_York boundary)
-- **Tweet format:** `<title>\n\n<troy_one_liner>\n\n<https://troystack.com/signal/slug>` truncated to 280 chars
+- **Tweet format:** AI-generated Troy hot take via Gemini Flash (under 260 chars) + `\n\n<https://troystack.com/signal/slug>`. Falls back to article title if Gemini fails.
 - **Credential check:** skips silently if X_* env vars missing
 
 ### src/services/weekly-thread.js
