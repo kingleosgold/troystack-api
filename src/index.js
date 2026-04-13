@@ -682,6 +682,18 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('📡 [Intelligence Scraper] Reddit: every 3 hours');
 
+  // ── Auto-reply to high-engagement influencer tweets ──
+  cron.schedule('*/30 * * * *', async () => {
+    console.log('💬 [Auto Reply] Checking for reply opportunities...');
+    try {
+      const { checkForReplyOpportunities } = require('./services/auto-reply');
+      await checkForReplyOpportunities();
+    } catch (err) {
+      console.error('💬 [Auto Reply] Failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('💬 [Auto Reply] Scheduled: every 30 minutes');
+
   // Month-End Review — 5:00 PM EST / 22:00 UTC on last business day of month
   // Runs on 28th-31st, checks if tomorrow is a new month
   cron.schedule('0 22 28-31 * *', async () => {
