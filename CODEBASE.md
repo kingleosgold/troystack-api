@@ -568,7 +568,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `relevance_score` (int, 0-100), `topics` (text[]), `processed` (boolean)
 - `created_at` (timestamptz)
 - Indexes: `source_type`, `created_at DESC`, `relevance_score DESC`
-- Used by: intelligence-scraper.js, troy-chat.js (prompt injection), stack-signal-processor.js (article context)
+- Used by: intelligence-scraper.js, troy-chat.js (prompt injection), stack-signal-processor.js (article context), intelligence.js (daily brief prompt)
 
 ### app_state
 - `key` (text, PK), `value` (text/JSONB)

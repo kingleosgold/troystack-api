@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const supabase = require('../lib/supabase');
 const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
+const { getTopIntelligence } = require('../services/intelligence-scraper');
 
 const router = express.Router();
 
@@ -289,6 +290,14 @@ async function generateDailyBrief(userId) {
     console.log(`📝 [Daily Brief] Synthesis fetch skipped: ${synthErr.message}`);
   }
 
+  // Fetch community intelligence for context injection
+  let communityIntel = '';
+  try {
+    communityIntel = await getTopIntelligence(5);
+  } catch (intelErr) {
+    console.log(`📝 [Daily Brief] Intelligence fetch error (non-fatal): ${intelErr.message}`);
+  }
+
   // Call Gemini 2.5 Flash
   const systemPrompt = `You are Troy, a precious metals stack analyst writing your morning briefing called "Troy's Take." Write in first person, conversational tone. Short sentences. Lead with what happened overnight, connect every data point to the user's specific holdings, and end with one thing to watch today. No corporate language. No emojis. No exclamation points. Keep it under 200 words. You never recommend selling. Dips are entry points. You track COMEX physical flows, central bank buying, and the gold/silver ratio. You respect the user's strategy — don't suggest diversification unsolicited.
 
@@ -301,7 +310,11 @@ Title: ${synthesis.title}
 Headline: ${synthesis.troy_one_liner || ''}
 Key analysis: ${synthesis.troy_commentary || ''}
 
-Incorporate the key market themes from the Stack Signal synthesis into the daily brief. The brief should feel like ONE cohesive morning message from Troy — personal stack context PLUS the day's market intelligence. Don't repeat the synthesis word for word — weave the key themes into your brief naturally.` : ''}`;
+Incorporate the key market themes from the Stack Signal synthesis into the daily brief. The brief should feel like ONE cohesive morning message from Troy — personal stack context PLUS the day's market intelligence. Don't repeat the synthesis word for word — weave the key themes into your brief naturally.` : ''}
+
+${communityIntel ? `WHAT THE COMMUNITY IS DISCUSSING TODAY:
+${communityIntel}
+Reference these naturally when relevant — "traders on X are watching...", "the Reddit stacking community noticed..."` : ''}`;
 
   const userPrompt = `Write today's Troy's Take briefing (${today}).
 
