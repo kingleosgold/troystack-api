@@ -228,7 +228,7 @@ app.get('/v1/test-tweet', async (req, res) => {
 
     // 3. Append URL + trim to 280
     const url = `https://troystack.com/signal/${article.slug}`;
-    const maxTextLen = 280 - url.length - 2;
+    const maxTextLen = 280 - 23 - 2;  // 23 = t.co auto-shortened URL, 2 = "\n\n"
     if (tweetText.length > maxTextLen) {
       tweetText = tweetText.substring(0, maxTextLen - 3) + '...';
     }

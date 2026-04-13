@@ -96,7 +96,7 @@ async function postArticleTweet(article) {
     }
 
     // Assemble final tweet: text + URL, trim text if total exceeds 280
-    const maxTextLen = 280 - url.length - 2;  // 2 for "\n\n"
+    const maxTextLen = 280 - 23 - 2;  // 23 = t.co auto-shortened URL, 2 = "\n\n"
     if (tweetText.length > maxTextLen) {
       tweetText = tweetText.substring(0, maxTextLen - 3) + '...';
     }

@@ -469,7 +469,7 @@ Current spot: Gold ${prices.gold || 'N/A'}, Silver ${prices.silver || 'N/A'}, Ra
 const TWEET_SYSTEM_PROMPT = `You are Troy, a sharp precious metals analyst on X. Distill the following analysis into ONE punchy tweet.
 
 RULES:
-- 240 characters max
+- 200 characters max. This is critical — count your characters. Finish your thought in under 200 characters. Do not trail off.
 - Be opinionated and provocative — take a position
 - Reference specific numbers when available
 - No emojis, no exclamation points, no hashtags
@@ -504,8 +504,19 @@ async function generateTweetText(title, commentary) {
     const raw = await callGemini(MODELS.flash, TWEET_SYSTEM_PROMPT,
       `Write a Troy tweet reacting to this:\nTitle: ${title}\nAnalysis: ${content}`,
       { temperature: 0.9, maxOutputTokens: 1024 });
-    const cleaned = sanitizeTweetText(raw);
-    if (cleaned) console.log(`[TweetGen] Generated: ${cleaned.substring(0, 80)}...`);
+    let cleaned = sanitizeTweetText(raw);
+    // Truncate to 255 chars (280 - 23 t.co URL - 2 \n\n) at a sentence boundary
+    if (cleaned && cleaned.length > 255) {
+      const trimmed = cleaned.substring(0, 255);
+      const lastSentence = trimmed.search(/[.?](?=[^.?]*$)/);
+      if (lastSentence > 50) {
+        cleaned = trimmed.substring(0, lastSentence + 1);
+      } else {
+        const lastSpace = trimmed.lastIndexOf(' ');
+        cleaned = (lastSpace > 50 ? trimmed.substring(0, lastSpace) : trimmed) + '...';
+      }
+    }
+    if (cleaned) console.log(`[TweetGen] Generated (${cleaned.length} chars): ${cleaned.substring(0, 80)}...`);
     return cleaned;
   } catch (err) {
     console.log(`[TweetGen] Gemini failed: ${err.message}`);
