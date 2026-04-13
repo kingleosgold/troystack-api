@@ -58,26 +58,15 @@ async function callGemini(model, systemPrompt, userMessage, options = {}) {
     body.generationConfig.responseMimeType = responseMimeType;
   }
 
-  console.log('[callGemini] Options:', JSON.stringify({ model, temperature, maxOutputTokens, responseMimeType, timeout }));
-
   const resp = await axios.post(url, body, {
     headers: { 'Content-Type': 'application/json' },
     timeout,
   });
 
-  const candidate = resp.data?.candidates?.[0];
-  const finishReason = candidate?.finishReason;
-  const text = candidate?.content?.parts
+  const text = resp.data?.candidates?.[0]?.content?.parts
     ?.filter(p => p.text)
     ?.map(p => p.text)
     ?.join('') || '';
-
-  console.log('[callGemini] Response length:', text.length, '| finishReason:', finishReason);
-  console.log('[callGemini] Full response:', text.substring(0, 500));
-
-  if (finishReason && finishReason !== 'STOP') {
-    console.log('[callGemini] WARNING: Non-STOP finish reason:', finishReason, '| safetyRatings:', JSON.stringify(candidate?.safetyRatings || []));
-  }
 
   return text;
 }

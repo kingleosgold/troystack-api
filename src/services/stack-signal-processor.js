@@ -463,6 +463,57 @@ Current spot: Gold ${prices.gold || 'N/A'}, Silver ${prices.silver || 'N/A'}, Ra
 }
 
 /**
+ * Generate a tweet from article commentary via Gemini Flash.
+ * Returns the sanitized tweet text or null on failure.
+ */
+const TWEET_SYSTEM_PROMPT = `You are Troy, a sharp precious metals analyst on X. Distill the following analysis into ONE punchy tweet.
+
+RULES:
+- 240 characters max
+- Be opinionated and provocative — take a position
+- Reference specific numbers when available
+- No emojis, no exclamation points, no hashtags
+- No hedging, no "not financial advice"
+- Never start with the article title
+- Do NOT wrap in quotes
+- Return ONLY the tweet text
+
+EXAMPLES:
+"CPI prints 3.3% and the Fed is still pretending rate cuts are on the table. Gold at $4,780 says the market isn't buying it either."
+"Silver down 37% from January highs while industrial demand hits records. Paper market gift-wrapping physical for anyone paying attention."
+"Gold/silver ratio at 63. Last time it compressed below 50, silver ran 40% in 8 weeks. The ratio doesn't lie."
+"Central banks bought 19 metric tons in February. They're not stacking because it's a barbarous relic."`;
+
+function sanitizeTweetText(raw) {
+  if (!raw) return null;
+  let text = raw.trim();
+  text = text.replace(/^["']|["']$/g, '');
+  text = text.replace(/^(SILENT THOUGHT|THOUGHT|THINKING|REASONING|NOTE|INTERNAL)[:\s].*$/gmi, '').trim();
+  const lines = text.split('\n').filter(l => l.trim() && !l.match(/^(SILENT|THOUGHT|THINKING|REASONING|NOTE|INTERNAL)/i));
+  text = lines.join(' ').trim();
+  text = text.replace(/(?<!\w)"(?!\w)/g, '').replace(/(?<!\w)'(?!\w)/g, '').trim();
+  text = text.replace(/\s{2,}/g, ' ');
+  return text || null;
+}
+
+async function generateTweetText(title, commentary) {
+  const content = commentary?.substring(0, 500) || title;
+  if (!content || content === title) return null; // nothing to react to beyond the title
+
+  try {
+    const raw = await callGemini(MODELS.flash, TWEET_SYSTEM_PROMPT,
+      `Write a Troy tweet reacting to this:\nTitle: ${title}\nAnalysis: ${content}`,
+      { temperature: 0.9, maxOutputTokens: 1024 });
+    const cleaned = sanitizeTweetText(raw);
+    if (cleaned) console.log(`[TweetGen] Generated: ${cleaned.substring(0, 80)}...`);
+    return cleaned;
+  } catch (err) {
+    console.log(`[TweetGen] Gemini failed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
  * Generate one-liner and metadata for a synthesis article.
  * Uses Gemini Flash for the one-liner (cheap).
  */
@@ -691,6 +742,7 @@ async function saveArticles(articles) {
         title: article.title,
         troy_commentary: article.troy_commentary || null,
         troy_one_liner: article.troy_one_liner || null,
+        tweet_text: article.tweet_text || null,
         category: article.category || 'macro',
         sources: article.sources || [],
         image_url: article.image_url || null,
@@ -1049,6 +1101,9 @@ async function generateClaudeDailySynthesis() {
   const title = `The Stack Signal: ${prettyDate}`;
   const slug = generateSlug(title);
 
+  // Generate tweet from the synthesis commentary
+  const synthesisTweet = await generateTweetText(title, articleText);
+
   const { data: saved, error: saveErr } = await supabase
     .from('stack_signal_articles')
     .insert({
@@ -1056,6 +1111,7 @@ async function generateClaudeDailySynthesis() {
       title,
       troy_commentary: articleText,
       troy_one_liner: oneLiner,
+      tweet_text: synthesisTweet,
       category: 'synthesis',
       sources: todayArticles.map(a => ({ name: 'Stack Signal Feed', url: null, title: a.title })),
       image_url: null,
@@ -1077,7 +1133,7 @@ async function generateClaudeDailySynthesis() {
 
   // Fire-and-forget tweet — must never block or throw
   try {
-    await postArticleTweet({ title, slug, troy_one_liner: oneLiner });
+    await postArticleTweet({ title, slug, troy_one_liner: oneLiner, tweet_text: synthesisTweet });
   } catch (tweetErr) {
     console.log(`[Claude Synthesis] Tweet error (non-fatal): ${tweetErr.message}`);
   }
@@ -1159,9 +1215,13 @@ async function runStackSignalPipeline() {
       const metadata = await generateArticleMetadata(cluster, articleText);
       const newCount = await incrementCommentaryCount();
 
+      // Generate tweet from the just-written commentary
+      const tweetText = await generateTweetText(metadata.title, articleText);
+
       const article = {
         ...metadata,
         troy_commentary: articleText,
+        tweet_text: tweetText,
         slug: generateSlug(metadata.title),
       };
 
@@ -1244,4 +1304,6 @@ module.exports = {
   saveArticles,
   generateStackSignal,
   runStackSignalPipeline,
+  generateTweetText,
+  sanitizeTweetText,
 };

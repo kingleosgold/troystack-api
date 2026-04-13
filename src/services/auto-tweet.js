@@ -1,20 +1,11 @@
-/**
- * Auto-tweet service — posts Stack Signal articles to X (@troystack_)
- *
- * Called by stack-signal-processor.js after an article saves successfully.
- * Wrapped in try/catch by the caller — tweet failure must never block saves.
- *
- * Dedup: app_state key `tweeted_signal_${slug}` holds the tweet id once posted.
- * Daily cap: app_state key `tweet_count_${YYYY-MM-DD}` (America/New_York),
- * maximum 5 tweets per day.
- */
-
 // callGemini signature: callGemini(model, systemPrompt, userMessage, options)
 // options: { temperature, maxOutputTokens, responseMimeType, timeout }
 // Returns: string (raw text response)
 const { TwitterApi } = require('twitter-api-v2');
 const supabase = require('../lib/supabase');
-const { callGemini, MODELS } = require('./ai-router');
+// Note: generateTweetText + sanitizeTweetText are lazy-required inside
+// postArticleTweet() to avoid circular dependency with stack-signal-processor
+// (which imports postArticleTweet from this file).
 
 const DAILY_TWEET_CAP = 5;
 
@@ -80,69 +71,29 @@ async function postArticleTweet(article) {
       return null;
     }
 
-    // Generate tweet text via Gemini Flash — Troy's hot take, not a headline repost
+    // Lazy require to avoid circular dependency (stack-signal-processor ↔ auto-tweet)
+    const { generateTweetText, sanitizeTweetText } = require('./stack-signal-processor');
+
+    // Get tweet text — prefer pre-generated, fall back to Gemini, then title
     const url = `https://troystack.com/signal/${article.slug}`;
+    let tweetText;
 
-    const systemPrompt = `You are Troy, a sharp precious metals analyst on X. You write short, punchy, opinionated tweets about gold and silver news. You sound like the smartest guy at the coin shop, not a news aggregator.
-
-RULES:
-- Write ONE tweet, 240 characters max
-- Be opinionated and provocative — take a position
-- Reference specific numbers when available (spot price, percentage moves, ratios)
-- No emojis, no exclamation points, no hashtags
-- No "not financial advice" or hedging language
-- Never recommend selling
-- Say "stack" not "portfolio"
-- Dry humor welcome
-- Do NOT restate the headline — give your REACTION to it
-- Do NOT wrap your response in quotes
-- Do NOT include any meta-commentary, reasoning, or thinking
-- Return ONLY the tweet text, nothing else
-
-EXAMPLES OF GOOD TROY TWEETS:
-"CPI prints 3.3% and the Fed is still pretending rate cuts are on the table. Gold at $4,780 says the market isn't buying it either."
-"Silver down 37% from January highs while industrial demand hits records. Paper market gift-wrapping physical for anyone paying attention."
-"Gold/silver ratio at 63. Last time it compressed below 50, silver ran 40% in 8 weeks. The ratio doesn't lie."
-"Central banks bought 19 metric tons of gold in February. They're not buying it because it's a barbarous relic."
-"$88 billion a month in debt interest. That's not a number you fix with a ceasefire. That's a number you hedge with metal."`;
-
-    const summary = article.troy_commentary?.substring(0, 500) || article.troy_one_liner || article.summary || article.title;
-    console.log('[AutoTweet] Prompt summary:', summary.substring(0, 100));
-
-    let generatedText;
-
-    // If summary is just the title (all content fields empty), skip Gemini — it'll just parrot it back
-    if (summary === article.title) {
-      console.log('[AutoTweet] Warning: no article content available, skipping Gemini');
-      generatedText = null;
+    if (article.tweet_text) {
+      // Use pre-generated tweet from article creation pipeline
+      tweetText = sanitizeTweetText(article.tweet_text) || article.tweet_text.trim();
+      console.log('[AutoTweet] Using pre-generated tweet:', tweetText);
     } else {
-      const userPrompt = `Write a Troy tweet reacting to this article:\nTitle: ${article.title}\nSummary: ${summary}`;
-      try {
-        generatedText = await callGemini(MODELS.flash, systemPrompt, userPrompt, { temperature: 0.9, maxOutputTokens: 1024 });
-        if (generatedText && !/[.?!)"'\w]$/.test(generatedText.trim())) {
-          console.log('[AutoTweet] Warning: Gemini response appears truncated:', generatedText);
-        }
-      } catch (geminiErr) {
-        console.log(`[AutoTweet] Gemini failed, falling back to title: ${geminiErr.message}`);
-        generatedText = null;
+      // Fallback for old articles without tweet_text: generate via Gemini
+      console.log('[AutoTweet] No tweet_text on article, generating via Gemini...');
+      tweetText = await generateTweetText(article.title, article.troy_commentary);
+
+      if (!tweetText) {
+        tweetText = article.title.length > 200 ? article.title.substring(0, 200) + '...' : article.title;
+        console.log('[AutoTweet] Gemini fallback failed, using title');
+      } else {
+        console.log('[AutoTweet] Generated:', tweetText);
       }
     }
-
-    // Clean up Gemini output — strip quotes, reasoning artifacts, dangling quotes, empty lines
-    let tweetText = (generatedText || '').trim();
-    tweetText = tweetText.replace(/^["']|["']$/g, '');                           // wrapping quotes
-    tweetText = tweetText.replace(/^(SILENT THOUGHT|THOUGHT|THINKING|REASONING|NOTE|INTERNAL)[:\s].*$/gmi, '').trim();
-    const lines = tweetText.split('\n').filter(l => l.trim() && !l.match(/^(SILENT|THOUGHT|THINKING|REASONING|NOTE|INTERNAL)/i));
-    tweetText = lines.join(' ').trim();
-    tweetText = tweetText.replace(/(?<!\w)"(?!\w)/g, '').replace(/(?<!\w)'(?!\w)/g, '').trim();  // dangling stray quotes
-    tweetText = tweetText.replace(/\s{2,}/g, ' ');                               // collapse double spaces
-
-    // Fallback: only if Gemini returned nothing at all (empty/null). A short tweet is fine.
-    if (!tweetText) {
-      tweetText = article.title.length > 200 ? article.title.substring(0, 200) + '...' : article.title;
-    }
-
-    console.log('[AutoTweet] Generated:', tweetText);
 
     // Assemble final tweet: text + URL, trim text if total exceeds 280
     const maxTextLen = 280 - url.length - 2;  // 2 for "\n\n"

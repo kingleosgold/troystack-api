@@ -499,8 +499,9 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `sources` (JSONB — array of {title, url, source})
 - `category`, `image_url` (text), `relevance_score` (numeric), `is_stack_signal` (boolean)
 - `published_at` (timestamptz), `gold_price_at_publish`, `silver_price_at_publish` (numeric)
+- `tweet_text` (text, nullable) — pre-generated Troy tweet for auto-posting, generated during article creation via `generateTweetText()`
 - `view_count`, `like_count`, `comment_count` (int)
-- Used by: stack-signal.js, social.js, stack-signal-processor.js, intelligence.js
+- Used by: stack-signal.js, social.js, stack-signal-processor.js, intelligence.js, auto-tweet.js
 
 ### article_views
 - `id` (UUID, PK), `article_id` (UUID, FK), `user_id` (UUID, nullable), `device_id` (text, nullable)
@@ -677,7 +678,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 4. **Feed articles:** `writeFeedReaction()` (Gemini Flash) writes 400-800 word feed articles with depth requirements (historical context, physical market connection, purchasing power framing, forward-looking close)
    - Save guard filters articles with `troy_commentary.length < 2500` chars
 5. Generates/assigns image (DALL-E gated by `USE_DALLE = false` flag; pool fallback)
-6. Saves feed articles to `stack_signal_articles` table (`is_stack_signal=false`). After each successful save, `postArticleTweet()` fires to X (fire-and-forget, dedup by slug, 5/day cap).
+6. Saves feed articles to `stack_signal_articles` table (`is_stack_signal=false`) including pre-generated `tweet_text`. After each successful save, `postArticleTweet()` fires to X (fire-and-forget, dedup by slug, 5/day cap) using the stored `tweet_text`.
 7. Sends push notification if score ≥85 (via stack-signal-push.js)
 8. **Claude daily synthesis editorial** — `generateClaudeDailySynthesis()` runs opportunistically at the end of every pipeline cycle:
    - Deduped by date (EST): only one synthesis per day (`is_stack_signal=true AND category='synthesis'`)
@@ -827,7 +828,7 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 - **Dependencies:** twitter-api-v2, supabase, ai-router (Gemini Flash for tweet generation)
 - **Dedup:** `app_state` key `tweeted_signal_${slug}` holds the tweet id
 - **Daily cap:** 5 tweets/day via `app_state` key `tweet_count_${YYYY-MM-DD}` (America/New_York boundary)
-- **Tweet format:** AI-generated Troy hot take via Gemini Flash (system/user prompt split, 240 char target, temperature 0.9). Sanitizes stray/dangling quotes + reasoning artifacts. Falls back to truncated title if Gemini fails or output < 20 chars. Appends `\n\n<https://troystack.com/signal/slug>`. Logs generated text before posting.
+- **Tweet format:** Prefers pre-generated `tweet_text` from the article (generated during pipeline save). Falls back to live Gemini Flash call via `generateTweetText()` for old articles without `tweet_text`. Last resort: truncated title. Sanitized via shared `sanitizeTweetText()`. Appends `\n\n<https://troystack.com/signal/slug>`.
 - **Credential check:** skips silently if X_* env vars missing
 
 ### src/services/weekly-thread.js

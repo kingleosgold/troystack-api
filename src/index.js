@@ -186,14 +186,16 @@ app.use('/v1/stack-signal', publicLimiter, socialRouter);
 // Dealer price comparison
 app.use('/v1/dealer-prices', publicLimiter, dealerPricesRouter);
 
-// ── Temporary test route — bypasses postArticleTweet entirely ──
-// ?post=true to actually send to Twitter; default is dry-run (generate only)
+// ── Temporary test route ──
+// ?post=true to actually send to Twitter; default is dry-run
+// ?generate=true to force Gemini generation even if tweet_text exists
 app.get('/v1/test-tweet', async (req, res) => {
   try {
     const supabase = require('./lib/supabase');
-    const { callGemini, MODELS } = require('./services/ai-router');
     const { getClient } = require('./services/auto-tweet');
+    const { generateTweetText, sanitizeTweetText } = require('./services/stack-signal-processor');
     const shouldPost = req.query.post === 'true';
+    const forceGenerate = req.query.generate === 'true';
 
     // 1. Fetch most recent article
     const { data: articles } = await supabase
@@ -207,57 +209,24 @@ app.get('/v1/test-tweet', async (req, res) => {
     }
     const article = articles[0];
 
-    // 2. Build summary (same fallback chain as auto-tweet.js)
-    const summary = article.troy_commentary?.substring(0, 500) || article.troy_one_liner || article.title;
+    // 2. Get tweet text — prefer pre-generated unless ?generate=true
+    let tweetText;
+    let source;
 
-    // 3. Same system prompt as auto-tweet.js (verbatim)
-    const systemPrompt = `You are Troy, a sharp precious metals analyst on X. You write short, punchy, opinionated tweets about gold and silver news. You sound like the smartest guy at the coin shop, not a news aggregator.
-
-RULES:
-- Write ONE tweet, 240 characters max
-- Be opinionated and provocative — take a position
-- Reference specific numbers when available (spot price, percentage moves, ratios)
-- No emojis, no exclamation points, no hashtags
-- No "not financial advice" or hedging language
-- Never recommend selling
-- Say "stack" not "portfolio"
-- Dry humor welcome
-- Do NOT restate the headline — give your REACTION to it
-- Do NOT wrap your response in quotes
-- Do NOT include any meta-commentary, reasoning, or thinking
-- Return ONLY the tweet text, nothing else
-
-EXAMPLES OF GOOD TROY TWEETS:
-"CPI prints 3.3% and the Fed is still pretending rate cuts are on the table. Gold at $4,780 says the market isn't buying it either."
-"Silver down 37% from January highs while industrial demand hits records. Paper market gift-wrapping physical for anyone paying attention."
-"Gold/silver ratio at 63. Last time it compressed below 50, silver ran 40% in 8 weeks. The ratio doesn't lie."
-"Central banks bought 19 metric tons of gold in February. They're not buying it because it's a barbarous relic."
-"$88 billion a month in debt interest. That's not a number you fix with a ceasefire. That's a number you hedge with metal."`;
-
-    const userPrompt = `Write a Troy tweet reacting to this article:\nTitle: ${article.title}\nSummary: ${summary}`;
-
-    // 4. Call Gemini
-    const rawResponse = await callGemini(MODELS.flash, systemPrompt, userPrompt, { temperature: 0.9, maxOutputTokens: 1024 });
-    console.log('[TestTweet] Raw Gemini:', rawResponse);
-    if (rawResponse && !/[.?!)"'\w]$/.test(rawResponse.trim())) {
-      console.log('[TestTweet] Warning: Gemini response appears truncated:', rawResponse);
+    if (article.tweet_text && !forceGenerate) {
+      tweetText = sanitizeTweetText(article.tweet_text) || article.tweet_text.trim();
+      source = 'pre-generated (tweet_text column)';
+    } else {
+      tweetText = await generateTweetText(article.title, article.troy_commentary);
+      source = tweetText ? 'gemini (live)' : 'title fallback';
+      if (!tweetText) {
+        tweetText = article.title.length > 200 ? article.title.substring(0, 200) + '...' : article.title;
+      }
     }
 
-    // 5. Sanitize (same logic as auto-tweet.js)
-    let tweetText = (rawResponse || '').trim();
-    tweetText = tweetText.replace(/^["']|["']$/g, '');
-    tweetText = tweetText.replace(/^(SILENT THOUGHT|THOUGHT|THINKING|REASONING|NOTE|INTERNAL)[:\s].*$/gmi, '').trim();
-    const lines = tweetText.split('\n').filter(l => l.trim() && !l.match(/^(SILENT|THOUGHT|THINKING|REASONING|NOTE|INTERNAL)/i));
-    tweetText = lines.join(' ').trim();
-    tweetText = tweetText.replace(/(?<!\w)"(?!\w)/g, '').replace(/(?<!\w)'(?!\w)/g, '').trim();
-    tweetText = tweetText.replace(/\s{2,}/g, ' ');
-    // Fallback: only if Gemini returned nothing at all. A short tweet is fine.
-    if (!tweetText) {
-      tweetText = article.title.length > 200 ? article.title.substring(0, 200) + '...' : article.title;
-    }
-    console.log('[TestTweet] Sanitized:', tweetText);
+    console.log(`[TestTweet] Source: ${source} | Tweet: ${tweetText}`);
 
-    // 6. Append URL + trim to 280
+    // 3. Append URL + trim to 280
     const url = `https://troystack.com/signal/${article.slug}`;
     const maxTextLen = 280 - url.length - 2;
     if (tweetText.length > maxTextLen) {
@@ -265,7 +234,7 @@ EXAMPLES OF GOOD TROY TWEETS:
     }
     const finalTweet = `${tweetText}\n\n${url}`;
 
-    // 7. Optionally post
+    // 4. Optionally post
     let tweetId = null;
     if (shouldPost) {
       const twitter = getClient();
@@ -279,8 +248,8 @@ EXAMPLES OF GOOD TROY TWEETS:
 
     res.json({
       article_title: article.title,
-      summary_sent: summary.substring(0, 200),
-      raw_gemini: rawResponse,
+      stored_tweet_text: article.tweet_text || null,
+      source,
       sanitized_tweet: tweetText,
       final_tweet: finalTweet,
       tweet_id: tweetId,
