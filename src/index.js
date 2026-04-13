@@ -646,6 +646,20 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('📡 [Intelligence Scraper] YouTube: every 4 hours');
 
+  // ── Composite Spot Price: every 60 seconds during market hours, every 5 min otherwise ──
+  cron.schedule('* * * * *', async () => {
+    try {
+      const { areMarketsClosed } = require('./services/price-fetcher');
+      const { updateCompositePrice } = require('./services/price-consensus');
+      // During market close, only update every 5 minutes (on :00 and :05 etc)
+      if (areMarketsClosed() && new Date().getMinutes() % 5 !== 0) return;
+      await updateCompositePrice();
+    } catch (err) {
+      console.error('[Composite Cron] Error:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('📊 [Composite Price] Scheduled: every 60s (market hours), every 5m (off-hours)');
+
   cron.schedule('0 */2 * * *', async () => {
     console.log('📡 [Intelligence Scraper] Running Twitter scrape...');
     try {

@@ -5,6 +5,7 @@ const router = express.Router();
 const supabase = require('../lib/supabase');
 const axios = require('axios');
 const { getSpotPrices, getCachedPrices } = require('../services/price-fetcher');
+const { getCompositePrice } = require('../services/price-consensus');
 const {
   fetchAllETFs, getRatioForDate,
   slvToSpotSilver, gldToSpotGold, ppltToSpotPlatinum, pallToSpotPalladium,
@@ -661,6 +662,40 @@ router.post('/historical-spot-batch', async (req, res) => {
   } catch (error) {
     console.error('Batch historical spot error:', error);
     res.status(500).json({ success: false, error: 'Failed to lookup historical prices' });
+  }
+});
+
+// GET /v1/prices/composite — TroyStack Composite Spot Price
+router.get('/composite', async (req, res) => {
+  try {
+    const composite = await getCompositePrice();
+
+    if (!composite) {
+      return res.status(503).json({ error: 'Composite price not yet available. Try again in 60 seconds.' });
+    }
+
+    res.json({
+      prices: {
+        gold: composite.gold,
+        silver: composite.silver,
+        platinum: composite.platinum,
+        palladium: composite.palladium,
+      },
+      source_count: composite.source_count,
+      details: {
+        gold: composite.details?.gold,
+        silver: composite.details?.silver,
+        platinum: composite.details?.platinum,
+        palladium: composite.details?.palladium,
+      },
+      sources: composite.sources,
+      markets_closed: composite.markets_closed,
+      calculated_at: composite.calculated_at,
+      powered_by: `TroyStack Composite — aggregated from ${composite.source_count} independent sources`,
+    });
+  } catch (err) {
+    console.error('[Composite] Endpoint error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch composite price' });
   }
 });
 

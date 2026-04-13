@@ -26,6 +26,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | GET | /v1/prices/history | Public | Historical price data; params: metal, range (1M–ALL), maxPoints |
 | GET | /v1/historical-spot | Public | Single-date spot lookup with 5-tier fallback (price_log → ETF → MetalPriceAPI → MacroTrends) |
 | POST | /v1/historical-spot-batch | Public | Batch date lookup (max 100 dates) |
+| GET | /v1/prices/composite | Public | TroyStack Composite Spot Price — median of 3 sources with spread%, confidence, source detail |
 
 ### src/routes/market-intel.js
 - **Purpose:** Precious metals news headlines from intelligence briefs + breaking alerts
@@ -423,6 +424,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `0 */4 * * *` | Every 4 hours | YouTube intelligence scrape | intelligence-scraper.js `scrapeYouTubeChannels()` |
 | `0 */2 * * *` | Every 2 hours | Twitter intelligence scrape | intelligence-scraper.js `scrapeTwitterAccounts()` |
 | `0 */3 * * *` | Every 3 hours | Reddit intelligence scrape | intelligence-scraper.js `scrapeReddit()` |
+| `* * * * *` | Every 60s (market) / 5m (off) | Composite spot price update | price-consensus.js `updateCompositePrice()` |
 | `0 22 28-31 * *` | 5:00 PM (last day) | Monthly recap | `generateStackSignal('monthly_recap')` |
 | `0 15 1 1 *` | 10:00 AM (Jan 1) | Yearly recap | `generateStackSignal('yearly_recap')` |
 | ~~`5 * * * *`~~ | ~~Every hour at :05~~ | **DISABLED** — Dealer price scraping (re-enable when affiliate integrations ready) | dealerScraper.js `scrapeAllDealers()` |
@@ -811,6 +813,16 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 - **Last modified:** 2026-02-24
 - **Cache:** In-memory, 10-min TTL. Friday close stored for change calculation.
 - **Market hours:** Closed Friday 5PM ET → Sunday 6PM ET
+
+### src/services/price-consensus.js
+- **Purpose:** TroyStack Composite Spot Price engine — aggregates multiple independent sources into a single median price per metal
+- **Exports:** `calculateCompositePrice()`, `updateCompositePrice()`, `getCompositePrice()`, `fetchMetalPriceAPI()`, `fetchGoldAPI()`, `fetchYahooFinance()`
+- **Dependencies:** axios, supabase, price-fetcher (`areMarketsClosed`)
+- **Sources:** MetalPriceAPI (Au/Ag/Pt/Pd), GoldAPI.io (Au/Ag), Yahoo Finance futures GC=F/SI=F (Au/Ag)
+- **Composite calculation:** Calls all sources via `Promise.allSettled`, filters failures, computes median per metal. Reports spread_pct, confidence (high if 3+ sources within 0.5%, medium if 2, low if 1), individual source prices.
+- **Storage:** `app_state` key `composite_spot_latest` (JSON). In-memory cache with Supabase fallback.
+- **Cron:** every 60s during market hours, every 5 min off-hours (`* * * * *` with market-hours gate)
+- **Endpoint:** `GET /v1/prices/composite` (in prices.js)
 
 ### src/services/etf-prices.js
 - **Purpose:** Convert ETF prices to estimated spot via calibrated ratios
