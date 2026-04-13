@@ -26,9 +26,12 @@ const YOUTUBE_CHANNELS = [
   { name: 'Peter Schiff', id: 'UCIjuLiLhfBIcGQHjxcFanzA' },
   { name: 'Robert Kiyosaki', id: 'UCdKmOrjWOsLazeuxhPhaoQg' },
   { name: 'Wall Street Silver', id: 'UCvteX8qNZS8GVFO31xrJhFw' },
-  { name: 'David Hunter', id: 'UClWSb9FBDlz7HOb1XCBUbzw' },
   { name: 'Andy Schectman', id: 'UC4dmpd-3NL2QBdglPQAZlQw' },
   { name: 'Rick Rule', id: 'UCfO11d1J1M3o2MrFUGu0R_A' },
+  { name: 'The Asian Guy', id: 'UCjdiy7b9T1gR9jfoYAmx0dg' },
+  { name: 'The Metals Insights', id: 'UChpzhUzHkpl_FvM0bUgiI_Q' },
+  { name: 'Silver Dragons', id: 'UCucqfNRyBkieAop_LDUqHEg' },
+  { name: 'Silver Slayer', id: 'UCHSk08tGQasDxb-PpYPowVg' },
 ];
 
 const TWITTER_ACCOUNTS = [
