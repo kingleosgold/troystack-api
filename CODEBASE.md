@@ -420,6 +420,9 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `0 22 * * 5` | 5:00 PM (Fri) | Weekly recap | `generateStackSignal('weekly_recap')` |
 | `15 11 * * 1` | 6:15 AM (Mon) | Weekly preview | `generateStackSignal('weekly_preview')` |
 | `0 22 * * 0` | 6:00 PM (Sun) | Weekly X thread to @troystack_ | weekly-thread.js `generateAndPostWeeklyThread()` |
+| `0 */4 * * *` | Every 4 hours | YouTube intelligence scrape | intelligence-scraper.js `scrapeYouTubeChannels()` |
+| `0 */2 * * *` | Every 2 hours | Twitter intelligence scrape | intelligence-scraper.js `scrapeTwitterAccounts()` |
+| `0 */3 * * *` | Every 3 hours | Reddit intelligence scrape | intelligence-scraper.js `scrapeReddit()` |
 | `0 22 28-31 * *` | 5:00 PM (last day) | Monthly recap | `generateStackSignal('monthly_recap')` |
 | `0 15 1 1 *` | 10:00 AM (Jan 1) | Yearly recap | `generateStackSignal('yearly_recap')` |
 | ~~`5 * * * *`~~ | ~~Every hour at :05~~ | **DISABLED** — Dealer price scraping (re-enable when affiliate integrations ready) | dealerScraper.js `scrapeAllDealers()` |
@@ -557,6 +560,16 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `target_price`, `current_price` (numeric), `sent_at` (timestamptz)
 - Used by: price-alert-checker.js
 
+### troy_intelligence
+- `id` (UUID, PK), `source_type` (text: youtube/twitter/reddit/rss/comex/central_bank)
+- `source_name` (text — channel/handle/subreddit), `source_url` (text, dedup key)
+- `raw_content` (text — transcript/post/tweet), `extracted_claims` (JSONB — array of strings)
+- `key_figures` (JSONB — `[{label, value}]`), `sentiment` (text: bullish/bearish/neutral)
+- `relevance_score` (int, 0-100), `topics` (text[]), `processed` (boolean)
+- `created_at` (timestamptz)
+- Indexes: `source_type`, `created_at DESC`, `relevance_score DESC`
+- Used by: intelligence-scraper.js, troy-chat.js (prompt injection), stack-signal-processor.js (article context)
+
 ### app_state
 - `key` (text, PK), `value` (text/JSONB)
 - General-purpose key-value store for: cron locks, daily caps, voice usage counters, DALL-E usage, push dedup
@@ -628,6 +641,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `MIN_VERSION_ANDROID` | No | min-version.js | Minimum Android app version |
 | `MIN_VERSION_MESSAGE` | No | min-version.js | Force-update message text |
 | `MIN_VERSION_ENFORCED` | No | min-version.js | "true" to enforce version gate |
+| `YOUTUBE_API_KEY` | No | intelligence-scraper.js | YouTube Data API v3 key for channel scraping |
 | `X_CONSUMER_KEY` | No | auto-tweet.js | X (Twitter) API consumer key |
 | `X_CONSUMER_SECRET` | No | auto-tweet.js | X (Twitter) API consumer secret |
 | `X_ACCESS_TOKEN` | No | auto-tweet.js | X (Twitter) API access token |
@@ -843,6 +857,17 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 - **Exports:** `sendSignalPush()`
 - **Dependencies:** supabase, push.js
 - **Last modified:** 2026-03-11
+
+### src/services/intelligence-scraper.js
+- **Purpose:** Monitor YouTube, X (Twitter), and Reddit for precious metals community discussions. Extract claims, price targets, sentiment via Gemini Flash. Save to `troy_intelligence` table.
+- **Exports:** `scrapeYouTubeChannels()`, `scrapeTwitterAccounts()`, `scrapeReddit()`, `getTopIntelligence(limit?)`, `YOUTUBE_CHANNELS`, `TWITTER_ACCOUNTS`, `REDDIT_SUBREDDITS`
+- **Dependencies:** axios, supabase, ai-router (Gemini Flash), youtube-transcript, auto-tweet (getClient for Twitter API)
+- **YouTube channels:** Arcadia Economics, Lynette Zang, Mike Maloney, Kitco News, Peter Schiff, Robert Kiyosaki, Wall Street Silver, David Hunter, Andy Schectman, Rick Rule
+- **Twitter accounts:** @DaveHcontrarian, @PeterSchiff, @KingWorldNews, @silverguru22, @GoldTelegraph, @WallStreetSilv, @RobertKiyosaki, @KeithNeumeyer, @SchiffGold, @SilverSqueeze
+- **Reddit subreddits:** WallStreetSilver, Gold, Silverbugs, PreciousMetals
+- **Dedup:** by `source_url` in `troy_intelligence` table
+- **`getTopIntelligence(limit)`:** queries last 24h items ordered by relevance_score DESC, returns formatted string for prompt injection
+- **Crons:** YouTube every 4h (`0 */4 * * *`), Twitter every 2h (`0 */2 * * *`), Reddit every 3h (`0 */3 * * *`)
 
 ### src/services/comex-scraper.js
 - **Purpose:** Scrape COMEX warehouse inventory from CME XLS files

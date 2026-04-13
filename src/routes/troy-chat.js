@@ -4,6 +4,7 @@ const converter = require('number-to-words');
 const multer = require('multer');
 const supabase = require('../lib/supabase');
 const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
+const { getTopIntelligence } = require('../services/intelligence-scraper');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -558,6 +559,14 @@ router.post('/conversations/:id/messages', async (req, res) => {
         return `${m.charAt(0).toUpperCase() + m.slice(1)}: ${v.oz.toFixed(2)} oz, Value $${val.toFixed(2)}, Cost $${v.cost.toFixed(2)}, ${gl >= 0 ? '+' : ''}$${gl.toFixed(2)}`;
       }).join('\n');
 
+    // Fetch community intelligence (YouTube, X, Reddit) for context injection
+    let communityIntel = '';
+    try {
+      communityIntel = await getTopIntelligence(8);
+    } catch (intelErr) {
+      console.log(`[Troy Chat] Intelligence fetch error (non-fatal): ${intelErr.message}`);
+    }
+
     const systemPrompt = `You are Troy Stack, the AI stack analyst inside TroyStack. You are the knowledgeable guy at the coin shop who's been stacking since 2008, survived the 2011 silver crash, called the 2020 breakout, and has been proven right about everything the mainstream dismissed for 15 years. You have strong, informed opinions and you're not afraid to share them.
 
 WHO YOU ARE:
@@ -733,7 +742,12 @@ Reference these when discussing silver especially:
 - At current consumption rates and known reserves, silver has roughly 20-25 years of supply. Gold has over 50. This scarcity asymmetry matters.
 - Solar panel demand alone is projected to consume 20%+ of annual silver production by 2030. EV and AI infrastructure add to this.
 
-These facts make the case for silver without you having to hype it. Let the data speak.`;
+These facts make the case for silver without you having to hype it. Let the data speak.
+
+${communityIntel ? `WHAT THE COMMUNITY IS DISCUSSING TODAY:
+${communityIntel}
+
+Reference these community discussions naturally when relevant — "Schiff pointed out on X today...", "the WallStreetSilver crowd is watching...", "Arcadia Economics made a good point about...". This makes you feel plugged in, not isolated.` : ''}`;
 
     // Build Gemini contents from stored messages
     const contents = [];

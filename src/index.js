@@ -634,6 +634,40 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('🐦 [Weekly Thread] Scheduled: Sundays at 6:00 PM EST (22:00 UTC)');
 
+  // ── Intelligence Scrapers ──
+  cron.schedule('0 */4 * * *', async () => {
+    console.log('📡 [Intelligence Scraper] Running YouTube scrape...');
+    try {
+      const { scrapeYouTubeChannels } = require('./services/intelligence-scraper');
+      await scrapeYouTubeChannels();
+    } catch (err) {
+      console.error('📡 [Intelligence Scraper] YouTube failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('📡 [Intelligence Scraper] YouTube: every 4 hours');
+
+  cron.schedule('0 */2 * * *', async () => {
+    console.log('📡 [Intelligence Scraper] Running Twitter scrape...');
+    try {
+      const { scrapeTwitterAccounts } = require('./services/intelligence-scraper');
+      await scrapeTwitterAccounts();
+    } catch (err) {
+      console.error('📡 [Intelligence Scraper] Twitter failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('📡 [Intelligence Scraper] Twitter: every 2 hours');
+
+  cron.schedule('0 */3 * * *', async () => {
+    console.log('📡 [Intelligence Scraper] Running Reddit scrape...');
+    try {
+      const { scrapeReddit } = require('./services/intelligence-scraper');
+      await scrapeReddit();
+    } catch (err) {
+      console.error('📡 [Intelligence Scraper] Reddit failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('📡 [Intelligence Scraper] Reddit: every 3 hours');
+
   // Month-End Review — 5:00 PM EST / 22:00 UTC on last business day of month
   // Runs on 28th-31st, checks if tomorrow is a new month
   cron.schedule('0 22 28-31 * *', async () => {

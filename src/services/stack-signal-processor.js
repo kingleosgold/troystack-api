@@ -4,6 +4,7 @@ const { callGemini, callClaude, generateImage, MODELS } = require('./ai-router')
 const { fetchNewArticles } = require('./rss-fetcher');
 const { getCachedPrices } = require('./price-fetcher');
 const { postArticleTweet } = require('./auto-tweet');
+const { getTopIntelligence } = require('./intelligence-scraper');
 
 // ============================================
 // HELPERS
@@ -456,7 +457,14 @@ FEED ARTICLE DEPTH:
 
 Current spot: Gold ${prices.gold || 'N/A'}, Silver ${prices.silver || 'N/A'}, Ratio ${prices.gold && prices.silver ? (prices.gold / prices.silver).toFixed(1) : 'N/A'}:1`;
 
-  const userPrompt = `React to this market news:\n\n${sourceText}`;
+  // Inject community intelligence if available
+  let intelContext = '';
+  try {
+    const intel = await getTopIntelligence(5);
+    if (intel) intelContext = `\n\nCOMMUNITY BUZZ (reference naturally if relevant):\n${intel}`;
+  } catch { /* non-fatal */ }
+
+  const userPrompt = `React to this market news:\n\n${sourceText}${intelContext}`;
 
   const response = await callGemini(MODELS.flash, systemPrompt, userPrompt, { temperature: 0.9 });
   return response;
@@ -1070,10 +1078,17 @@ async function generateClaudeDailySynthesis() {
 
   console.log(`[Claude Synthesis] Synthesizing ${todayArticles.length} feed articles via Claude Sonnet`);
 
+  // Inject community intelligence into the synthesis angle
+  let synthesisIntel = '';
+  try {
+    const intel = await getTopIntelligence(5);
+    if (intel) synthesisIntel = `\n\nCommunity discussions today:\n${intel}`;
+  } catch { /* non-fatal */ }
+
   // Build a synthetic cluster from today's feed articles to match writeSynthesisArticle's signature
   const pseudoCluster = {
     theme: `Daily Stack Signal Editorial — ${todayEST}`,
-    suggested_angle: 'Synthesize the key themes across today\'s market coverage into a cohesive editorial for physical metal holders. Connect the dots between individual stories and reveal the larger pattern.',
+    suggested_angle: `Synthesize the key themes across today's market coverage into a cohesive editorial for physical metal holders. Connect the dots between individual stories and reveal the larger pattern.${synthesisIntel}`,
     importance: Math.max(...todayArticles.map(a => a.relevance_score || 50)),
     category: 'synthesis',
     articles: todayArticles.map(a => ({
