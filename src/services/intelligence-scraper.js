@@ -32,6 +32,7 @@ const YOUTUBE_CHANNELS = [
   { name: 'The Metals Insights', id: 'UChpzhUzHkpl_FvM0bUgiI_Q' },
   { name: 'Silver Dragons', id: 'UCucqfNRyBkieAop_LDUqHEg' },
   { name: 'Silver Slayer', id: 'UCHSk08tGQasDxb-PpYPowVg' },
+  { name: 'Promethean Action', id: 'UC7qUL2EsTHpNcgsz7woW9Iw' },
 ];
 
 const TWITTER_ACCOUNTS = [
