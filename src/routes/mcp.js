@@ -679,35 +679,27 @@ function createMcpServer() {
 }
 
 // ============================================
-// STREAMABLE HTTP TRANSPORT
-// Single shared transport multiplexes sessions internally via Mcp-Session-Id header
+// STREAMABLE HTTP TRANSPORT — per-session model
+// Each client gets its own McpServer + Transport instance so multiple
+// concurrent sessions don't hit "Server already initialized".
 // ============================================
 
-let _server = null;
-let _transport = null;
-let _initPromise = null;
+// Map sessionId → { server, transport }
+const sessions = new Map();
 
-async function ensureInit() {
-  if (_server && _transport) return;
-  if (_initPromise) return _initPromise;
-
-  _initPromise = (async () => {
-    _server = createMcpServer();
-    _transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (sessionId) => {
-        console.log(`[MCP] Session initialized: ${sessionId}`);
-      },
-      onsessionclosed: (sessionId) => {
-        console.log(`[MCP] Session closed: ${sessionId}`);
-      },
-    });
-    await _server.connect(_transport);
-    console.log('[MCP] Streamable HTTP transport ready');
-  })();
-
-  return _initPromise;
-}
+// Clean up stale sessions after 30 minutes of inactivity
+const SESSION_TTL_MS = 30 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    if (now - session.lastActivity > SESSION_TTL_MS) {
+      console.log(`[MCP] Cleaning up stale session: ${id}`);
+      try { session.transport.close?.(); } catch { /* ignore */ }
+      try { session.server.close?.(); } catch { /* ignore */ }
+      sessions.delete(id);
+    }
+  }
+}, 5 * 60 * 1000); // check every 5 minutes
 
 /**
  * Read the raw request body as a string. Resolves even if the body is empty.
@@ -745,16 +737,48 @@ async function handleMcp(req, res) {
   }
 
   try {
-    await ensureInit();
+    const sessionId = req.headers['mcp-session-id'];
 
-    if (req.method === 'POST') {
-      // Manually parse body — this route is mounted BEFORE express.json()
-      // so malformed/empty bodies don't get rejected upstream
+    if (sessionId && sessions.has(sessionId)) {
+      // Route to existing session
+      const session = sessions.get(sessionId);
+      session.lastActivity = Date.now();
+
+      if (req.method === 'POST') {
+        const body = await readRawBody(req);
+        await session.transport.handleRequest(req, res, body);
+      } else if (req.method === 'DELETE') {
+        await session.transport.handleRequest(req, res);
+        sessions.delete(sessionId);
+        console.log(`[MCP] Session deleted: ${sessionId} (${sessions.size} active)`);
+      } else {
+        await session.transport.handleRequest(req, res);
+      }
+    } else if (req.method === 'POST') {
+      // New session — create a fresh McpServer + Transport pair
+      const server = createMcpServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (sid) => {
+          console.log(`[MCP] New session: ${sid} (${sessions.size + 1} active)`);
+          sessions.set(sid, { server, transport, lastActivity: Date.now() });
+        },
+        onsessionclosed: (sid) => {
+          console.log(`[MCP] Session closed: ${sid}`);
+          sessions.delete(sid);
+        },
+      });
+
+      await server.connect(transport);
+
       const body = await readRawBody(req);
-      await _transport.handleRequest(req, res, body);
+      await transport.handleRequest(req, res, body);
+    } else if (sessionId) {
+      // Session ID provided but not in our map (stale/expired)
+      res.status(404).json({ error: 'Session not found or expired' });
     } else {
-      // GET (SSE stream) and DELETE (session end) don't need a body
-      await _transport.handleRequest(req, res);
+      // GET/DELETE without session ID
+      res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
     }
   } catch (err) {
     console.error('[MCP] Request error:', err);

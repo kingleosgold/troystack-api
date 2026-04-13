@@ -281,7 +281,7 @@ All three methods route to the single `handleMcp` function which calls `transpor
 
 **Shared helper:** `fetchHoldings(userId)` queries `holdings` table filtered by `user_id` + `deleted_at IS NULL`, ordered by `created_at DESC`.
 
-**Session management:** `StreamableHTTPServerTransport` handles sessions internally via the `Mcp-Session-Id` response/request header. Stateful mode with `sessionIdGenerator: () => randomUUID()`. No manual session map. A single shared `McpServer` + `Transport` pair is lazy-initialized on first request and reused for all subsequent requests.
+**Session management:** Per-session model — each new client gets its own `McpServer` + `StreamableHTTPServerTransport` pair. Sessions stored in an in-memory `Map<sessionId, { server, transport, lastActivity }>`. POST without `Mcp-Session-Id` header creates a new session. POST/GET/DELETE with the header routes to the existing session. Stale sessions cleaned up after 30 minutes of inactivity (checked every 5 minutes). DELETE explicitly removes the session.
 
 **Body parsing:** `/mcp` routes are mounted in `index.js` BEFORE the global `express.json()` middleware (alongside the Stripe webhook) so malformed or empty POST bodies don't get rejected by the global JSON parser. The `handleMcp` function uses its own `readRawBody()` helper that reads the raw stream, attempts `JSON.parse`, and falls back to `{}` on failure — the MCP transport then handles the error path with a proper JSON-RPC error response.
 
