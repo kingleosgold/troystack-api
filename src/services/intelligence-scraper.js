@@ -103,7 +103,7 @@ async function scrapeYouTubeChannels() {
     return { scraped: 0, errors: 0 };
   }
 
-  const { fetchTranscript } = require('youtube-transcript');
+  const { YoutubeTranscript } = await import('youtube-transcript');
   let scraped = 0;
   let errors = 0;
 
@@ -122,7 +122,7 @@ async function scrapeYouTubeChannels() {
 
         try {
           // Fetch auto-generated transcript
-          const segments = await fetchTranscript(videoId);
+          const segments = await YoutubeTranscript.fetchTranscript(videoId);
           const transcript = segments.map(s => s.text).join(' ').substring(0, 3000);
 
           if (transcript.length < 50) continue; // too short to be useful
@@ -258,10 +258,19 @@ async function scrapeReddit() {
   for (const sub of REDDIT_SUBREDDITS) {
     try {
       const url = `https://www.reddit.com/r/${sub}/hot.json?limit=10`;
-      const { data } = await axios.get(url, {
-        headers: { 'User-Agent': 'TroyStack/1.0 (precious metals intelligence)' },
+      const resp = await axios.get(url, {
+        headers: { 'User-Agent': 'TroyStack/1.0 (precious metals intelligence; contact support@troystack.com)' },
         timeout: 10000,
+        validateStatus: () => true,
       });
+
+      if (resp.status !== 200) {
+        console.log(`📡 [Intelligence Scraper] Reddit error for r/${sub}: ${resp.status} ${typeof resp.data === 'string' ? resp.data.substring(0, 200) : ''}`);
+        errors++;
+        continue;
+      }
+
+      const data = resp.data;
 
       const posts = data?.data?.children || [];
 
