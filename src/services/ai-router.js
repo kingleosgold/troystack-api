@@ -8,7 +8,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const MODELS = {
   flash: 'gemini-2.5-flash',
   pro: 'gemini-2.5-pro',
-  editorial: 'claude-sonnet-4-20250514',
+  editorial: 'claude-sonnet-4-6',
   image: 'dall-e-3',
 };
 
