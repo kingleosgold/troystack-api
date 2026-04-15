@@ -5,7 +5,7 @@ const supabase = require('../lib/supabase');
 // IN-MEMORY CACHE
 // ============================================
 
-const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const CACHE_TTL_MS = 90 * 1000; // 90 seconds (Yahoo Finance is free, so we poll every 60s)
 
 let spotPriceCache = {
   prices: { gold: 5150, silver: 87, platinum: 2170, palladium: 1780 },
@@ -222,19 +222,75 @@ async function getLastKnownPtPd() {
 
 // ============================================
 // PRICE FETCHING: PRIORITY CHAIN
+// Yahoo Finance (free, unlimited) → MetalPriceAPI (fallback) → cache → static
 // ============================================
 
 /**
- * Priority 1: MetalPriceAPI
+ * Priority 1: Yahoo Finance futures (Au, Ag — free, no API key)
+ * Uses GC=F (gold front-month) and SI=F (silver front-month).
+ * Pt/Pd sourced from MetalPriceAPI or last known values.
+ */
+async function fetchFromYahooFinance() {
+  console.log('   Attempting Yahoo Finance (primary)...');
+  const headers = { 'User-Agent': 'Mozilla/5.0 (compatible; TroyStack/1.0)' };
+
+  const [goldRes, silverRes] = await Promise.all([
+    axios.get('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', { headers, timeout: 8000 }),
+    axios.get('https://query1.finance.yahoo.com/v8/finance/chart/SI=F', { headers, timeout: 8000 }),
+  ]);
+
+  const goldPrice = goldRes?.data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+  const silverPrice = silverRes?.data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+
+  if (!goldPrice || !silverPrice) throw new Error('Yahoo Finance returned no gold/silver prices');
+
+  // Pt/Pd: try MetalPriceAPI if available, otherwise use last known
+  let platinum = lastKnownPtPd.platinum;
+  let palladium = lastKnownPtPd.palladium;
+  try {
+    const ptpdResult = await fetchPtPdFromMetalPriceAPI();
+    if (ptpdResult.platinum) platinum = ptpdResult.platinum;
+    if (ptpdResult.palladium) palladium = ptpdResult.palladium;
+  } catch { /* use last known */ }
+
+  return {
+    gold: Math.round(goldPrice * 100) / 100,
+    silver: Math.round(silverPrice * 100) / 100,
+    platinum,
+    palladium,
+    source: 'yahoo_finance',
+  };
+}
+
+/**
+ * Fetch Pt/Pd from MetalPriceAPI (used as supplement to Yahoo Finance).
+ */
+async function fetchPtPdFromMetalPriceAPI() {
+  const apiKey = process.env.METAL_PRICE_API_KEY;
+  if (!apiKey) throw new Error('No METAL_PRICE_API_KEY');
+
+  const { data } = await axios.get(
+    `https://api.metalpriceapi.com/v1/latest?api_key=${apiKey}&base=USD&currencies=XPT,XPD`,
+    { timeout: 8000 }
+  );
+
+  return {
+    platinum: data.rates?.XPT ? Math.round((1 / data.rates.XPT) * 100) / 100 : null,
+    palladium: data.rates?.XPD ? Math.round((1 / data.rates.XPD) * 100) / 100 : null,
+  };
+}
+
+/**
+ * Priority 2: MetalPriceAPI (all 4 metals — fallback when Yahoo is down)
  */
 async function fetchFromMetalPriceAPI() {
   const apiKey = process.env.METAL_PRICE_API_KEY;
   if (!apiKey) throw new Error('No METAL_PRICE_API_KEY configured');
 
-  console.log('   Attempting MetalPriceAPI (primary)...');
+  console.log('   Attempting MetalPriceAPI (fallback)...');
   const response = await axios.get(
     `https://api.metalpriceapi.com/v1/latest?api_key=${apiKey}&base=USD&currencies=XAU,XAG,XPT,XPD`,
-    { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; StackTrackerGold/1.0)', Accept: 'application/json' }, timeout: 10000 }
+    { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TroyStack/1.0)', Accept: 'application/json' }, timeout: 10000 }
   );
 
   const data = response.data;
@@ -251,40 +307,9 @@ async function fetchFromMetalPriceAPI() {
 
   return {
     gold, silver,
-    platinum: platinum || 2700,
-    palladium: palladium || 2000,
+    platinum: platinum || lastKnownPtPd.platinum,
+    palladium: palladium || lastKnownPtPd.palladium,
     source: 'metalpriceapi',
-  };
-}
-
-/**
- * Priority 2: GoldAPI.io (gold + silver only, includes change data)
- */
-async function fetchFromGoldAPI() {
-  const apiKey = process.env.GOLD_API_KEY;
-  if (!apiKey) throw new Error('No GOLD_API_KEY configured');
-
-  console.log('   Attempting GoldAPI.io (fallback)...');
-  const headers = { 'x-access-token': apiKey, 'Content-Type': 'application/json' };
-
-  const [goldRes, silverRes] = await Promise.all([
-    axios.get('https://www.goldapi.io/api/XAU/USD', { headers, timeout: 10000 }),
-    axios.get('https://www.goldapi.io/api/XAG/USD', { headers, timeout: 10000 }),
-  ]);
-
-  if (!goldRes.data?.price || !silverRes.data?.price) {
-    throw new Error('GoldAPI returned no price data');
-  }
-
-  // Use last known Pt/Pd from price_log (GoldAPI only covers Au/Ag)
-  const ptpd = await getLastKnownPtPd();
-
-  return {
-    gold: Math.round(goldRes.data.price * 100) / 100,
-    silver: Math.round(silverRes.data.price * 100) / 100,
-    platinum: ptpd.platinum,
-    palladium: ptpd.palladium,
-    source: 'goldapi-io',
   };
 }
 
@@ -302,21 +327,21 @@ async function fetchLiveSpotPrices() {
 
     let fetched = null;
 
-    // Priority 1: MetalPriceAPI
+    // Priority 1: Yahoo Finance (free, unlimited)
     try {
-      fetched = await fetchFromMetalPriceAPI();
-      console.log(`   MetalPriceAPI: Gold $${fetched.gold}, Silver $${fetched.silver}, Pt $${fetched.platinum}, Pd $${fetched.palladium}`);
+      fetched = await fetchFromYahooFinance();
+      console.log(`   Yahoo Finance: Gold $${fetched.gold}, Silver $${fetched.silver}, Pt $${fetched.platinum}, Pd $${fetched.palladium}`);
     } catch (err) {
-      console.log(`   MetalPriceAPI failed: ${err.message}`);
+      console.log(`   Yahoo Finance failed: ${err.message}`);
     }
 
-    // Priority 2: GoldAPI.io
+    // Priority 2: MetalPriceAPI (fallback)
     if (!fetched) {
       try {
-        fetched = await fetchFromGoldAPI();
-        console.log(`   GoldAPI.io: Gold $${fetched.gold}, Silver $${fetched.silver}`);
+        fetched = await fetchFromMetalPriceAPI();
+        console.log(`   MetalPriceAPI: Gold $${fetched.gold}, Silver $${fetched.silver}, Pt $${fetched.platinum}, Pd $${fetched.palladium}`);
       } catch (err) {
-        console.log(`   GoldAPI.io failed: ${err.message}`);
+        console.log(`   MetalPriceAPI failed: ${err.message}`);
       }
     }
 

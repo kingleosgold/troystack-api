@@ -413,7 +413,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `30 11 * * *` | 6:30 AM | Intelligence generation | intelligence.js `runIntelligenceGeneration()` |
 | `35 11 * * *` | 6:35 AM | Daily brief for Gold/Lifetime users + push | intelligence.js `generateDailyBrief()` |
 | `0 23 * * *` | 6:00 PM | COMEX vault data scrape | comex-scraper.js `scrapeComexVaultData()` |
-| `*/15 * * * *` | Every 15 min | Price logging (skips weekends) | price-fetcher.js `fetchLiveSpotPrices()` + `logPriceToSupabase()` |
+| `* * * * *` | Every 60s (cache) / 5m (log) | Price fetch + cache update (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 5m |
 | `*/5 * * * *` | Every 5 min | Price alert checker | price-alert-checker.js `checkPriceAlerts()` |
 | `0 */2 * * *` | Every 2 hrs | Stack Signal article pipeline | stack-signal-processor.js `runStackSignalPipeline()` |
 | `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis | stack-signal-processor.js `generateStackSignal()` |
@@ -424,7 +424,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `0 */4 * * *` | Every 4 hours | YouTube intelligence scrape | intelligence-scraper.js `scrapeYouTubeChannels()` |
 | `0 */2 * * *` | Every 2 hours | Twitter intelligence scrape | intelligence-scraper.js `scrapeTwitterAccounts()` |
 | `0 */3 * * *` | Every 3 hours | Reddit intelligence scrape | intelligence-scraper.js `scrapeReddit()` |
-| `* * * * *` | Every 60s (market) / 5m (off) | Composite spot price update | price-consensus.js `updateCompositePrice()` |
+| `*/5 * * * *` | Every 5m (market) / 15m (off) | Composite spot price cross-check | price-consensus.js `updateCompositePrice()` |
 | `*/30 * * * *` | Every 30 minutes | Auto-reply to influencer tweets | auto-reply.js `checkForReplyOpportunities()` |
 | `0 22 28-31 * *` | 5:00 PM (last day) | Monthly recap | `generateStackSignal('monthly_recap')` |
 | `0 15 1 1 *` | 10:00 AM (Jan 1) | Yearly recap | `generateStackSignal('yearly_recap')` |
@@ -604,9 +604,8 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | **Anthropic Claude** | Editorial summaries for Stack Signal | `ANTHROPIC_API_KEY` | ai-router.js, stack-signal-processor.js |
 | **OpenAI** | DALL-E image generation, Whisper STT | `OPENAI_API_KEY` | ai-router.js, troy-chat.js (transcribe) |
 | **ElevenLabs** | Text-to-speech (Troy's voice) | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | troy-chat.js (speak) |
-| **MetalPriceAPI** | Primary spot price source | `METAL_PRICE_API_KEY` | price-fetcher.js |
-| **GoldAPI.io** | Fallback spot price source | `GOLD_API_KEY` | price-fetcher.js |
-| **Yahoo Finance** | ETF historical data (SLV, GLD, PPLT, PALL) | None (public) | etf-prices.js |
+| **Yahoo Finance** | Primary spot prices (GC=F, SI=F futures) + ETF historical data | None (public) | price-fetcher.js, price-consensus.js, etf-prices.js |
+| **MetalPriceAPI** | Fallback spot prices (all 4 metals) + Pt/Pd supplement | `METAL_PRICE_API_KEY` | price-fetcher.js |
 | **Stripe** | Billing, subscriptions | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_GOLD_MONTHLY_PRICE_ID`, `STRIPE_GOLD_YEARLY_PRICE_ID`, `STRIPE_GOLD_LIFETIME_PRICE_ID` | stripe.js |
 | **RevenueCat** | iOS in-app purchase webhooks | `REVENUECAT_WEBHOOK_SECRET` | stripe.js |
 | **Expo Push** | Mobile push notifications | None (expo-server-sdk) | push.js, index.js, stack-signal-push.js, comex-scraper.js, price-alert-checker.js |
@@ -811,18 +810,22 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 - **Purpose:** Fetch, cache, and log spot prices
 - **Exports:** `initPriceFetcher()`, `getSpotPrices()`, `getCachedPrices()`, `fetchLiveSpotPrices()`, `logPriceToSupabase()`, `areMarketsClosed()`, `getLastTradingDay()`
 - **Dependencies:** axios, supabase, etf-prices
-- **Last modified:** 2026-02-24
-- **Cache:** In-memory, 10-min TTL. Friday close stored for change calculation.
+- **Last modified:** 2026-04-14
+- **Fetch chain:** Yahoo Finance futures GC=F/SI=F (primary, free/unlimited) → MetalPriceAPI (fallback, all 4 metals) → cached fallback → static fallback. GoldAPI.io removed.
+- **Pt/Pd:** Yahoo Finance only covers Au/Ag. Pt/Pd sourced from MetalPriceAPI as supplement when Yahoo is primary, or from last known price_log values.
+- **Cache:** In-memory, 90-second TTL (was 10 min). Friday close stored for change calculation.
+- **Cron:** Every 60 seconds during market hours (cache update). price_log written every 5 minutes only.
 - **Market hours:** Closed Friday 5PM ET → Sunday 6PM ET
 
 ### src/services/price-consensus.js
-- **Purpose:** TroyStack Composite Spot Price engine — aggregates multiple independent sources into a single median price per metal
-- **Exports:** `calculateCompositePrice()`, `updateCompositePrice()`, `getCompositePrice()`, `fetchMetalPriceAPI()`, `fetchGoldAPI()`, `fetchYahooFinance()`
-- **Dependencies:** axios, supabase, price-fetcher (`areMarketsClosed`)
-- **Sources:** MetalPriceAPI (Au/Ag/Pt/Pd), GoldAPI.io (Au/Ag), Yahoo Finance futures GC=F/SI=F (Au/Ag)
-- **Composite calculation:** Calls all sources via `Promise.allSettled`, filters failures, computes median per metal. Reports spread_pct, confidence (high if 3+ sources within 0.5%, medium if 2, low if 1), individual source prices.
+- **Purpose:** TroyStack Composite Spot Price — verification layer cross-checking the primary cache against an independent Yahoo Finance call
+- **Exports:** `calculateCompositePrice()`, `updateCompositePrice()`, `getCompositePrice()`
+- **Dependencies:** axios, supabase, price-fetcher (`areMarketsClosed`, `getCachedPrices`)
+- **Sources:** Source 1 = price-fetcher cache (Yahoo/MetalPriceAPI); Source 2 = independent Yahoo Finance cross-check
+- **Divergence warning:** Logs `[Composite] WARNING:` if cache and cross-check diverge by > 1% for gold or silver
+- **Composite calculation:** Median of available sources per metal. Reports spread_pct, confidence, source detail.
 - **Storage:** `app_state` key `composite_spot_latest` (JSON). In-memory cache with Supabase fallback.
-- **Cron:** every 60s during market hours, every 5 min off-hours (`* * * * *` with market-hours gate)
+- **Cron:** every 5 min during market hours, every 15 min off-hours
 - **Endpoint:** `GET /v1/prices/composite` (in prices.js)
 
 ### src/services/etf-prices.js

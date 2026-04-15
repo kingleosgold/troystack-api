@@ -1,79 +1,29 @@
 /**
- * TroyStack Composite Spot Price Engine
+ * TroyStack Composite Spot Price — Verification Layer
  *
- * Aggregates spot prices from multiple independent sources into a
- * single composite price per metal. Uses median (not mean) for
- * robustness against outlier sources.
+ * Cross-checks the primary price cache (Yahoo Finance via price-fetcher)
+ * against an independent Yahoo Finance call. Logs a warning if they
+ * diverge by more than 1%.
  *
  * Sources:
- *   1. MetalPriceAPI (existing primary)
- *   2. GoldAPI.io (existing fallback)
- *   3. Yahoo Finance futures (GC=F, SI=F)
+ *   1. price-fetcher cache (Yahoo Finance primary, MetalPriceAPI fallback)
+ *   2. Independent Yahoo Finance futures call (cross-check)
  *
  * Composite is stored in app_state as `composite_spot_latest` and
  * served via GET /v1/prices/composite.
  *
- * Cron: every 60 seconds during market hours (index.js).
+ * Cron: every 5 minutes during market hours, every 15 minutes off-hours.
  */
 
 const axios = require('axios');
 const supabase = require('../lib/supabase');
-const { areMarketsClosed } = require('./price-fetcher');
+const { areMarketsClosed, getCachedPrices } = require('./price-fetcher');
 
 // ============================================
-// SOURCE FETCHERS
+// INDEPENDENT YAHOO FINANCE CALL (cross-check)
 // ============================================
 
-/**
- * Source 1: MetalPriceAPI (Au, Ag, Pt, Pd)
- */
-async function fetchMetalPriceAPI() {
-  const apiKey = process.env.METAL_PRICE_API_KEY;
-  if (!apiKey) return null;
-
-  const { data } = await axios.get(
-    `https://api.metalpriceapi.com/v1/latest?api_key=${apiKey}&base=USD&currencies=XAU,XAG,XPT,XPD`,
-    { timeout: 8000 }
-  );
-
-  if (!data.rates) return null;
-
-  return {
-    gold: data.rates.XAU ? Math.round((1 / data.rates.XAU) * 100) / 100 : null,
-    silver: data.rates.XAG ? Math.round((1 / data.rates.XAG) * 100) / 100 : null,
-    platinum: data.rates.XPT ? Math.round((1 / data.rates.XPT) * 100) / 100 : null,
-    palladium: data.rates.XPD ? Math.round((1 / data.rates.XPD) * 100) / 100 : null,
-    source: 'metalpriceapi',
-  };
-}
-
-/**
- * Source 2: GoldAPI.io (Au, Ag only)
- */
-async function fetchGoldAPI() {
-  const apiKey = process.env.GOLD_API_KEY;
-  if (!apiKey) return null;
-
-  const headers = { 'x-access-token': apiKey, 'Content-Type': 'application/json' };
-
-  const [goldRes, silverRes] = await Promise.all([
-    axios.get('https://www.goldapi.io/api/XAU/USD', { headers, timeout: 8000 }),
-    axios.get('https://www.goldapi.io/api/XAG/USD', { headers, timeout: 8000 }),
-  ]);
-
-  return {
-    gold: goldRes.data?.price ? Math.round(goldRes.data.price * 100) / 100 : null,
-    silver: silverRes.data?.price ? Math.round(silverRes.data.price * 100) / 100 : null,
-    platinum: null,
-    palladium: null,
-    source: 'goldapi',
-  };
-}
-
-/**
- * Source 3: Yahoo Finance futures (Au, Ag)
- */
-async function fetchYahooFinance() {
+async function fetchYahooFinanceCrossCheck() {
   const headers = { 'User-Agent': 'Mozilla/5.0 (compatible; TroyStack/1.0)' };
 
   const [goldRes, silverRes] = await Promise.all([
@@ -81,17 +31,13 @@ async function fetchYahooFinance() {
     axios.get('https://query1.finance.yahoo.com/v8/finance/chart/SI=F', { headers, timeout: 8000 }).catch(() => null),
   ]);
 
-  const goldPrice = goldRes?.data?.chart?.result?.[0]?.meta?.regularMarketPrice;
-  const silverPrice = silverRes?.data?.chart?.result?.[0]?.meta?.regularMarketPrice;
-
-  if (!goldPrice && !silverPrice) return null;
+  const gold = goldRes?.data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+  const silver = silverRes?.data?.chart?.result?.[0]?.meta?.regularMarketPrice;
 
   return {
-    gold: goldPrice ? Math.round(goldPrice * 100) / 100 : null,
-    silver: silverPrice ? Math.round(silverPrice * 100) / 100 : null,
-    platinum: null,
-    palladium: null,
-    source: 'yahoo_finance',
+    gold: gold ? Math.round(gold * 100) / 100 : null,
+    silver: silver ? Math.round(silver * 100) / 100 : null,
+    source: 'yahoo_finance_crosscheck',
   };
 }
 
@@ -116,76 +62,70 @@ function spreadPct(arr) {
 }
 
 function confidence(count, spread) {
-  if (count >= 3 && spread < 0.5) return 'high';
+  if (count >= 2 && spread < 0.5) return 'high';
   if (count >= 2) return 'medium';
   return 'low';
 }
 
-/**
- * Fetch all sources in parallel, compute median composite price per metal.
- */
 async function calculateCompositePrice() {
-  const results = await Promise.allSettled([
-    fetchMetalPriceAPI(),
-    fetchGoldAPI(),
-    fetchYahooFinance(),
-  ]);
+  // Source 1: existing price-fetcher cache
+  const cached = getCachedPrices();
 
-  const sources = results
-    .filter(r => r.status === 'fulfilled' && r.value)
-    .map(r => r.value);
+  // Source 2: independent Yahoo Finance cross-check
+  let crossCheck = { gold: null, silver: null };
+  try {
+    crossCheck = await fetchYahooFinanceCrossCheck();
+  } catch { /* cross-check is optional */ }
 
-  if (sources.length === 0) {
-    console.log('[Composite] All sources failed');
-    return null;
+  const sources = [];
+
+  if (cached?.gold && cached?.silver) {
+    sources.push({ gold: cached.gold, silver: cached.silver, platinum: cached.platinum, palladium: cached.palladium, source: 'price_fetcher_cache' });
+  }
+
+  if (crossCheck.gold && crossCheck.silver) {
+    sources.push({ gold: crossCheck.gold, silver: crossCheck.silver, platinum: null, palladium: null, source: 'yahoo_finance_crosscheck' });
+  }
+
+  if (sources.length === 0) return null;
+
+  // Divergence warning
+  if (sources.length >= 2) {
+    const goldDivergence = cached.gold > 0 ? Math.abs(cached.gold - crossCheck.gold) / cached.gold : 0;
+    const silverDivergence = cached.silver > 0 ? Math.abs(cached.silver - crossCheck.silver) / cached.silver : 0;
+    if (goldDivergence > 0.01) {
+      console.log(`[Composite] WARNING: Gold divergence ${(goldDivergence * 100).toFixed(2)}% — cache: $${cached.gold}, cross-check: $${crossCheck.gold}`);
+    }
+    if (silverDivergence > 0.01) {
+      console.log(`[Composite] WARNING: Silver divergence ${(silverDivergence * 100).toFixed(2)}% — cache: $${cached.silver}, cross-check: $${crossCheck.silver}`);
+    }
   }
 
   const METALS = ['gold', 'silver', 'platinum', 'palladium'];
-  const composite = {};
-  const sourceDetails = [];
+  const details = {};
 
   for (const metal of METALS) {
-    const prices = sources
-      .map(s => s[metal])
-      .filter(p => typeof p === 'number' && p > 0);
-
+    const prices = sources.map(s => s[metal]).filter(p => typeof p === 'number' && p > 0);
     const med = median(prices);
     const spread = spreadPct(prices);
-
-    composite[metal] = {
-      price: med,
-      source_count: prices.length,
-      spread_pct: spread,
-      confidence: confidence(prices.length, spread),
-      prices, // individual source prices for transparency
-    };
-  }
-
-  for (const s of sources) {
-    sourceDetails.push({
-      source: s.source,
-      gold: s.gold,
-      silver: s.silver,
-      platinum: s.platinum,
-      palladium: s.palladium,
-    });
+    details[metal] = { price: med, source_count: prices.length, spread_pct: spread, confidence: confidence(prices.length, spread), prices };
   }
 
   return {
-    gold: composite.gold.price,
-    silver: composite.silver.price,
-    platinum: composite.platinum.price,
-    palladium: composite.palladium.price,
-    details: composite,
+    gold: details.gold.price,
+    silver: details.silver.price,
+    platinum: details.platinum.price,
+    palladium: details.palladium.price,
+    details,
     source_count: sources.length,
-    sources: sourceDetails,
+    sources: sources.map(s => ({ source: s.source, gold: s.gold, silver: s.silver, platinum: s.platinum, palladium: s.palladium })),
     calculated_at: new Date().toISOString(),
     markets_closed: areMarketsClosed(),
   };
 }
 
 // ============================================
-// CRON: UPDATE COMPOSITE + STORE IN APP_STATE
+// UPDATE + CACHE
 // ============================================
 
 let _lastComposite = null;
@@ -203,16 +143,11 @@ async function updateCompositePrice() {
         key: 'composite_spot_latest',
         value: JSON.stringify(result),
       }, { onConflict: 'key' });
-
-    console.log(`[Composite] Updated: Au=$${result.gold} Ag=$${result.silver} (${result.source_count} sources, ${result.details.gold.confidence})`);
   } catch (err) {
     console.error('[Composite] Update error:', err.message);
   }
 }
 
-/**
- * Get the latest composite price (in-memory first, then app_state fallback).
- */
 async function getCompositePrice() {
   if (_lastComposite) return _lastComposite;
 
@@ -236,7 +171,4 @@ module.exports = {
   calculateCompositePrice,
   updateCompositePrice,
   getCompositePrice,
-  fetchMetalPriceAPI,
-  fetchGoldAPI,
-  fetchYahooFinance,
 };

@@ -531,22 +531,19 @@ app.listen(PORT, () => {
     console.error('💰 [Price Fetcher] Init error:', err.message);
   });
 
-  cron.schedule('*/15 * * * *', async () => {
-    if (areMarketsClosed()) {
-      console.log(`💰 [Price Log Cron] ${new Date().toISOString()} — Markets closed, skipping`);
-      return;
-    }
+  cron.schedule('* * * * *', async () => {
+    if (areMarketsClosed()) return; // silent skip every 60s is fine
     try {
       const result = await fetchLiveSpotPrices();
-      if (result && result.prices) {
+      // Only log to price_log every 5 minutes to avoid flooding the table
+      if (result && result.prices && new Date().getMinutes() % 5 === 0) {
         await logPriceToSupabase(result);
-        console.log(`💰 [Price Log] ${new Date().toISOString()} — ${result.source} — Au:$${result.prices.gold} Ag:$${result.prices.silver}`);
       }
     } catch (err) {
-      console.error('💰 [Price Log Cron] Error:', err.message);
+      console.error('💰 [Price Cron] Error:', err.message);
     }
   }, { timezone: 'UTC' });
-  console.log('💰 [Price Log Cron] Scheduled: every 15 minutes');
+  console.log('💰 [Price Cron] Scheduled: every 60s (cache), every 5m (price_log)');
 
   // ── Price Alert Checker: every 5 minutes ──
   cron.schedule('*/5 * * * *', async () => {
@@ -646,19 +643,18 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('📡 [Intelligence Scraper] YouTube: every 4 hours');
 
-  // ── Composite Spot Price: every 60 seconds during market hours, every 5 min otherwise ──
-  cron.schedule('* * * * *', async () => {
+  // ── Composite Spot Price: verification layer, every 5 min market / 15 min off ──
+  cron.schedule('*/5 * * * *', async () => {
     try {
       const { areMarketsClosed } = require('./services/price-fetcher');
       const { updateCompositePrice } = require('./services/price-consensus');
-      // During market close, only update every 5 minutes (on :00 and :05 etc)
-      if (areMarketsClosed() && new Date().getMinutes() % 5 !== 0) return;
+      if (areMarketsClosed() && new Date().getMinutes() % 15 !== 0) return;
       await updateCompositePrice();
     } catch (err) {
       console.error('[Composite Cron] Error:', err.message);
     }
   }, { timezone: 'UTC' });
-  console.log('📊 [Composite Price] Scheduled: every 60s (market hours), every 5m (off-hours)');
+  console.log('📊 [Composite Price] Scheduled: every 5m (market), every 15m (off-hours)');
 
   cron.schedule('0 */2 * * *', async () => {
     console.log('📡 [Intelligence Scraper] Running Twitter scrape...');
