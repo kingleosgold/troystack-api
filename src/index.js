@@ -261,6 +261,27 @@ app.get('/v1/test-tweet', async (req, res) => {
   }
 });
 
+// ── Temporary test route — manually trigger intelligence scrapers ──
+app.get('/v1/test-scraper', async (req, res) => {
+  const source = req.query.source;
+  const { scrapeYouTubeChannels, scrapeTwitterAccounts, scrapeReddit } = require('./services/intelligence-scraper');
+
+  const scrapers = { youtube: scrapeYouTubeChannels, twitter: scrapeTwitterAccounts, reddit: scrapeReddit };
+  const fn = scrapers[source];
+
+  if (!fn) {
+    return res.status(400).json({ error: 'source required: youtube, twitter, or reddit' });
+  }
+
+  const start = Date.now();
+  try {
+    const result = await fn();
+    res.json({ source, success: true, result, duration_ms: Date.now() - start });
+  } catch (err) {
+    res.status(500).json({ source, success: false, error: err.message, duration_ms: Date.now() - start });
+  }
+});
+
 // Junk silver melt value calculator
 app.use('/v1/junk-silver', publicLimiter, junkSilverRouter);
 
