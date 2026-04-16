@@ -577,8 +577,8 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('🔔 [Alert Checker] Scheduled: every 5 minutes');
 
-  // ── Stack Signal article processor: every 2 hours ──
-  cron.schedule('0 */2 * * *', async () => {
+  // ── Stack Signal article processor: every 15 minutes ──
+  cron.schedule('*/15 * * * *', async () => {
     console.log(`\n📰 [Stack Signal Cron] Triggered at ${new Date().toISOString()}`);
     try {
       const { runStackSignalPipeline } = require('./services/stack-signal-processor');
@@ -588,7 +588,7 @@ app.listen(PORT, () => {
       console.error('📰 [Stack Signal Cron] Failed:', err.message);
     }
   }, { timezone: 'UTC' });
-  console.log('📰 [Stack Signal Cron] Scheduled: every 2 hours');
+  console.log('📰 [Stack Signal Cron] Scheduled: every 15 minutes');
 
   // ── Stack Signal daily synthesis: 6:15 AM EST (11:15 UTC) ──
   // Runs 20 min before Daily Brief so synthesis is ready for the combined morning push

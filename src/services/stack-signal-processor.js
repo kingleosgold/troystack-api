@@ -762,6 +762,8 @@ async function saveArticles(articles) {
         troy_commentary: article.troy_commentary || null,
         troy_one_liner: article.troy_one_liner || null,
         tweet_text: article.tweet_text || null,
+        signal_score: article.signal_score || 50,
+        urgent: (article.signal_score || 0) >= 90,
         category: article.category || 'macro',
         sources: article.sources || [],
         image_url: article.image_url || null,
@@ -1186,7 +1188,7 @@ async function runStackSignalPipeline() {
   console.log(`${'━'.repeat(50)}`);
 
   try {
-    // Phase 0: Fetch RSS articles
+    // Phase 0: Fetch RSS articles + filter by signal score
     console.log('\n[Pipeline] Phase 0: Fetching RSS feeds...');
     const rawArticles = await fetchNewArticles();
 
@@ -1195,9 +1197,23 @@ async function runStackSignalPipeline() {
       return { articles: 0, scored: 0, clusters: 0, synthesized: 0, saved: 0 };
     }
 
-    // Phase 1: Score
+    // Filter by signal score (>= 50) and cap at 5 per run
+    const signalFiltered = rawArticles.filter(a => (a.signal_score || 0) >= 50);
+    const urgent = signalFiltered.filter(a => (a.signal_score || 0) >= 90);
+    if (urgent.length > 0) {
+      console.log(`[Pipeline] 🚨 ${urgent.length} urgent articles (score >= 90): ${urgent.map(a => a.title.substring(0, 50)).join(', ')}`);
+    }
+    const articlesToProcess = signalFiltered.slice(0, 5);
+    console.log(`[Pipeline] Signal filter: ${rawArticles.length} raw → ${signalFiltered.length} passing (>=50) → ${articlesToProcess.length} to process (max 5)`);
+
+    if (!articlesToProcess.length) {
+      console.log('[Pipeline] No articles passed signal threshold. Pipeline complete.');
+      return { articles: rawArticles.length, scored: 0, clusters: 0, synthesized: 0, saved: 0 };
+    }
+
+    // Phase 1: Score with Gemini (detailed scoring on the filtered set)
     console.log('\n[Pipeline] Phase 1: Scoring articles...');
-    const scoredArticles = await scoreArticles(rawArticles);
+    const scoredArticles = await scoreArticles(articlesToProcess);
 
     // Phase 2: Cluster by theme
     console.log('\n[Pipeline] Phase 2: Clustering articles by theme...');

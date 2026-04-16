@@ -415,7 +415,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `0 23 * * *` | 6:00 PM | COMEX vault data scrape | comex-scraper.js `scrapeComexVaultData()` |
 | `* * * * *` | Every 60s (cache) / 5m (log) | Price fetch + cache update (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 5m |
 | `*/5 * * * *` | Every 5 min | Price alert checker | price-alert-checker.js `checkPriceAlerts()` |
-| `0 */2 * * *` | Every 2 hrs | Stack Signal article pipeline | stack-signal-processor.js `runStackSignalPipeline()` |
+| `*/15 * * * *` | Every 15 min | Stack Signal article pipeline (~41 feeds, signal scoring, max 5/run) | stack-signal-processor.js `runStackSignalPipeline()` |
 | `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis | stack-signal-processor.js `generateStackSignal()` |
 | `30 21 * * 1-5` | 4:30 PM (weekdays) | Stack Signal evening digest | `generateStackSignal('evening')` |
 | `0 22 * * 5` | 5:00 PM (Fri) | Weekly recap | `generateStackSignal('weekly_recap')` |
@@ -506,6 +506,8 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `category`, `image_url` (text), `relevance_score` (numeric), `is_stack_signal` (boolean)
 - `published_at` (timestamptz), `gold_price_at_publish`, `silver_price_at_publish` (numeric)
 - `tweet_text` (text, nullable) — pre-generated Troy tweet for auto-posting, generated during article creation via `generateTweetText()`
+- `signal_score` (int, default 50) — RSS signal score (0-100) from `scoreArticle()`, determines processing priority
+- `urgent` (boolean, default false) — true if `signal_score >= 90` (breaking news threshold)
 - `view_count`, `like_count`, `comment_count` (int)
 - Used by: stack-signal.js, social.js, stack-signal-processor.js, intelligence.js, auto-tweet.js
 
@@ -841,10 +843,14 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 - **Last modified:** 2026-02-27
 
 ### src/services/rss-fetcher.js
-- **Purpose:** Fetch precious metals news from 8 RSS feeds
-- **Exports:** `fetchNewArticles()`, `RSS_FEEDS`
+- **Purpose:** Fetch precious metals news from ~41 RSS feeds with signal scoring
+- **Exports:** `fetchNewArticles()`, `scoreArticle()`, `RSS_FEEDS`
 - **Dependencies:** axios, fast-xml-parser, supabase
-- **Last modified:** 2026-03-01
+- **Last modified:** 2026-04-16
+- **Feed categories:** 8 original feeds + 11 direct RSS feeds (Mining.com, Silver Doctors, GoldSeek, BullionStar, Mises, Sprott, Gold Telegraph, MarketWatch, Reuters, CNBC, ZeroHedge) + 22 Google News query feeds (gold/silver/COMEX/Fed/CPI/PPI/Bessent/etc.)
+- **Signal scoring** (`scoreArticle()`): 0-100 score per article. Base 40 + source authority (+20 Bloomberg/Reuters/WSJ/Kitco, +10 mid-tier) + keyword density (cap +30) + recency (+10 if <1h) + breaking keywords (+20) - novelty penalty (-20 if >60% word overlap with existing)
+- **Parallel fetch:** All feeds via `Promise.allSettled` with 10s timeout per feed; one slow feed doesn't block others
+- **Pipeline filter:** Only articles with `signal_score >= 50` proceed to Gemini scoring. Max 5 per run. Articles scoring `>= 90` flagged as urgent.
 
 ### src/services/stack-signal-processor.js
 - **Purpose:** Stack Signal article pipeline + synthesis generation
