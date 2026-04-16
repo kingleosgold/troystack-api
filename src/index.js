@@ -652,6 +652,20 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('🐦 [Weekly Thread] Scheduled: Sundays at 6:00 PM EST (22:00 UTC)');
 
+  // ── Tweet queue processor: every 5 minutes ──
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { processTweetQueue } = require('./services/auto-tweet');
+      const result = await processTweetQueue();
+      if (result.posted) {
+        console.log(`🐦 [Tweet Queue] Posted tweet ${result.tweet_id}`);
+      }
+    } catch (err) {
+      console.error('🐦 [Tweet Queue] Error:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('🐦 [Tweet Queue] Scheduled: every 5 minutes');
+
   // ── Intelligence Scrapers ──
   cron.schedule('0 */4 * * *', async () => {
     console.log('📡 [Intelligence Scraper] Running YouTube scrape...');

@@ -421,6 +421,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `0 22 * * 5` | 5:00 PM (Fri) | Weekly recap | `generateStackSignal('weekly_recap')` |
 | `15 11 * * 1` | 6:15 AM (Mon) | Weekly preview | `generateStackSignal('weekly_preview')` |
 | `0 22 * * 0` | 6:00 PM (Sun) | Weekly X thread to @troystack_ | weekly-thread.js `generateAndPostWeeklyThread()` |
+| `*/5 * * * *` | Every 5 minutes | Tweet queue processor (1 tweet per cycle, urgent first) | auto-tweet.js `processTweetQueue()` |
 | `0 */4 * * *` | Every 4 hours | YouTube intelligence scrape | intelligence-scraper.js `scrapeYouTubeChannels()` |
 | `0 */2 * * *` | Every 2 hours | Twitter intelligence scrape | intelligence-scraper.js `scrapeTwitterAccounts()` |
 | `0 */3 * * *` | Every 3 hours | Reddit intelligence scrape | intelligence-scraper.js `scrapeReddit()` |
@@ -575,6 +576,15 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - Indexes: `source_type`, `created_at DESC`, `relevance_score DESC`
 - Used by: intelligence-scraper.js, troy-chat.js (prompt injection), stack-signal-processor.js (article context), intelligence.js (daily brief prompt)
 
+### tweet_queue
+- `id` (UUID, PK), `article_id` (UUID, FK → stack_signal_articles, ON DELETE CASCADE)
+- `tweet_text` (text), `article_url` (text), `signal_score` (int), `urgent` (boolean)
+- `scheduled_for` (timestamptz — when to post), `posted` (boolean, default false)
+- `posted_at` (timestamptz), `tweet_id` (text — Twitter response ID)
+- `created_at` (timestamptz)
+- Indexes: `(posted, scheduled_for) WHERE posted = false`, `(urgent, posted) WHERE urgent = true AND posted = false`
+- Used by: auto-tweet.js (enqueueTweet + processTweetQueue), stack-signal-processor.js (pipeline enqueues after save)
+
 ### app_state
 - `key` (text, PK), `value` (text/JSONB)
 - General-purpose key-value store for: cron locks, daily caps, voice usage counters, DALL-E usage, push dedup
@@ -696,14 +706,14 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 4. **Feed articles:** `writeFeedReaction()` (Gemini Flash) writes 400-800 word feed articles with depth requirements (historical context, physical market connection, purchasing power framing, forward-looking close)
    - Save guard filters articles with `troy_commentary.length < 2500` chars
 5. Generates/assigns image (DALL-E gated by `USE_DALLE = false` flag; pool fallback)
-6. Saves feed articles to `stack_signal_articles` table (`is_stack_signal=false`) including pre-generated `tweet_text`. After each successful save, `postArticleTweet()` fires to X (fire-and-forget, dedup by slug, 5/day cap) using the stored `tweet_text`.
+6. Saves feed articles to `stack_signal_articles` table (`is_stack_signal=false`) including pre-generated `tweet_text`. After each successful save, `enqueueTweet()` inserts into `tweet_queue` with scheduled_for time (urgent = now, normal = 20-90 min delay, batch-spaced 15 min apart). Tweets drip out via the `processTweetQueue()` cron every 5 min.
 7. Sends push notification if score ≥85 (via stack-signal-push.js)
 8. **Claude daily synthesis editorial** — `generateClaudeDailySynthesis()` runs opportunistically at the end of every pipeline cycle:
    - Deduped by date (EST): only one synthesis per day (`is_stack_signal=true AND category='synthesis'`)
    - Requires ≥ 3 feed articles saved for today; otherwise skips
    - Gathers today's feed articles and builds a pseudo-cluster passed to `writeSynthesisArticle()` (Claude Sonnet, 1500-2500 words, 6-8 paragraphs)
    - Saves with distinct title `The Stack Signal: <Month Day, Year>`, `is_stack_signal=true`, `category='synthesis'`, `relevance_score=95`
-   - After save, `postArticleTweet()` fires to X (same dedup/cap as feed articles)
+   - After save, `enqueueTweet()` inserts into tweet_queue (scheduled as urgent, signal_score 95)
 
 ### Synthesis Types
 - **daily** (6:15 AM EST): Morning market digest
@@ -859,13 +869,16 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 - **Last modified:** 2026-03-28
 
 ### src/services/auto-tweet.js
-- **Purpose:** Post Stack Signal articles to X (@troystack_) — fire-and-forget, never blocks article saves
-- **Exports:** `postArticleTweet(article)`, `getClient()` — returns shared TwitterApi client
-- **Dependencies:** twitter-api-v2, supabase, ai-router (Gemini Flash for tweet generation)
-- **Dedup:** `app_state` key `tweeted_signal_${slug}` holds the tweet id
-- **Daily cap:** 5 tweets/day via `app_state` key `tweet_count_${YYYY-MM-DD}` (America/New_York boundary)
-- **Tweet format:** Prefers pre-generated `tweet_text` from the article (generated during pipeline save). Falls back to live Gemini Flash call via `generateTweetText()` for old articles without `tweet_text`. Last resort: truncated title. Sanitized via shared `sanitizeTweetText()`. Appends `\n\n<https://troystack.com/signal/slug>`.
+- **Purpose:** Queue-based tweet posting for Stack Signal articles via @troystack_
+- **Exports:** `enqueueTweet(article, batchIndex?)`, `processTweetQueue()`, `getClient()` — shared TwitterApi client
+- **Dependencies:** twitter-api-v2, supabase, stack-signal-processor (sanitizeTweetText — lazy require)
+- **Queue table:** `tweet_queue` — articles enqueued with scheduled_for time, processed by cron
+- **`enqueueTweet()`:** Called by pipeline after saving an article. Urgent (signal_score >= 90): scheduled for now. Normal: 20-90 min delay + 15 min spacing per batch position.
+- **`processTweetQueue()`:** Called by cron every 5 min. Picks ONE ready tweet (urgent first, then FIFO). Posts via Twitter v2, marks `posted = true`, records `tweet_id`. Leaves failures in queue for retry.
+- **Daily cap:** 15 tweets/day via `app_state` key `tweet_count_${YYYY-MM-DD}` (America/New_York)
+- **Tweet assembly:** Sanitizes `tweet_text` via `sanitizeTweetText()`, trims to 255 chars (280 - 23 t.co - 2 `\n\n`), appends article URL
 - **Credential check:** skips silently if X_* env vars missing
+- **Cron:** `*/5 * * * *` (every 5 minutes)
 
 ### src/services/weekly-thread.js
 - **Purpose:** Generate and post a 5-7 tweet weekly recap thread to @troystack_ every Sunday 6 PM ET

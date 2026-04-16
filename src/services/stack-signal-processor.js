@@ -3,7 +3,7 @@ const supabase = require('../lib/supabase');
 const { callGemini, callClaude, generateImage, MODELS } = require('./ai-router');
 const { fetchNewArticles } = require('./rss-fetcher');
 const { getCachedPrices } = require('./price-fetcher');
-const { postArticleTweet } = require('./auto-tweet');
+const { enqueueTweet } = require('./auto-tweet');
 const { getTopIntelligence } = require('./intelligence-scraper');
 
 // ============================================
@@ -807,19 +807,29 @@ async function saveArticles(articles) {
         }
       }
 
-      const { error } = await supabase
+      const { data: savedRow, error } = await supabase
         .from('stack_signal_articles')
-        .upsert(row, { onConflict: 'slug' });
+        .upsert(row, { onConflict: 'slug' })
+        .select('id')
+        .single();
 
       if (error) {
         console.log(`[Save] Failed: "${article.title.slice(0, 40)}": ${error.message}`);
       } else {
         saved++;
-        // Fire-and-forget tweet — must never block or throw into save loop
-        try {
-          await postArticleTweet(row);
-        } catch (tweetErr) {
-          console.log(`[Save] Tweet error (non-fatal): ${tweetErr.message}`);
+        // Enqueue tweet for scheduled posting (non-blocking)
+        if (row.tweet_text) {
+          try {
+            await enqueueTweet({
+              id: savedRow?.id,
+              slug: row.slug,
+              title: row.title,
+              tweet_text: row.tweet_text,
+              signal_score: row.signal_score || article.signal_score,
+            }, saved - 1);
+          } catch (queueErr) {
+            console.log(`[Save] Queue error (non-fatal): ${queueErr.message}`);
+          }
         }
       }
     } catch (err) {
@@ -1159,11 +1169,13 @@ async function generateClaudeDailySynthesis() {
 
   console.log(`[Claude Synthesis] Saved: "${title}" (${articleText.length} chars, ${todayArticles.length} source articles)`);
 
-  // Fire-and-forget tweet — must never block or throw
-  try {
-    await postArticleTweet({ title, slug, troy_one_liner: oneLiner, tweet_text: synthesisTweet });
-  } catch (tweetErr) {
-    console.log(`[Claude Synthesis] Tweet error (non-fatal): ${tweetErr.message}`);
+  // Enqueue tweet for scheduled posting
+  if (synthesisTweet) {
+    try {
+      await enqueueTweet({ id: saved?.id, slug, title, tweet_text: synthesisTweet, signal_score: 95 });
+    } catch (queueErr) {
+      console.log(`[Claude Synthesis] Queue error (non-fatal): ${queueErr.message}`);
+    }
   }
 
   return saved;
