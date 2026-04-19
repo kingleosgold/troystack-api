@@ -922,16 +922,21 @@ src/admin/finance/
   index.js              — orchestrator: runAllCostSources, runCostSource, getCostSources
   define-source.js      — defineCostSource() helper: 15 s timeout, error normalization, cents→dollars conversion
   sources/
-    anthropic.js           (api,      ai_inference)       — Admin API usage_report
-    railway.js             (api,      infrastructure)     — GraphQL estimatedUsage
-    vercel.js              (api,      infrastructure)     — /v11/usage
-    elevenlabs.js          (api,      ai_inference)       — /v1/user/subscription
-    supabase-manual.js     (manual,   infrastructure)     — env var SUPABASE_MONTHLY_ESTIMATE
-    metalpriceapi-manual.js (manual,  infrastructure)     — env var METALPRICEAPI_MONTHLY_ESTIMATE
-    openai-manual.js       (manual,   ai_inference)       — env var OPENAI_MONTHLY_ESTIMATE
-    gemini-manual.js       (manual,   ai_inference)       — env var GEMINI_MONTHLY_ESTIMATE
-    apple-revenue.js       (derived,  payment_processing) — counts active subs; Phase 2 will wire real revenue
+    anthropic.js                (manual,   ai_inference)       — env var ANTHROPIC_MONTHLY_ESTIMATE (Admin API is Teams+/Enterprise only)
+    anthropic-api.js.disabled   — preserved two-endpoint (usage_report + cost_report) implementation; rename to .js after plan upgrade
+    railway.js                  (manual,   infrastructure)     — env var RAILWAY_MONTHLY_ESTIMATE (billing API unstable on Hobby)
+    railway-api.js.disabled     — preserved GraphQL implementation; rename to .js after plan upgrade + re-verify field path
+    vercel.js                   (manual,   infrastructure)     — env var VERCEL_MONTHLY_ESTIMATE (no Usage API on Hobby)
+    vercel-api.js.disabled      — preserved /v11/usage implementation; rename to .js after plan upgrade to Pro
+    elevenlabs.js               (api,      ai_inference)       — /v1/user/subscription
+    supabase-manual.js          (manual,   infrastructure)     — env var SUPABASE_MONTHLY_ESTIMATE
+    metalpriceapi-manual.js     (manual,   infrastructure)     — env var METALPRICEAPI_MONTHLY_ESTIMATE
+    openai-manual.js            (manual,   ai_inference)       — env var OPENAI_MONTHLY_ESTIMATE
+    gemini-manual.js            (manual,   ai_inference)       — env var GEMINI_MONTHLY_ESTIMATE
+    apple-revenue.js            (derived,  payment_processing) — counts active subs; Phase 2 will wire real revenue
 ```
+
+Only `*.js` files are auto-loaded by the orchestrator (`readdirSync` + `endsWith('.js')`), so `*.disabled` files are inert placeholders preserving code for future plan upgrades.
 
 ### Source contract
 
@@ -974,7 +979,9 @@ The `cost_snapshots` and `revenue_snapshots` tables must exist before the cron c
 - Two admin-health checks live in `src/admin/health/checks/finance.js` (category `crons`): `finance_cron_last_run` (snapshot freshness — green <28h, yellow <48h, red ≥48h) and `finance_sources_health` (error ratio on latest snapshot).
 
 ### Known gaps (Phase 1)
-- Anthropic source now hits both `/usage_report/messages` and `/cost_report` in parallel; if either endpoint shape shifts, the details string flags it without killing the row.
+- **Anthropic, Vercel, Railway are manual** until the corresponding plan upgrades. Each has its original API implementation preserved as `*-api.js.disabled` alongside the manual stub — restoration is a simple rename + re-verify of live endpoint shape.
+- ElevenLabs tier base price is hard-coded; overages aren't captured (API doesn't expose them cleanly).
+- `apple_fees` returns 0 until Phase 2 wires real revenue through `revenue_snapshots`.
 - Vercel + Railway response parsing is defensive — both vendors have shifting schemas; confirm field names against live output in the first cron fire.
 - ElevenLabs base pricing is hard-coded per tier; overages aren't captured (API doesn't expose them cleanly).
 - `apple_fees` is a placeholder until Phase 2's `revenue_snapshots` is populated.
