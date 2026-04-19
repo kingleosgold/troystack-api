@@ -441,7 +441,6 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `0 */3 * * *` | Every 3 hours | Reddit intelligence scrape | intelligence-scraper.js `scrapeReddit()` |
 | `*/5 * * * *` | Every 5m (market) / 15m (off) | Composite spot price cross-check | price-consensus.js `updateCompositePrice()` |
 | `0 3 * * *` (ET) | 3:00 AM EST nightly | price_log decimation (5-min / 1-hour / daily tiers, skips rows already marked) | price-log-decimator.js `decimatePriceLog()` |
-| `*/30 * * * *` | Every 30 minutes | Auto-reply to influencer tweets | auto-reply.js `checkForReplyOpportunities()` |
 | `0 22 28-31 * *` | 5:00 PM (last day) | Monthly recap | `generateStackSignal('monthly_recap')` |
 | `0 15 1 1 *` | 10:00 AM (Jan 1) | Yearly recap | `generateStackSignal('yearly_recap')` |
 | ~~`5 * * * *`~~ | ~~Every hour at :05~~ | **DISABLED** — Dealer price scraping (re-enable when affiliate integrations ready) | dealerScraper.js `scrapeAllDealers()` |
@@ -903,7 +902,6 @@ Two checks (`price_fetcher_freshness`, `key_tables_write_freshness`) import `are
 ### Known-red checks (intentional)
 - `intelligence_youtube_status` — hardcoded red until ESM import in youtube-transcript is fixed
 - `intelligence_reddit_status` — hardcoded red until fetch errors are resolved
-- `auto_reply_status` — red while `resolveAccountIds()` in auto-reply.js is silently failing (zero replies ever)
 
 These document current state; once the underlying issue is fixed, remove the hardcode / let the live probe take over.
 
@@ -1008,18 +1006,6 @@ Full canonical schema lives in the project knowledge file `mts-admin-health-syst
 - **Dedup:** by `source_url` in `troy_intelligence` table
 - **`getTopIntelligence(limit)`:** queries last 24h items ordered by relevance_score DESC, returns formatted string for prompt injection
 - **Crons:** YouTube every 4h (`0 */4 * * *`), Twitter every 2h (`0 */2 * * *`), Reddit every 3h (`0 */3 * * *`)
-
-### src/services/auto-reply.js
-- **Purpose:** Troy auto-replies to high-engagement tweets from metals influencers
-- **Exports:** `checkForReplyOpportunities()`
-- **Dependencies:** supabase, ai-router (Gemini Flash), auto-tweet (getClient)
-- **Monitored accounts:** @DaveHcontrarian, @PeterSchiff, @KingWorldNews, @silverguru22, @GoldTelegraph_, @WallStreetSilv, @RobertKiyosaki, @KeithNeumeyer, @SchiffGold, @MilesFranklinCo
-- **Account IDs:** Resolved lazily on first run via `client.v2.usersByUsernames()`, then cached in memory
-- **Engagement threshold:** 100+ likes within last 2 hours
-- **Caps:** 10 replies/day total (`reply_count_${date}`), 1 reply per account per 24h (`replied_account_${handle}_${date}`), dedup by tweet ID (`replied_tweet_${tweetId}`)
-- **Reply generation:** Gemini Flash with Troy voice — adds a data point/parallel the original missed, 200 char max, no self-promo
-- **Delay:** Random 5-30 minute delay before posting (looks natural, avoids rate limits)
-- **Cron:** every 30 minutes (`*/30 * * * *`)
 
 ### src/services/comex-scraper.js
 - **Purpose:** Scrape COMEX warehouse inventory from CME XLS files

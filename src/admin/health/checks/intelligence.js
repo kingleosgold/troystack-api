@@ -46,43 +46,4 @@ module.exports = [
     },
   }),
 
-  defineCheck({
-    id: 'auto_reply_status',
-    category: 'intelligence',
-    label: 'Auto-Reply Activity',
-    async run() {
-      const { data, count, error } = await supabase.from('app_state')
-        .select('key,value', { count: 'exact' }).like('key', 'replied_tweet_%');
-      if (error) return { status: 'red', details: error.message };
-      const total = count || 0;
-      if (total === 0) {
-        return {
-          status: 'red',
-          details: 'Zero replies ever — likely broken at resolveAccountIds() (handoff April 17)',
-          metric: { value: 0, unit: 'replies', label: 'All-time' },
-        };
-      }
-      const tsList = (data || [])
-        .map(r => r.value)
-        .filter(v => typeof v === 'string' && v.length >= 10)
-        .sort((a, b) => String(b).localeCompare(String(a)));
-      const latest = tsList[0];
-      if (!latest) {
-        return { status: 'yellow', details: `${total} dedup keys but no parseable timestamps` };
-      }
-      const ageH = (Date.now() - new Date(latest).getTime()) / 3600000;
-      if (ageH < 48) {
-        return {
-          status: 'green',
-          details: `${total} replies all-time, most recent ${ageH.toFixed(1)}h ago`,
-          metric: { value: total, unit: 'replies', label: 'All-time' },
-        };
-      }
-      return {
-        status: 'yellow',
-        details: `${total} replies all-time, latest ${ageH.toFixed(1)}h ago (> 48h — service may be stalled)`,
-        metric: { value: total, unit: 'replies', label: 'All-time' },
-      };
-    },
-  }),
 ];
