@@ -23,9 +23,14 @@ module.exports = [
       const { error } = await supabase.from('app_state')
         .select('key', { head: true, count: 'exact' }).limit(1);
       const ms = Date.now() - t0;
-      if (error) return { status: 'red', details: `DB error: ${error.message}`, metric: { value: ms, unit: 'ms' } };
-      const status = ms < 100 ? 'green' : ms < 500 ? 'yellow' : 'red';
-      return { status, details: `probe ${ms}ms`, metric: { value: ms, unit: 'ms' } };
+      if (error) return { status: 'red', details: `Error: ${error.message}`, metric: { value: ms, unit: 'ms' } };
+      // Cross-region Railway→Supabase normally runs 150-400ms. Yellow means
+      // "slower than normal," red means "actually broken."
+      let status, details;
+      if (ms < 500) { status = 'green';  details = `Probe ${ms}ms`; }
+      else if (ms < 1500) { status = 'yellow'; details = `Probe ${ms}ms — slower than normal`; }
+      else { status = 'red'; details = `Probe ${ms}ms — degraded`; }
+      return { status, details, metric: { value: ms, unit: 'ms' } };
     },
   }),
 
