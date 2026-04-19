@@ -6,7 +6,7 @@ const { defineCheck } = require('../define-check');
 // article/tweet flow slows). Ratio vs cap drives green/yellow/red in the check.
 const FRESHNESS = {
   price_log:             { col: 'timestamp',    capSec:   120, marketSensitive: true  },
-  stack_signal_articles: { col: 'created_at',   capSec:  3600, marketSensitive: false },
+  stack_signal_articles: { col: 'created_at',   capSec:  3600, marketSensitive: true  },
   troy_intelligence:     { col: 'created_at',   capSec: 14400, marketSensitive: false },
   daily_briefs:          { col: 'generated_at', capSec: 86400, marketSensitive: false },
   tweet_queue:           { col: 'created_at',   capSec:  1800, marketSensitive: true  },
@@ -89,7 +89,7 @@ module.exports = [
         ? `worst=${worst.table} ${isFinite(worst.ageSec) ? Math.round(worst.ageSec) + 's' : 'no rows'} (cap ${worst.capSec}s)`
         : 'no probes';
 
-      const closedSuffix = marketsClosed ? ' (markets closed; price_log/tweet_queue caps relaxed ×60)' : '';
+      const closedSuffix = marketsClosed ? ' (markets closed; market-sensitive caps relaxed ×60)' : '';
       return { status: overall, details: `${worstDetail}. ${summary}${closedSuffix}` };
     },
   }),
