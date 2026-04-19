@@ -60,20 +60,23 @@ module.exports = [
       if (!key) return { status: 'red', details: 'ELEVENLABS_API_KEY not configured' };
       const t0 = Date.now();
       try {
-        const resp = await axios.get('https://api.elevenlabs.io/v1/voices', {
+        // /v1/user is scope-agnostic: any valid key authenticates, regardless of
+        // whether it has Voices/Models/TTS permissions set. /v1/voices previously
+        // 401'd on keys scoped only to text-to-speech even though prod TTS works.
+        const resp = await axios.get('https://api.elevenlabs.io/v1/user', {
           headers: { 'xi-api-key': key },
           timeout: 4000,
         });
         const ms = Date.now() - t0;
-        if (resp.status !== 200) return { status: 'red', details: `status ${resp.status}, ${ms}ms` };
+        if (resp.status !== 200) return { status: 'red', details: `Account probe status ${resp.status}, ${ms}ms` };
         const status = ms < 2000 ? 'green' : 'red';
         return {
           status,
-          details: `Round-trip ${ms}ms`,
+          details: `Account probe ${ms}ms`,
           metric: { value: ms, unit: 'ms', label: 'Round-trip' },
         };
       } catch (err) {
-        return { status: 'red', details: `ElevenLabs error: ${err.message}` };
+        return { status: 'red', details: `Account probe failed: ${err.message}` };
       }
     },
   }),
