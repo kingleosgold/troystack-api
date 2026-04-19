@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "name": "io.github.kingleosgold/troystack",
+  "description": "Precious metals AI analyst with 12 tools — prices, portfolio, chat, receipts, and more.",
+  "version": "3.0.2",
+  "websiteUrl": "https://troystack.com",
+  "repository": {
+    "url": "https://github.com/kingleosgold/troystack-api",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.troystack.ai/mcp"
+    }
+  ]
+}

@@ -1,2 +1,5 @@
 node_modules/
 .env
+
+# MCP Registry tokens — never commit
+.mcpregistry_*

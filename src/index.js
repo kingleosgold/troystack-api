@@ -28,10 +28,11 @@ const socialRouter = require('./routes/social');
 const dealerPricesRouter = require('./routes/dealerPrices');
 const junkSilverRouter = require('./routes/junk-silver');
 const apiKeysRouter = require('./routes/api-keys');
+const adminHealthRouter = require('./routes/admin-health');
 const { apiKeyAuth } = require('./middleware/api-key-auth');
 const { handleMcp } = require('./routes/mcp');
 
-const { initPriceFetcher, fetchLiveSpotPrices, logPriceToSupabase, areMarketsClosed } = require('./services/price-fetcher');
+const { initPriceFetcher, fetchLiveSpotPrices, areMarketsClosed } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
 
 const app = express();
@@ -167,6 +168,17 @@ app.use('/v1/snapshots', publicLimiter, snapshotsRouter);
 
 // Scan usage tracking — public (mobile app checks limits)
 app.use('/v1', publicLimiter, scanUsageRouter);
+
+// Admin health — summary is public, detailed + single-check require X-Admin-Auth-Key
+app.use('/v1/admin', adminHealthRouter);
+{
+  const { getChecks } = require('./admin/health');
+  const checkCount = getChecks().length;
+  if (!process.env.ADMIN_AUTH_KEY) {
+    console.warn('⚠️  [AdminHealth] ADMIN_AUTH_KEY not set — /v1/admin/health/detailed and /v1/admin/health/:checkId will reject all requests (fail-closed)');
+  }
+  console.log(`🩺 [AdminHealth] Endpoint mounted at /v1/admin/health (${checkCount} checks registered)`);
+}
 
 // Legal pages — open CORS, public
 app.use('/', openCors, legalRouter);
@@ -555,16 +567,16 @@ app.listen(PORT, () => {
   cron.schedule('* * * * *', async () => {
     if (areMarketsClosed()) return; // silent skip every 60s is fine
     try {
-      const result = await fetchLiveSpotPrices();
-      // Only log to price_log every 5 minutes to avoid flooding the table
-      if (result && result.prices && new Date().getMinutes() % 5 === 0) {
-        await logPriceToSupabase(result);
-      }
+      await fetchLiveSpotPrices();
+      // Note: logPriceToSupabase is called inside fetchLiveSpotPrices at
+      // price-fetcher.js:414 on every successful fetch (60s resolution).
+      // Older data is decimated to 5-min/1-hour/daily buckets by the
+      // price-log-decimator cron (see src/services/price-log-decimator.js).
     } catch (err) {
       console.error('💰 [Price Cron] Error:', err.message);
     }
   }, { timezone: 'UTC' });
-  console.log('💰 [Price Cron] Scheduled: every 60s (cache), every 5m (price_log)');
+  console.log('💰 [Price Cron] Scheduled: every 60s (cache + price_log)');
 
   // ── Price Alert Checker: every 5 minutes ──
   cron.schedule('*/5 * * * *', async () => {
@@ -690,6 +702,19 @@ app.listen(PORT, () => {
     }
   }, { timezone: 'UTC' });
   console.log('📊 [Composite Price] Scheduled: every 5m (market), every 15m (off-hours)');
+
+  // ── price_log decimator: nightly at 3:00 AM EST ──
+  const { decimatePriceLog } = require('./services/price-log-decimator');
+  cron.schedule('0 3 * * *', async () => {
+    console.log('[PriceLogDecimator] Starting nightly decimation...');
+    try {
+      const result = await decimatePriceLog();
+      console.log('[PriceLogDecimator] Complete:', result);
+    } catch (err) {
+      console.error('[PriceLogDecimator] Failed:', err);
+    }
+  }, { timezone: 'America/New_York' });
+  console.log('📉 [PriceLogDecimator] Scheduled: daily at 3:00 AM EST');
 
   cron.schedule('0 */2 * * *', async () => {
     console.log('📡 [Intelligence Scraper] Running Twitter scrape...');

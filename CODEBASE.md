@@ -363,6 +363,20 @@ Silver content per coin (troy oz): dimes 0.07234, quarters 0.18084, half_dollars
 
 Root response `GET /` now includes top-level `mcp`, `openapi`, `llms`, `sitemap`, `docs` URLs for crawler discovery alongside the existing endpoint catalog.
 
+### src/routes/admin-health.js
+- **Purpose:** Single canonical admin health endpoint — structured status across every TroyStack subsystem. Feeds the admin dashboard, alerting cron, and the future `@mts/admin-health` package for the AI factory.
+- **Exports:** Express router
+- **Dependencies:** `src/admin/health/*` (orchestrator + per-category check modules)
+- **Last modified:** 2026-04-18
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | /v1/admin/health | Public | Overall status + summary counts (green/yellow/red/unknown). No `checks` array. |
+| GET | /v1/admin/health/detailed | `X-Admin-Auth-Key` | Same envelope plus full `checks` array with per-check status, details, metric, duration. |
+| GET | /v1/admin/health/:checkId | `X-Admin-Auth-Key` | Runs a single check by id and returns its result object. |
+
+Auth model: shared secret via `ADMIN_AUTH_KEY` env var (compared verbatim against `X-Admin-Auth-Key` header). If the env var is unset, protected endpoints fail-closed with 401 and a boot-time warning is logged. See §9 for the full system overview.
+
 ---
 
 ## 2. Middleware
@@ -413,7 +427,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `30 11 * * *` | 6:30 AM | Intelligence generation | intelligence.js `runIntelligenceGeneration()` |
 | `35 11 * * *` | 6:35 AM | Daily brief for Gold/Lifetime users + push | intelligence.js `generateDailyBrief()` |
 | `0 23 * * *` | 6:00 PM | COMEX vault data scrape | comex-scraper.js `scrapeComexVaultData()` |
-| `* * * * *` | Every 60s (cache) / 5m (log) | Price fetch + cache update (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 5m |
+| `* * * * *` | Every 60s | Price fetch + cache update + price_log write (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 60s (decimated later) |
 | `*/5 * * * *` | Every 5 min | Price alert checker | price-alert-checker.js `checkPriceAlerts()` |
 | `*/15 * * * *` | Every 15 min | Stack Signal article pipeline (~41 feeds, signal scoring, max 5/run) | stack-signal-processor.js `runStackSignalPipeline()` |
 | `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis | stack-signal-processor.js `generateStackSignal()` |
@@ -426,6 +440,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `0 */2 * * *` | Every 2 hours | Twitter intelligence scrape | intelligence-scraper.js `scrapeTwitterAccounts()` |
 | `0 */3 * * *` | Every 3 hours | Reddit intelligence scrape | intelligence-scraper.js `scrapeReddit()` |
 | `*/5 * * * *` | Every 5m (market) / 15m (off) | Composite spot price cross-check | price-consensus.js `updateCompositePrice()` |
+| `0 3 * * *` (ET) | 3:00 AM EST nightly | price_log decimation (5-min / 1-hour / daily tiers, skips rows already marked) | price-log-decimator.js `decimatePriceLog()` |
 | `*/30 * * * *` | Every 30 minutes | Auto-reply to influencer tweets | auto-reply.js `checkForReplyOpportunities()` |
 | `0 22 28-31 * *` | 5:00 PM (last day) | Monthly recap | `generateStackSignal('monthly_recap')` |
 | `0 15 1 1 *` | 10:00 AM (Jan 1) | Yearly recap | `generateStackSignal('yearly_recap')` |
@@ -450,9 +465,10 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 
 ### price_log
 - `id` (serial PK), `timestamp` (timestamptz)
-- `gold`, `silver`, `platinum`, `palladium` (numeric — spot prices)
-- `source` (text), `gold_change_pct`, `silver_change_pct`, `platinum_change_pct`, `palladium_change_pct`
-- Used by: prices.js, analytics.js, portfolio.js, widget.js, speculation.js
+- `gold_price`, `silver_price`, `platinum_price`, `palladium_price` (numeric — spot prices)
+- `source` (text)
+- `decimated_to` (text, nullable) — decimation tier: `5min` | `1hour` | `daily`. NULL means still at raw 60s resolution (last 24h). Set by `price-log-decimator.js`.
+- Used by: prices.js, analytics.js, portfolio.js, widget.js, speculation.js, price-log-decimator.js
 
 ### push_tokens
 - `id` (UUID, PK), `user_id` (UUID, nullable), `device_id` (text, nullable)
@@ -507,8 +523,9 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `category`, `image_url` (text), `relevance_score` (numeric), `is_stack_signal` (boolean)
 - `published_at` (timestamptz), `gold_price_at_publish`, `silver_price_at_publish` (numeric)
 - `tweet_text` (text, nullable) — pre-generated Troy tweet for auto-posting, generated during article creation via `generateTweetText()`
-- `signal_score` (int, default 50) — RSS signal score (0-100) from `scoreArticle()`, determines processing priority
-- `urgent` (boolean, default false) — true if `signal_score >= 90` (breaking news threshold)
+- `signal_score` (int, default 50) — RSS signal score (0-100) from `scoreArticle()`; for synthesis articles (is_stack_signal=false) this is the **MAX** signal_score of the cluster's source articles, set at `stack-signal-processor.js` around the `article = { ...metadata }` block in `runStackSignalPipeline`
+- `urgent` (boolean, default false) — set to `signal_score >= 90` at save time (see `saveArticles` in stack-signal-processor.js)
+- ⚠️ `generateStackSignal()` and `generateClaudeDailySynthesis()` insert rows without explicitly setting `signal_score` — those rows inherit the DB default of 50
 - `view_count`, `like_count`, `comment_count` (int)
 - Used by: stack-signal.js, social.js, stack-signal-processor.js, intelligence.js, auto-tweet.js
 
@@ -816,6 +833,83 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 
 ---
 
+## 12. Admin Health System
+
+Layer 1 of the admin health infrastructure — single canonical endpoint returning structured status across every TroyStack subsystem. Foundation for the admin dashboard, alerting cron, and the planned `@mts/admin-health` npm package shared across the MTS AI factory.
+
+### Endpoints
+See `src/routes/admin-health.js` in §1. Summary route is public; `/detailed` and `/:checkId` require the `X-Admin-Auth-Key` header matching `ADMIN_AUTH_KEY`.
+
+### Directory layout
+```
+src/
+  admin/
+    health/
+      index.js           — orchestrator: runAllChecks, runCheck, getChecks
+      define-check.js    — defineCheck() helper: timeout wrapper, error normalization
+      checks/
+        prices.js             (3 checks)
+        content-pipeline.js   (4 checks)
+        distribution.js       (5 checks)
+        intelligence.js       (4 checks)
+        ai-services.js        (4 checks)
+        database.js           (3 checks)
+        crons.js              (1 check)
+        revenue.js            (2 checks)
+  routes/
+    admin-health.js    — Express router: /v1/admin/health + /detailed + /:checkId
+```
+
+### Check definition schema
+
+Every check is produced by `defineCheck()`:
+
+```js
+const { defineCheck } = require('../define-check');
+
+module.exports = [
+  defineCheck({
+    id: 'unique_snake_case_id',
+    category: 'prices' | 'content_pipeline' | 'distribution' | 'intelligence'
+            | 'ai_services' | 'database' | 'crons' | 'revenue',
+    label: 'Human Readable Name',
+    async run() {
+      // Return one of:
+      //   { status: 'green' | 'yellow' | 'red',
+      //     details: 'short string',
+      //     metric?: { value, unit, label } }
+      // A throw or 5s timeout is auto-translated to { status: 'unknown', ... }.
+    },
+  }),
+];
+```
+
+### Orchestrator behavior
+- `runAllChecks()` runs every check via `Promise.allSettled` with a 5 s per-check timeout (enforced inside `defineCheck`).
+- Results are never cached — every call hits live sources. Checks are read-only.
+- Overall status: red if any red, else yellow if any yellow, else green. If >50% of checks are `unknown`, overall is forced to yellow.
+
+### Adding a new check
+1. Pick a category file under `src/admin/health/checks/`.
+2. Append a `defineCheck({ id, category, label, run })` to the exported array.
+3. The orchestrator picks it up on next server boot (checks are cached after first load; restart to refresh).
+4. Update the boot-log count in `src/index.js` if the total changes — the message reads `🩺 [AdminHealth] Endpoint mounted at /v1/admin/health (N checks registered)`.
+
+### Market-hours awareness
+Two checks (`price_fetcher_freshness`, `key_tables_write_freshness`) import `areMarketsClosed()` from `price-fetcher` and relax their staleness caps when markets are closed (Fri 5 PM ET → Sun 6 PM ET). Price data is legitimately frozen during those windows; without the relaxation the endpoint would flatline red every weekend.
+
+### Known-red checks (intentional)
+- `intelligence_youtube_status` — hardcoded red until ESM import in youtube-transcript is fixed
+- `intelligence_reddit_status` — hardcoded red until fetch errors are resolved
+- `auto_reply_status` — red while `resolveAccountIds()` in auto-reply.js is silently failing (zero replies ever)
+
+These document current state; once the underlying issue is fixed, remove the hardcode / let the live probe take over.
+
+### Reference
+Full canonical schema lives in the project knowledge file `mts-admin-health-system-spec.md`. Adhere to it when porting this into the shared `@mts/admin-health` package.
+
+---
+
 ## Services Reference
 
 ### src/services/price-fetcher.js
@@ -826,7 +920,7 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 - **Fetch chain:** Yahoo Finance futures GC=F/SI=F (primary, free/unlimited) → MetalPriceAPI (fallback, all 4 metals) → cached fallback → static fallback. GoldAPI.io removed.
 - **Pt/Pd:** Yahoo Finance only covers Au/Ag. Pt/Pd sourced from MetalPriceAPI as supplement when Yahoo is primary, or from last known price_log values.
 - **Cache:** In-memory, 90-second TTL (was 10 min). Friday close stored for change calculation.
-- **Cron:** Every 60 seconds during market hours (cache update). price_log written every 5 minutes only.
+- **Cron:** Every 60 seconds during market hours. Cache update + price_log write both happen on every tick (price_log insert lives inside `fetchLiveSpotPrices` with a >10% spike guard; decimated later).
 - **Market hours:** Closed Friday 5PM ET → Sunday 6PM ET
 
 ### src/services/price-consensus.js
@@ -839,6 +933,15 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 - **Storage:** `app_state` key `composite_spot_latest` (JSON). In-memory cache with Supabase fallback.
 - **Cron:** every 5 min during market hours, every 15 min off-hours
 - **Endpoint:** `GET /v1/prices/composite` (in prices.js)
+
+### src/services/price-log-decimator.js
+- **Purpose:** Nightly decimation of `price_log` to keep the table bounded while preserving analytic fidelity
+- **Exports:** `decimatePriceLog()`
+- **Dependencies:** supabase
+- **Tiers:** last 24h raw 60s (untouched) → 24h–30d one row per 5-min bucket (closest to bucket start) → 30d–365d one row per hour (closest to top-of-hour) → older than 365d one row per ET calendar day (closest to 16:00 America/New_York)
+- **Safety:** Per-pass candidate count; if >50,000 rows the pass aborts with a `console.error` — Jon runs a one-off manual decimation first. Mark-then-delete ordering keeps a survivor at all times (supabase-js has no transactions). Survivors stamped with `decimated_to` so future passes skip them.
+- **Cron:** `0 3 * * *` America/New_York (3:00 AM EST nightly)
+- **Migration required:** see migration note at the end of the file (adds `decimated_to` column + 2 indexes)
 
 ### src/services/etf-prices.js
 - **Purpose:** Convert ETF prices to estimated spot via calibrated ratios

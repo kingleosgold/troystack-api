@@ -1272,11 +1272,18 @@ async function runStackSignalPipeline() {
       // Generate tweet from the just-written commentary
       const tweetText = await generateTweetText(metadata.title, articleText);
 
+      // MAX (not avg) so a breaking source isn't diluted by follow-on rehashes.
+      const maxSourceScore = Math.max(
+        0,
+        ...cluster.articles.map(a => a.signal_score || 0),
+      );
+
       const article = {
         ...metadata,
         troy_commentary: articleText,
         tweet_text: tweetText,
         slug: generateSlug(metadata.title),
+        signal_score: maxSourceScore,
       };
 
       synthesizedArticles.push(article);
