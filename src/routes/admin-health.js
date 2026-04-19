@@ -1,5 +1,7 @@
 const express = require('express');
 const { runAllChecks, runCheck } = require('../admin/health');
+const { runAllCostSources } = require('../admin/finance');
+const supabase = require('../lib/supabase');
 
 const router = express.Router();
 
@@ -69,6 +71,53 @@ router.get('/health/:checkId', adminAuth, async (req, res) => {
   } catch (err) {
     console.error('[AdminHealth] single-check failed:', err.message);
     res.status(500).json({ error: 'check failed' });
+  }
+});
+
+// Manually trigger the finance orchestrator (testing, backfill, investigation).
+// GET would be wrong — this mutates cost_snapshots. POST is idempotent-by-upsert
+// against today's (snapshot_date, source) key but still a state change.
+router.post('/finance/run-now', adminAuth, async (_req, res) => {
+  try {
+    const result = await runAllCostSources();
+    res.json(result);
+  } catch (err) {
+    console.error('[AdminHealth] /finance/run-now failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Read-only: most recent snapshot's rows, ordered by spend desc.
+router.get('/finance/costs/latest', adminAuth, async (_req, res) => {
+  try {
+    const latestResp = await supabase.from('cost_snapshots')
+      .select('snapshot_date').order('snapshot_date', { ascending: false }).limit(1);
+    if (latestResp.error) {
+      console.error('[AdminHealth] /finance/costs/latest latest-date query:', latestResp.error.message);
+      return res.status(500).json({ error: 'cost_snapshots query failed' });
+    }
+    if (!latestResp.data || !latestResp.data.length) {
+      return res.status(404).json({ error: 'no snapshots yet' });
+    }
+    const snapshot_date = latestResp.data[0].snapshot_date;
+    const { data: rows, error } = await supabase.from('cost_snapshots')
+      .select('source,category,amount_usd,units,unit_type,details,source_type,created_at')
+      .eq('snapshot_date', snapshot_date)
+      .order('amount_usd', { ascending: false });
+    if (error) {
+      console.error('[AdminHealth] /finance/costs/latest rows query:', error.message);
+      return res.status(500).json({ error: 'cost_snapshots query failed' });
+    }
+    const total_usd = (rows || []).reduce((sum, r) => sum + parseFloat(r.amount_usd || 0), 0);
+    res.json({
+      snapshot_date,
+      source_count: (rows || []).length,
+      total_usd: total_usd.toFixed(2),
+      sources: rows || [],
+    });
+  } catch (err) {
+    console.error('[AdminHealth] /finance/costs/latest failed:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 

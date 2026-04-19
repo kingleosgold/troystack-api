@@ -374,6 +374,8 @@ Root response `GET /` now includes top-level `mcp`, `openapi`, `llms`, `sitemap`
 | GET | /v1/admin/health | Public | Overall status + summary counts (green/yellow/red/unknown). No `checks` array. |
 | GET | /v1/admin/health/detailed | `X-Admin-Auth-Key` | Same envelope plus full `checks` array with per-check status, details, metric, duration. |
 | GET | /v1/admin/health/:checkId | `X-Admin-Auth-Key` | Runs a single check by id and returns its result object. |
+| POST | /v1/admin/finance/run-now | `X-Admin-Auth-Key` | Manually triggers `runAllCostSources()`; returns full orchestrator response (summary + per-source results). Upserts rows into `cost_snapshots` on today's ET date. |
+| GET | /v1/admin/finance/costs/latest | `X-Admin-Auth-Key` | Returns the most recent `snapshot_date`'s rows ordered by `amount_usd` desc, plus `total_usd`, `source_count`. 404 if no snapshots exist. |
 
 Auth model: shared secret via `ADMIN_AUTH_KEY` env var (compared verbatim against `X-Admin-Auth-Key` header). If the env var is unset, protected endpoints fail-closed with 401 and a boot-time warning is logged. See §9 for the full system overview.
 
@@ -891,10 +893,10 @@ module.exports = [
 - Overall status: red if any red, else yellow if any yellow, else green. If >50% of checks are `unknown`, overall is forced to yellow.
 
 ### Adding a new check
-1. Pick a category file under `src/admin/health/checks/`.
+1. Pick a category file under `src/admin/health/checks/` (or create a new one — `index.js` auto-loads every `*.js` in that directory).
 2. Append a `defineCheck({ id, category, label, run })` to the exported array.
 3. The orchestrator picks it up on next server boot (checks are cached after first load; restart to refresh).
-4. Update the boot-log count in `src/index.js` if the total changes — the message reads `🩺 [AdminHealth] Endpoint mounted at /v1/admin/health (N checks registered)`.
+4. The boot log (`🩺 [AdminHealth] Endpoint mounted at /v1/admin/health (N checks registered)`) computes `N` dynamically from `getChecks().length` — no string edit needed.
 
 ### Market-hours awareness
 Two checks (`price_fetcher_freshness`, `key_tables_write_freshness`) import `areMarketsClosed()` from `price-fetcher` and relax their staleness caps when markets are closed (Fri 5 PM ET → Sun 6 PM ET). Price data is legitimately frozen during those windows; without the relaxation the endpoint would flatline red every weekend.
@@ -966,8 +968,13 @@ The wrapper converts `amount_cents` → `amount_usd` (decimal string, 4 dp) befo
 ### Required migration (not yet run)
 The `cost_snapshots` and `revenue_snapshots` tables must exist before the cron can write. See the migration SQL in the Phase 1 handoff. Until then the orchestrator still computes results in memory — `upsert_error` in the summary signals the missing table.
 
+### Manual trigger + health surface
+- `POST /v1/admin/finance/run-now` (admin-auth) invokes `runAllCostSources()` on demand — useful for testing and same-day backfill. Returns the full orchestrator envelope.
+- `GET /v1/admin/finance/costs/latest` (admin-auth) returns the newest `cost_snapshots` rows ordered by spend.
+- Two admin-health checks live in `src/admin/health/checks/finance.js` (category `crons`): `finance_cron_last_run` (snapshot freshness — green <28h, yellow <48h, red ≥48h) and `finance_sources_health` (error ratio on latest snapshot).
+
 ### Known gaps (Phase 1)
-- Anthropic source uses `/usage_report/messages` which returns tokens, not dollars. When `/cost_report` is wired in, amount_cents will populate naturally.
+- Anthropic source now hits both `/usage_report/messages` and `/cost_report` in parallel; if either endpoint shape shifts, the details string flags it without killing the row.
 - Vercel + Railway response parsing is defensive — both vendors have shifting schemas; confirm field names against live output in the first cron fire.
 - ElevenLabs base pricing is hard-coded per tier; overages aren't captured (API doesn't expose them cleanly).
 - `apple_fees` is a placeholder until Phase 2's `revenue_snapshots` is populated.
