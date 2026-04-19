@@ -426,7 +426,10 @@ app.listen(PORT, () => {
       console.log(`\n📝 [Daily Brief Cron] Triggered at ${new Date().toISOString()}`);
       const supabase = require('./lib/supabase');
       // Log cron fire count to prove how many times this executes per day
-      const cronFireKey = `daily_brief_cron_fire_${new Date().toISOString().split('T')[0]}`;
+      // Use America/New_York date so the key stays stable through UTC midnight.
+      // A cron that fires at 6:35 AM ET belongs to the ET day, not the UTC day.
+      const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const cronFireKey = `daily_brief_cron_fire_${todayET}`;
       try {
         const { data: existingFire } = await supabase.from('app_state').select('value').eq('key', cronFireKey).single();
         const fireCount = existingFire ? (JSON.parse(existingFire.value).count || 0) + 1 : 1;

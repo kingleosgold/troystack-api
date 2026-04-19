@@ -92,18 +92,47 @@ module.exports = [
     category: 'distribution',
     label: 'Daily Brief Cron Heartbeat',
     async run() {
-      const today = new Date().toISOString().split('T')[0];
-      const key = `daily_brief_cron_fire_${today}`;
-      const { data } = await supabase.from('app_state')
-        .select('value').eq('key', key).maybeSingle();
-      if (!data) return { status: 'red', details: `no heartbeat key for ${today}` };
-      let v = data.value;
-      if (typeof v === 'string') { try { v = JSON.parse(v); } catch { v = {}; } }
-      const count = (v && v.count) || 0;
-      const lastFired = (v && v.last_fired) || null;
-      if (count === 0) return { status: 'red', details: 'heartbeat present but count=0' };
-      if (count > 1) return { status: 'yellow', details: `fired ${count}× — lock issue (${lastFired})` };
-      return { status: 'green', details: `fired 1× at ${lastFired}` };
+      // The cron fires once every 24h at 6:35 AM ET. The heartbeat key is
+      // stamped with the ET date (see src/index.js daily-brief cron). Between
+      // midnight ET and the 6:35 AM fire there's a window when no "today"
+      // key exists yet — fall back to yesterday's key if < 25h old.
+      const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const yesterdayDate = new Date(Date.now() - 86400000);
+      const yesterdayET = yesterdayDate.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+      function parse(v) {
+        if (!v) return null;
+        if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } }
+        return v;
+      }
+
+      function classify(parsed, whichLabel) {
+        const count = (parsed && parsed.count) || 0;
+        const lastFired = (parsed && parsed.last_fired) || null;
+        if (count === 0) return { status: 'red', details: `${whichLabel} heartbeat present but count=0` };
+        if (count > 1) return { status: 'yellow', details: `${whichLabel} fired ${count}× — lock issue (${lastFired})` };
+        return { status: 'green', details: `${whichLabel} fired 1× at ${lastFired}` };
+      }
+
+      const { data: todayRow } = await supabase.from('app_state')
+        .select('value').eq('key', `daily_brief_cron_fire_${todayET}`).maybeSingle();
+      const todayParsed = parse(todayRow && todayRow.value);
+      if (todayParsed) return classify(todayParsed, 'today');
+
+      // Fallback: accept yesterday's key if its last_fired is within 25 h
+      const { data: yRow } = await supabase.from('app_state')
+        .select('value').eq('key', `daily_brief_cron_fire_${yesterdayET}`).maybeSingle();
+      const yParsed = parse(yRow && yRow.value);
+      if (yParsed && yParsed.last_fired) {
+        const ageH = (Date.now() - new Date(yParsed.last_fired).getTime()) / 3600000;
+        if (ageH < 25) {
+          const base = classify(yParsed, 'yesterday');
+          return { ...base, details: `${base.details} (${ageH.toFixed(1)}h ago; next cron pending)` };
+        }
+        return { status: 'red', details: `yesterday's heartbeat ${ageH.toFixed(1)}h old, no fresh fire` };
+      }
+
+      return { status: 'red', details: `no heartbeat key for ${todayET} or ${yesterdayET}` };
     },
   }),
 
