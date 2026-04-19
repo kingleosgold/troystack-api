@@ -1017,6 +1017,9 @@ Return ONLY valid JSON.`;
       gold_price_at_publish: prices.gold || null,
       silver_price_at_publish: prices.silver || null,
       relevance_score: 100,
+      // Editorial synthesis — curated, not algorithmically scored. Always high-signal.
+      signal_score: 95,
+      urgent: true,
       is_stack_signal: true,
       published_at: new Date().toISOString(),
     };
@@ -1154,6 +1157,9 @@ async function generateClaudeDailySynthesis() {
       sources: todayArticles.map(a => ({ name: 'Stack Signal Feed', url: null, title: a.title })),
       image_url: null,
       relevance_score: 95,
+      // Editorial synthesis — curated, not algorithmically scored. Always high-signal.
+      signal_score: 95,
+      urgent: true,
       is_stack_signal: true,
       published_at: new Date().toISOString(),
       gold_price_at_publish: prices?.gold || null,

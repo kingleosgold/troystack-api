@@ -523,9 +523,11 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `category`, `image_url` (text), `relevance_score` (numeric), `is_stack_signal` (boolean)
 - `published_at` (timestamptz), `gold_price_at_publish`, `silver_price_at_publish` (numeric)
 - `tweet_text` (text, nullable) — pre-generated Troy tweet for auto-posting, generated during article creation via `generateTweetText()`
-- `signal_score` (int, default 50) — RSS signal score (0-100) from `scoreArticle()`; for synthesis articles (is_stack_signal=false) this is the **MAX** signal_score of the cluster's source articles, set at `stack-signal-processor.js` around the `article = { ...metadata }` block in `runStackSignalPipeline`
-- `urgent` (boolean, default false) — set to `signal_score >= 90` at save time (see `saveArticles` in stack-signal-processor.js)
-- ⚠️ `generateStackSignal()` and `generateClaudeDailySynthesis()` insert rows without explicitly setting `signal_score` — those rows inherit the DB default of 50
+- `signal_score` (int, default 50) — RSS signal score (0-100) from `scoreArticle()`
+- `urgent` (boolean, default false) — true if `signal_score >= 90` (breaking-news threshold)
+- Scoring paths:
+  - **Cluster synthesis** (`runStackSignalPipeline` in stack-signal-processor.js) — carries forward the MAX `signal_score` of the cluster's source articles; `urgent` is derived at save time as `signal_score >= 90`
+  - **Editorial synthesis** (`generateStackSignal`, `generateClaudeDailySynthesis`) — hard-code `signal_score = 95`, `urgent = true`. These are curated daily/weekly digests, not algorithmically scored
 - `view_count`, `like_count`, `comment_count` (int)
 - Used by: stack-signal.js, social.js, stack-signal-processor.js, intelligence.js, auto-tweet.js
 
