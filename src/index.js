@@ -719,6 +719,19 @@ app.listen(PORT, () => {
   }, { timezone: 'America/New_York' });
   console.log('📉 [PriceLogDecimator] Scheduled: daily at 3:00 AM EST');
 
+  // ── Finance cost snapshot: nightly at 2:00 AM EST ──
+  const { runAllCostSources } = require('./admin/finance');
+  cron.schedule('0 2 * * *', async () => {
+    console.log('[Finance] Starting nightly cost snapshot...');
+    try {
+      const result = await runAllCostSources();
+      console.log('[Finance] Complete:', result.summary);
+    } catch (err) {
+      console.error('[Finance] Failed:', err);
+    }
+  }, { timezone: 'America/New_York' });
+  console.log('💰 [Finance] Scheduled: daily at 2:00 AM EST');
+
   cron.schedule('0 */2 * * *', async () => {
     console.log('📡 [Intelligence Scraper] Running Twitter scrape...');
     try {

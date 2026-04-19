@@ -910,6 +910,70 @@ Full canonical schema lives in the project knowledge file `mts-admin-health-syst
 
 ---
 
+## 13. Finance Dashboard (Phase 1 — data layer)
+
+Nightly cost snapshot across every vendor we spend money with. Runs at **2:00 AM America/New_York** via cron in `src/index.js`. Writes one row per source per day to the `cost_snapshots` table (upsert on `(snapshot_date, source)` so re-runs are idempotent). API endpoints and UI land in Phase 2.
+
+### Directory layout
+```
+src/admin/finance/
+  index.js              — orchestrator: runAllCostSources, runCostSource, getCostSources
+  define-source.js      — defineCostSource() helper: 15 s timeout, error normalization, cents→dollars conversion
+  sources/
+    anthropic.js           (api,      ai_inference)       — Admin API usage_report
+    railway.js             (api,      infrastructure)     — GraphQL estimatedUsage
+    vercel.js              (api,      infrastructure)     — /v11/usage
+    elevenlabs.js          (api,      ai_inference)       — /v1/user/subscription
+    supabase-manual.js     (manual,   infrastructure)     — env var SUPABASE_MONTHLY_ESTIMATE
+    metalpriceapi-manual.js (manual,  infrastructure)     — env var METALPRICEAPI_MONTHLY_ESTIMATE
+    openai-manual.js       (manual,   ai_inference)       — env var OPENAI_MONTHLY_ESTIMATE
+    gemini-manual.js       (manual,   ai_inference)       — env var GEMINI_MONTHLY_ESTIMATE
+    apple-revenue.js       (derived,  payment_processing) — counts active subs; Phase 2 will wire real revenue
+```
+
+### Source contract
+
+Each source is produced by `defineCostSource({ id, category, label, source_type, fetch })`. `fetch()` must resolve with:
+
+```js
+{
+  amount_cents: 12345,        // integer — MANDATORY
+  units?: 1234567,            // integer — optional (tokens, chars, invocations, subs, etc.)
+  unit_type?: 'tokens',
+  details?: 'Short human-readable summary',
+  raw_data?: { ... },         // stored in cost_snapshots.raw_data JSONB for later inspection
+}
+```
+
+The wrapper converts `amount_cents` → `amount_usd` (decimal string, 4 dp) before the row lands in the DB. Throws become a row with `amount_usd='0.0000'` and `details` prefixed `"ERROR: …"`. One bad source never blocks the others — `Promise.allSettled` + per-source try/catch.
+
+### source_type values
+- `api` — real-time hit to the vendor's billing/usage API
+- `manual` — reads a `*_MONTHLY_ESTIMATE` env var; update monthly from the vendor dashboard
+- `derived` — computed from our own DB state (Apple fees in Phase 1); flagged for the UI to render differently
+
+### Cron + destination
+- Schedule: `'0 2 * * *'` America/New_York
+- Table: `cost_snapshots` (create via migration, see below)
+- Upsert key: `(snapshot_date, source)` — re-running the day is safe
+- Boot log: `💰 [Finance] Scheduled: daily at 2:00 AM EST`
+
+### Adding a new source
+1. Drop a file into `src/admin/finance/sources/` that `module.exports = defineCostSource({...})`.
+2. Server restart picks it up on next boot (sources are cached after first load).
+3. Document any new env vars in `.env.example`.
+
+### Required migration (not yet run)
+The `cost_snapshots` and `revenue_snapshots` tables must exist before the cron can write. See the migration SQL in the Phase 1 handoff. Until then the orchestrator still computes results in memory — `upsert_error` in the summary signals the missing table.
+
+### Known gaps (Phase 1)
+- Anthropic source uses `/usage_report/messages` which returns tokens, not dollars. When `/cost_report` is wired in, amount_cents will populate naturally.
+- Vercel + Railway response parsing is defensive — both vendors have shifting schemas; confirm field names against live output in the first cron fire.
+- ElevenLabs base pricing is hard-coded per tier; overages aren't captured (API doesn't expose them cleanly).
+- `apple_fees` is a placeholder until Phase 2's `revenue_snapshots` is populated.
+
+---
+
 ## Services Reference
 
 ### src/services/price-fetcher.js
