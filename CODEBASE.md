@@ -647,7 +647,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | **Expo Push** | Mobile push notifications | None (expo-server-sdk) | push.js, index.js, stack-signal-push.js, comex-scraper.js, price-alert-checker.js |
 | **X (Twitter)** | Auto-tweet Stack Signal articles (@troystack_) | `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | auto-tweet.js |
 | **CME Group** | COMEX warehouse XLS reports | None (public URLs) | comex-scraper.js |
-| **Dealer websites** | Price scraping (APMEX, JM Bullion, SD Bullion) | `APMEX_AFFILIATE_ID`, `JMB_AFFILIATE_ID`, `SDB_AFFILIATE_ID` | dealerScraper.js |
+| **Dealer websites** | Price scraping (APMEX, JM Bullion, SD Bullion, Money Metals Exchange) | `APMEX_AFFILIATE_ID`, `JMB_AFFILIATE_ID`, `SDB_AFFILIATE_ID`, `AWIN_PUBLISHER_ID`, `MMX_AFFILIATE_ID` | dealerScraper.js |
 
 ---
 
@@ -672,9 +672,11 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `STRIPE_GOLD_LIFETIME_PRICE_ID` | Yes | stripe.js | Stripe price ID for Lifetime |
 | `REVENUECAT_WEBHOOK_SECRET` | No | stripe.js | RevenueCat webhook secret |
 | `INTELLIGENCE_API_KEY` | Yes | intelligence.js, push.js, vault-watch.js | Admin API key for cron triggers |
-| `APMEX_AFFILIATE_ID` | No | dealerScraper.js | APMEX affiliate partner ID |
-| `JMB_AFFILIATE_ID` | No | dealerScraper.js | JM Bullion affiliate ID |
-| `SDB_AFFILIATE_ID` | No | dealerScraper.js | SD Bullion affiliate ID |
+| `APMEX_AFFILIATE_ID` | No | dealerScraper.js | APMEX affiliate partner ID (direct, `custid=` param) |
+| `JMB_AFFILIATE_ID` | No | dealerScraper.js | JM Bullion affiliate ID (direct, `ref=` param) |
+| `SDB_AFFILIATE_ID` | No | dealerScraper.js | SD Bullion affiliate ID (direct, `afmc=` param) |
+| `AWIN_PUBLISHER_ID` | No | dealerScraper.js | Awin publisher ID — shared across all Awin merchants (TroyStack = 2844460) |
+| `MMX_AFFILIATE_ID` | No | dealerScraper.js | Money Metals Exchange Awin merchant ID (88985); pairs with `AWIN_PUBLISHER_ID` to build the Awin cread.php redirect |
 | `MIN_VERSION_IOS` | No | min-version.js | Minimum iOS app version |
 | `MIN_VERSION_ANDROID` | No | min-version.js | Minimum Android app version |
 | `MIN_VERSION_MESSAGE` | No | min-version.js | Force-update message text |
@@ -806,10 +808,12 @@ Returns preview hints for the mobile app UI based on Troy's response text:
 - **Gold Eagles:** `https://track.flexlinkspro.com/g.ashx?foid=156074.13444.1055590&trid=1546671.246173&foc=16&fot=9999&fos=6`
 
 ### Dealer Price Comparison
-- Hourly scraping of APMEX, JM Bullion, SD Bullion
-- Products: Silver/Gold Eagles, Maples, Rounds, Bars (various sizes)
+- Hourly scraping of APMEX, JM Bullion, SD Bullion, Money Metals Exchange *(cron currently disabled in src/index.js; re-enable when affiliate integrations are ready)*
+- Products: Silver/Gold Eagles, Maples, Rounds, Bars (various sizes). MMX product URLs + parser are a follow-up — the MMX entry today is scaffolding only (`scrapeMmx` throws).
 - Click logging to affiliate_clicks table
-- Affiliate partner IDs via env vars
+- Affiliate partner IDs via env vars. Two patterns:
+  - **Direct** (APMEX `custid=`, JM Bullion `ref=`, SD Bullion `afmc=`) — append a query param to the product URL.
+  - **Awin redirect** (Money Metals Exchange) — wrap the destination in `https://www.awin1.com/cread.php?awinmid=<merchant>&awinaffid=<AWIN_PUBLISHER_ID>&ued=<encoded_destination>`. `AWIN_PUBLISHER_ID` (2844460) is shared; each Awin merchant gets its own `*_AFFILIATE_ID` env var holding the merchant id.
 
 ---
 
@@ -1144,10 +1148,10 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 - **Last modified:** 2026-03-26
 
 ### src/services/dealerScraper.js
-- **Purpose:** Scrape dealer prices (APMEX, JM Bullion, SD Bullion)
-- **Exports:** `scrapeAllDealers()`, `PRODUCTS`
+- **Purpose:** Scrape dealer prices (APMEX, JM Bullion, SD Bullion, Money Metals Exchange); build affiliate click-through URLs (§10 for the two URL patterns)
+- **Exports:** `scrapeAllDealers()`, `PRODUCTS`, `DEALER_NAMES`, `buildAffiliateUrl()`
 - **Dependencies:** cheerio, axios, supabase
-- **Last modified:** 2026-03-06
+- **Last modified:** 2026-04-23 (added Money Metals Exchange via Awin — scaffolding only, product URLs + scraper deferred)
 
 ### src/services/price-alert-checker.js
 - **Purpose:** Check price alerts and send push notifications

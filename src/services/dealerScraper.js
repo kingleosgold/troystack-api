@@ -6,12 +6,22 @@ const AFFILIATE_IDS = {
   apmex: process.env.APMEX_AFFILIATE_ID || '',
   jmbullion: process.env.JMB_AFFILIATE_ID || '',
   sdbullion: process.env.SDB_AFFILIATE_ID || '',
+  mmx: process.env.MMX_AFFILIATE_ID || '',   // Awin merchant ID (88985)
 };
+
+// Awin publisher ID — shared across all Awin merchants (TroyStack = 2844460).
+// Any future Awin affiliate just needs a new *_AFFILIATE_ID + a branch below.
+const AWIN_PUBLISHER_ID = process.env.AWIN_PUBLISHER_ID || '';
 
 // Build affiliate URL - append param only if ID exists
 function buildAffiliateUrl(baseUrl, dealer) {
   const id = AFFILIATE_IDS[dealer];
   if (!id) return baseUrl;
+  // MMX uses Awin's click-tracker redirect pattern, not a query-param append.
+  if (dealer === 'mmx') {
+    if (!AWIN_PUBLISHER_ID) return baseUrl;
+    return `https://www.awin1.com/cread.php?awinmid=${id}&awinaffid=${AWIN_PUBLISHER_ID}&ued=${encodeURIComponent(baseUrl)}`;
+  }
   const separator = baseUrl.includes('?') ? '&' : '?';
   const paramMap = {
     apmex: `custid=${id}`,
@@ -177,16 +187,25 @@ async function scrapeSdbullion(url) {
   return isNaN(price) ? null : price;
 }
 
+// Placeholder — real implementation deferred until MMX product URLs are
+// sourced and a page can be inspected for JSON-LD shape. The dealer scraper
+// cron is currently disabled (src/index.js), so this never executes today.
+async function scrapeMmx(url) {
+  throw new Error('scrapeMmx not implemented — add MMX product URLs + parser in follow-up task');
+}
+
 const SCRAPERS = {
   apmex: scrapeApmex,
   jmbullion: scrapeJmbullion,
   sdbullion: scrapeSdbullion,
+  mmx: scrapeMmx,
 };
 
 const DEALER_NAMES = {
   apmex: 'APMEX',
   jmbullion: 'JM Bullion',
   sdbullion: 'SD Bullion',
+  mmx: 'Money Metals Exchange',
 };
 
 // Main scrape function — returns array of rows ready for Supabase insert
@@ -238,4 +257,4 @@ async function scrapeAllDealers(spotPrices) {
   return results;
 }
 
-module.exports = { scrapeAllDealers, PRODUCTS, DEALER_NAMES };
+module.exports = { scrapeAllDealers, PRODUCTS, DEALER_NAMES, buildAffiliateUrl };
