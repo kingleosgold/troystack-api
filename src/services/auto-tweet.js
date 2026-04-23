@@ -15,6 +15,7 @@ const { TwitterApi } = require('twitter-api-v2');
 const supabase = require('../lib/supabase');
 
 const DAILY_TWEET_CAP = 15;
+const MAX_ATTEMPTS = 5;
 
 let client = null;
 function getClient() {
@@ -108,12 +109,15 @@ async function processTweetQueue() {
       return { posted: false, reason: 'daily_cap', count, cap: DAILY_TWEET_CAP };
     }
 
-    // Fetch one ready tweet (urgent first, then by scheduled_for)
+    // Fetch one ready tweet (urgent first, then by scheduled_for). Skip rows
+    // that have already exceeded MAX_ATTEMPTS — those stay in the table for
+    // forensic review but are no longer retried.
     const { data: pending, error: fetchErr } = await supabase
       .from('tweet_queue')
       .select('*')
       .eq('posted', false)
       .lte('scheduled_for', new Date().toISOString())
+      .or(`attempt_count.is.null,attempt_count.lte.${MAX_ATTEMPTS}`)
       .order('urgent', { ascending: false })
       .order('scheduled_for', { ascending: true })
       .limit(1)
@@ -122,6 +126,17 @@ async function processTweetQueue() {
     if (fetchErr || !pending) {
       return { posted: false, reason: 'queue_empty' };
     }
+
+    // Record the attempt BEFORE firing at X so a thrown error / crash still
+    // leaves evidence that we tried.
+    const nextAttempt = (pending.attempt_count || 0) + 1;
+    await supabase
+      .from('tweet_queue')
+      .update({
+        attempt_count: nextAttempt,
+        last_attempt_at: new Date().toISOString(),
+      })
+      .eq('id', pending.id);
 
     // Sanitize tweet text
     const { sanitizeTweetText } = require('./stack-signal-processor');
@@ -135,19 +150,46 @@ async function processTweetQueue() {
     }
     const finalText = url ? `${tweetText}\n\n${url}` : tweetText;
 
-    // Post
-    const result = await twitter.v2.tweet(finalText);
+    // Post — wrap separately so a failure writes error_message to the row
+    // without killing the cron tick.
+    let result;
+    try {
+      result = await twitter.v2.tweet(finalText);
+    } catch (postErr) {
+      const errMsg = String(postErr && postErr.message ? postErr.message : postErr).slice(0, 500);
+      await supabase
+        .from('tweet_queue')
+        .update({ error_message: errMsg })
+        .eq('id', pending.id);
+      if (nextAttempt >= MAX_ATTEMPTS) {
+        console.error(`[Tweet Queue] Row ${pending.id} failed on attempt ${nextAttempt}/${MAX_ATTEMPTS} — no further retries. Last error: ${errMsg}`);
+      } else {
+        console.error(`[Tweet Queue] Post failed (attempt ${nextAttempt}/${MAX_ATTEMPTS}): ${errMsg}`);
+      }
+      return { posted: false, reason: 'post_error', error: errMsg, attempt: nextAttempt };
+    }
+
     const tweetId = result?.data?.id;
 
     if (!tweetId) {
-      console.log('[Tweet Queue] Tweet posted but no ID returned');
-      return { posted: false, reason: 'no_tweet_id' };
+      const errMsg = 'Tweet posted but no ID returned';
+      await supabase
+        .from('tweet_queue')
+        .update({ error_message: errMsg })
+        .eq('id', pending.id);
+      console.log(`[Tweet Queue] ${errMsg} (attempt ${nextAttempt}/${MAX_ATTEMPTS})`);
+      return { posted: false, reason: 'no_tweet_id', attempt: nextAttempt };
     }
 
-    // Mark as posted
+    // Mark as posted — clear any prior error_message from earlier retry.
     await supabase
       .from('tweet_queue')
-      .update({ posted: true, posted_at: new Date().toISOString(), tweet_id: tweetId })
+      .update({
+        posted: true,
+        posted_at: new Date().toISOString(),
+        tweet_id: tweetId,
+        error_message: null,
+      })
       .eq('id', pending.id);
 
     // Increment daily cap
@@ -156,9 +198,9 @@ async function processTweetQueue() {
       .upsert({ key: capKey, value: String(count + 1) }, { onConflict: 'key' });
 
     const scheduledAge = Math.round((Date.now() - new Date(pending.scheduled_for).getTime()) / 60000);
-    console.log(`[Tweet Queue] Posted: "${tweetText.substring(0, 80)}..." [urgent: ${pending.urgent}, scheduled ${scheduledAge}m ago, daily: ${count + 1}/${DAILY_TWEET_CAP}]`);
+    console.log(`[Tweet Queue] Posted: "${tweetText.substring(0, 80)}..." [urgent: ${pending.urgent}, scheduled ${scheduledAge}m ago, daily: ${count + 1}/${DAILY_TWEET_CAP}, attempt: ${nextAttempt}]`);
 
-    return { posted: true, tweet_id: tweetId, urgent: pending.urgent };
+    return { posted: true, tweet_id: tweetId, urgent: pending.urgent, attempt: nextAttempt };
   } catch (err) {
     console.error('[Tweet Queue] Process error:', err.message);
     return { posted: false, reason: 'error', error: err.message };

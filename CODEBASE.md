@@ -372,6 +372,7 @@ Root response `GET /` now includes top-level `mcp`, `openapi`, `llms`, `sitemap`
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | /v1/admin/health | Public | Overall status + summary counts (green/yellow/red/unknown). No `checks` array. |
+| GET | /v1/admin/health?verbose=true | `X-Admin-Auth-Key` | Same summary endpoint; when `verbose=true` (or `1`) is set AND the admin header matches, returns the full `checks` array. Unauthenticated verbose requests fail-closed 401. |
 | GET | /v1/admin/health/detailed | `X-Admin-Auth-Key` | Same envelope plus full `checks` array with per-check status, details, metric, duration. |
 | GET | /v1/admin/health/:checkId | `X-Admin-Auth-Key` | Runs a single check by id and returns its result object. |
 | POST | /v1/admin/finance/run-now | `X-Admin-Auth-Key` | Manually triggers `runAllCostSources()`; returns full orchestrator response (summary + per-source results). Upserts rows into `cost_snapshots` on today's ET date. |
@@ -601,6 +602,9 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `tweet_text` (text), `article_url` (text), `signal_score` (int), `urgent` (boolean)
 - `scheduled_for` (timestamptz — when to post), `posted` (boolean, default false)
 - `posted_at` (timestamptz), `tweet_id` (text — Twitter response ID)
+- `error_message` (text — last X API failure, truncated to 500 chars; cleared on successful post)
+- `last_attempt_at` (timestamptz — set before each X call, so a crash still leaves evidence)
+- `attempt_count` (int, default 0 — incremented per cron tick; rows exceeding `MAX_ATTEMPTS=5` in auto-tweet.js are skipped forever so one bad row can't block the queue)
 - `created_at` (timestamptz)
 - Indexes: `(posted, scheduled_for) WHERE posted = false`, `(urgent, posted) WHERE urgent = true AND posted = false`
 - Used by: auto-tweet.js (enqueueTweet + processTweetQueue), stack-signal-processor.js (pipeline enqueues after save)

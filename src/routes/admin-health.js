@@ -43,10 +43,28 @@ function envelope(results, totalDurationMs) {
   };
 }
 
-router.get('/health', async (_req, res) => {
+router.get('/health', async (req, res) => {
+  // ?verbose=true (or 1) returns the full check array alongside the summary —
+  // same shape as /health/detailed. Admin auth is required in that mode so
+  // check details (error strings, internal metrics) stay gated.
+  // Without verbose, the endpoint remains public and summary-only, preserving
+  // the contract that other systems depend on.
+  const wantVerbose = req.query.verbose === 'true' || req.query.verbose === '1';
+  if (wantVerbose) {
+    const expected = process.env.ADMIN_AUTH_KEY;
+    if (!expected) {
+      console.error('[AdminHealth] ADMIN_AUTH_KEY not set — rejecting verbose /health (fail-closed)');
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    if (req.header('X-Admin-Auth-Key') !== expected) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+  }
+
   try {
     const { checks, totalDurationMs } = await runAllChecks();
-    res.json(envelope(checks, totalDurationMs));
+    const env = envelope(checks, totalDurationMs);
+    res.json(wantVerbose ? { ...env, checks } : env);
   } catch (err) {
     console.error('[AdminHealth] /health failed:', err.message);
     res.status(500).json({ error: 'health check failed' });
