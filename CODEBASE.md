@@ -1035,6 +1035,9 @@ Every provider call returns `costCents`. Routes log it today (`console.log`); fu
 ### VOICE-2 plan
 When xAI publishes TTS/STT (or we swap to any other vendor), the change is: update the URL/request/response in `grok.js` + `grok-stt.js`, set `XAI_*_ENDPOINT_VERIFIED=1`, flip env vars. No route changes.
 
+### Known behaviors
+- The `/v1/troy/speak` endpoint buffers audio fully before sending, adding ~1-3s latency vs pure streaming, but ensures `Content-Length` is present for mobile player compatibility (react-native-track-player requires it). If future mobile players support chunked playback, this can be switched back to streaming by piping `ttsResult.audioStream` directly to `res`.
+
 ---
 
 ## Services Reference

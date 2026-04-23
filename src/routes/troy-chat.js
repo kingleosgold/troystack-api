@@ -1038,7 +1038,26 @@ router.post('/speak', async (req, res) => {
       return;
     }
 
-    console.log('🔊 [TTS] Provider:', ttsResult.provider, 'model:', ttsResult.model, 'chars:', ttsResult.charCount, 'costCents:', ttsResult.costCents.toFixed(4));
+    // Buffer the full MP3 before sending so we can set Content-Length.
+    // react-native-track-player (and some other mobile players) refuses to
+    // start playback on chunked responses without a length. Trade-off:
+    // ~1-3s added latency vs. pure streaming. See CODEBASE.md §14.
+    let audioBuffer;
+    try {
+      const chunks = [];
+      for await (const chunk of ttsResult.audioStream) {
+        chunks.push(chunk);
+      }
+      audioBuffer = Buffer.concat(chunks);
+    } catch (streamErr) {
+      console.log('🔊 [TTS] Stream buffering failed:', streamErr.message);
+      if (!res.headersSent) {
+        return res.status(500).json({ error: 'TTS generation failed' });
+      }
+      return;
+    }
+
+    console.log('🔊 [TTS] Provider:', ttsResult.provider, 'model:', ttsResult.model, 'chars:', ttsResult.charCount, 'costCents:', ttsResult.costCents.toFixed(4), 'bytes:', audioBuffer.length);
 
     // Increment voice usage counter
     await supabase.from('app_state').upsert({
@@ -1046,12 +1065,11 @@ router.post('/speak', async (req, res) => {
       value: String(currentUsage + 1),
     }, { onConflict: 'key' });
 
-    res.set({
-      'Content-Type': ttsResult.mimeType,
-      'Transfer-Encoding': 'chunked',
-    });
-
-    ttsResult.audioStream.pipe(res);
+    res.removeHeader('Transfer-Encoding');
+    res.setHeader('Content-Type', ttsResult.mimeType || 'audio/mpeg');
+    res.setHeader('Content-Length', audioBuffer.length);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.end(audioBuffer);
   } catch (error) {
     console.log('🔊 [TTS] Error:', error.message, error.stack);
     if (!res.headersSent) {
