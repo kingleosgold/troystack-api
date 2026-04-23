@@ -951,14 +951,19 @@ function sanitizeTTSText(text) {
 }
 
 // ============================================
-// TTS — POST /v1/troy/speak
-// Proxies text to ElevenLabs, streams audio/mpeg back
+// TTS — /v1/troy/speak
+// Proxies text to the configured TTS provider, returns audio/mpeg with
+// Content-Length (see CODEBASE.md §14 for why buffered, not chunked).
+//
+// Two variants share one handler:
+//   POST /v1/troy/speak         { userId, text }         — web widget, legacy
+//   GET  /v1/troy/speak?userId=…&text=…                  — mobile expo-av
+//                                                          (Audio.Sound GETs)
+// Everything after parameter extraction (tier gate, quota, sanitize, provider
+// call, buffered delivery, logging, error paths) is identical for both.
 // ============================================
-router.post('/speak', async (req, res) => {
-  console.log('🔊 [TTS] Endpoint hit');
+async function handleSpeak(req, res, { text, userId }) {
   try {
-    console.log('🔊 [TTS] Body:', JSON.stringify(req.body)?.substring(0, 200));
-    const { userId, text } = req.body || {};
     console.log('🔊 [TTS] userId:', userId);
 
     if (!userId || !isUUID(userId)) {
@@ -1076,6 +1081,20 @@ router.post('/speak', async (req, res) => {
       res.status(500).json({ error: 'TTS generation failed' });
     }
   }
+}
+
+router.post('/speak', async (req, res) => {
+  console.log('🔊 [TTS] Endpoint hit (POST)');
+  console.log('🔊 [TTS] Body:', JSON.stringify(req.body)?.substring(0, 200));
+  const { userId, text } = req.body || {};
+  return handleSpeak(req, res, { text, userId });
+});
+
+router.get('/speak', async (req, res) => {
+  console.log('🔊 [TTS] Endpoint hit (GET)');
+  const { userId, text } = req.query || {};
+  console.log('🔊 [TTS] Query text length:', typeof text === 'string' ? text.length : 'n/a');
+  return handleSpeak(req, res, { text, userId });
 });
 
 // ============================================
