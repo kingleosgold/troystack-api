@@ -5,6 +5,7 @@ const multer = require('multer');
 const supabase = require('../lib/supabase');
 const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
 const { getTopIntelligence } = require('../services/intelligence-scraper');
+const { getTTSProvider, getSTTProvider } = require('../services/voice-providers');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -1008,45 +1009,36 @@ router.post('/speak', async (req, res) => {
       return res.status(429).json({ error: 'Voice limit reached', message: upgradeMsg, limit: dailyLimit, used: currentUsage });
     }
 
-    const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-    const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
+    const cleanText = sanitizeTTSText(text);
 
-    if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
-      console.log('🔊 [TTS] Rejected: missing env vars, key:', !!ELEVENLABS_API_KEY, 'voice:', !!ELEVENLABS_VOICE_ID);
+    let ttsProvider;
+    try {
+      ttsProvider = getTTSProvider();
+    } catch (err) {
+      console.log('🔊 [TTS] Provider selection failed:', err.message);
       return res.status(503).json({ error: 'TTS service not configured' });
     }
 
-    const cleanText = sanitizeTTSText(text);
-    console.log('🔊 [TTS] Calling ElevenLabs, voice:', ELEVENLABS_VOICE_ID, 'text length:', cleanText.length);
+    console.log('🔊 [TTS] Calling provider, text length:', cleanText.length);
 
-    const ttsResponse = await axios({
-      method: 'POST',
-      url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
-      headers: {
-        'xi-api-key': ELEVENLABS_API_KEY,
-        'Content-Type': 'application/json',
-        'Accept': 'audio/mpeg',
-      },
-      data: {
-        text: cleanText,
-        model_id: 'eleven_turbo_v2_5',
-      },
-      responseType: 'stream',
-      validateStatus: () => true,
-    });
-
-    console.log('🔊 [TTS] ElevenLabs status:', ttsResponse.status);
-
-    if (ttsResponse.status !== 200) {
-      // Collect error body from stream
-      const chunks = [];
-      for await (const chunk of ttsResponse.data) {
-        chunks.push(chunk);
+    let ttsResult;
+    try {
+      ttsResult = await ttsProvider.tts({ text: cleanText });
+    } catch (err) {
+      console.log('🔊 [TTS] Provider error:', err.status || '-', err.message);
+      if (err.status === 503 || /not configured/i.test(err.message)) {
+        return res.status(503).json({ error: 'TTS service not configured' });
       }
-      const errorBody = Buffer.concat(chunks).toString('utf-8');
-      console.log('🔊 [TTS] Error:', errorBody);
-      return res.status(ttsResponse.status).json({ error: 'ElevenLabs API error', details: errorBody });
+      if (err.status && err.status !== 200) {
+        return res.status(err.status).json({ error: 'TTS provider error', details: err.body });
+      }
+      if (!res.headersSent) {
+        return res.status(500).json({ error: 'TTS generation failed' });
+      }
+      return;
     }
+
+    console.log('🔊 [TTS] Provider:', ttsResult.provider, 'model:', ttsResult.model, 'chars:', ttsResult.charCount, 'costCents:', ttsResult.costCents.toFixed(4));
 
     // Increment voice usage counter
     await supabase.from('app_state').upsert({
@@ -1055,11 +1047,11 @@ router.post('/speak', async (req, res) => {
     }, { onConflict: 'key' });
 
     res.set({
-      'Content-Type': 'audio/mpeg',
+      'Content-Type': ttsResult.mimeType,
       'Transfer-Encoding': 'chunked',
     });
 
-    ttsResponse.data.pipe(res);
+    ttsResult.audioStream.pipe(res);
   } catch (error) {
     console.log('🔊 [TTS] Error:', error.message, error.stack);
     if (!res.headersSent) {
@@ -1115,29 +1107,21 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
       return res.status(429).json({ error: 'Voice limit reached', message: upgradeMsg, limit: dailyLimit, used: currentUsage });
     }
 
-    // Send to Whisper
-    const FormData = require('form-data');
-    const formData = new FormData();
-    formData.append('file', req.file.buffer, {
+    let sttProvider;
+    try {
+      sttProvider = getSTTProvider();
+    } catch (err) {
+      console.error('🎤 [STT] Provider selection failed:', err.message);
+      return res.status(503).json({ error: 'STT service not configured' });
+    }
+
+    const sttResult = await sttProvider.stt({
+      audioBuffer: req.file.buffer,
+      mimeType: req.file.mimetype,
       filename: 'audio.m4a',
-      contentType: req.file.mimetype || 'audio/m4a',
     });
-    formData.append('model', 'whisper-1');
-    formData.append('language', 'en');
 
-    const whisperResponse = await axios.post(
-      'https://api.openai.com/v1/audio/transcriptions',
-      formData,
-      {
-        headers: {
-          ...formData.getHeaders(),
-          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        },
-        timeout: 30000,
-      }
-    );
-
-    console.log('🎤 [STT] Transcription:', whisperResponse.data.text);
+    console.log('🎤 [STT] Provider:', sttResult.provider, 'model:', sttResult.model, 'text:', sttResult.text);
 
     // Increment voice usage counter
     await supabase.from('app_state').upsert({
@@ -1145,7 +1129,7 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
       value: String(currentUsage + 1),
     }, { onConflict: 'key' });
 
-    res.json({ text: whisperResponse.data.text });
+    res.json({ text: sttResult.text });
   } catch (error) {
     console.error('🎤 [STT] Error:', error.message);
     res.status(500).json({ error: 'Transcription failed' });

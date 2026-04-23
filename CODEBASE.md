@@ -704,14 +704,14 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
    - Convert ranges/ratios, plus/minus signs
    - Remove parenthetical percentages, URLs, bullets, special chars
    - Collapse whitespace
-5. POST to ElevenLabs `/v1/text-to-speech/{voiceId}` with model `eleven_turbo_v2_5`
-6. Stream audio/mpeg response back to client
+5. Call `getTTSProvider().tts({ text: cleanText })` — provider chosen by `VOICE_PROVIDER` env var, default `elevenlabs` (ElevenLabs `/v1/text-to-speech/{voiceId}`, model `eleven_turbo_v2_5`). See §14.
+6. Stream the provider's `audioStream` (audio/mpeg) back to client
 7. Increment voice usage counter
 
 ### STT — POST /v1/troy/transcribe
 1. Validate userId (UUID), check audio file exists (multer, 10MB limit)
 2. Check subscription tier + daily voice cap (same shared counter)
-3. POST multipart to OpenAI `/v1/audio/transcriptions` (model: whisper-1, language: en)
+3. Call `getSTTProvider().stt({ audioBuffer, mimeType, filename })` — provider chosen by `STT_PROVIDER` env var, default `openai` (Whisper-1, language=en). See §14.
 4. Return `{ text: "transcribed text" }`
 5. Increment voice usage counter
 
@@ -985,6 +985,51 @@ The `cost_snapshots` and `revenue_snapshots` tables must exist before the cron c
 - Vercel + Railway response parsing is defensive — both vendors have shifting schemas; confirm field names against live output in the first cron fire.
 - ElevenLabs base pricing is hard-coded per tier; overages aren't captured (API doesn't expose them cleanly).
 - `apple_fees` is a placeholder until Phase 2's `revenue_snapshots` is populated.
+
+---
+
+## 14. Voice Provider Abstraction
+
+Pluggable TTS/STT factory so we can swap vendors (e.g. ElevenLabs → Grok) by flipping an env var, with no route-code changes. Same pattern will be extracted to `@mts/voice-kit` for Jewel/Penny/Ace/Sage/Hank.
+
+### Directory layout
+```
+src/services/voice-providers/
+  index.js              — factory: getTTSProvider(), getSTTProvider()
+  elevenlabs.js         — TTS adapter (current default; eleven_turbo_v2_5)
+  grok.js               — TTS adapter (scaffold — xAI has no public TTS as of 2026-04-22)
+  openai-whisper.js     — STT adapter (current default; whisper-1, language=en)
+  grok-stt.js           — STT adapter (scaffold — xAI has no public STT as of 2026-04-22)
+```
+
+### Env vars
+- `VOICE_PROVIDER` — `'elevenlabs'` (default) | `'grok'`. Selects TTS adapter.
+- `STT_PROVIDER` — `'openai'` (default) | `'grok'`. Selects STT adapter.
+- `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID` — used when `VOICE_PROVIDER=elevenlabs`.
+- `OPENAI_API_KEY` — used when `STT_PROVIDER=openai`.
+- `XAI_API_KEY` — used when either provider is set to `grok`.
+- `XAI_TTS_ENDPOINT_VERIFIED` / `XAI_STT_ENDPOINT_VERIFIED` — guard flags. Grok adapters throw a clear error until set to `1`, because xAI's TTS/STT endpoints are not yet public. VOICE-2 sets these after confirming the live endpoint shape.
+
+### Canonical TTS interface
+`async tts({ text, voiceId, options }) → { audioStream, mimeType, provider, model, charCount, costCents }`
+
+### Canonical STT interface
+`async stt({ audioBuffer, mimeType, filename, options }) → { text, provider, model, durationSec, costCents }`
+
+### Sanitization ordering
+Text sanitization (`sanitizeTTSText` in `src/routes/troy-chat.js`) runs in the route **before** `provider.tts()` is called. Adapters receive already-cleaned text and must not re-sanitize. This keeps sanitization policy centralized and provider-agnostic.
+
+### Cost tracking hook point
+Every provider call returns `costCents`. Routes log it today (`console.log`); future FIN-3 will wire this into the `api_usage_log` table so per-call spend is tracked alongside the nightly vendor snapshots in §13.
+
+### Adding a new provider
+1. Drop `src/services/voice-providers/{name}.js` (or `{name}-stt.js`) exporting `tts` / `stt` matching the canonical interface.
+2. Register its loader in the `KNOWN_TTS` / `KNOWN_STT` map in `index.js`.
+3. Add any new env vars to `.env.example`.
+4. Flip `VOICE_PROVIDER` / `STT_PROVIDER` — no route or consumer changes required.
+
+### VOICE-2 plan
+When xAI publishes TTS/STT (or we swap to any other vendor), the change is: update the URL/request/response in `grok.js` + `grok-stt.js`, set `XAI_*_ENDPOINT_VERIFIED=1`, flip env vars. No route changes.
 
 ---
 
