@@ -8,13 +8,12 @@
 //   Response: audio/mpeg stream (MP3)
 //   Voices: eve, ara, rex, sal, leo
 //
-// Notes from docs that DIFFER from the VOICE-1 guess:
-//   - Field names are `text` + `voice_id` (not `input` + `voice`).
-//   - No `model` field is documented in the REST body. WebSocket realtime API
-//     has its own shape at wss://api.x.ai/v1/realtime — out of scope here.
-//   - No `format` / `response_format` field documented; MP3 is the default.
-//   - Max 15,000 chars per REST request (per VOICE-2 spec); longer text is
-//     expected to go through the WebSocket streaming API — future work.
+// Streaming contract: responseType: 'stream' is REQUIRED. Without it axios
+// buffers the whole body and tries to decode it — that corrupts binary MP3
+// bytes and the route pipes a dead stream to the client (silent playback).
+// maxBodyLength / maxContentLength are set to Infinity because axios has
+// historically capped buffered responses at 10MB even in stream mode on some
+// code paths; belt + suspenders.
 //
 // Pricing: $4.20 per 1M characters. Rounded up to the nearest cent per call.
 
@@ -39,30 +38,44 @@ async function tts({ text, voiceId, options = {} }) {
 
   const resolvedVoice = voiceId || process.env.XAI_TTS_VOICE_ID || DEFAULT_VOICE;
 
-  const response = await axios({
-    method: 'POST',
-    url: ENDPOINT,
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'Accept': 'audio/mpeg',
-    },
-    data: {
-      text,
-      voice_id: resolvedVoice,
-      language: options.language || 'en',
-    },
-    responseType: 'stream',
-    validateStatus: () => true,
-  });
+  const requestBody = {
+    text,
+    voice_id: resolvedVoice,
+    language: options.language || 'en',
+  };
 
-  if (response.status !== 200) {
-    const chunks = [];
-    for await (const chunk of response.data) chunks.push(chunk);
-    const errorBody = Buffer.concat(chunks).toString('utf-8');
-    const err = new Error(`xAI TTS error ${response.status}: ${errorBody}`);
-    err.status = response.status;
-    err.body = errorBody;
+  let response;
+  try {
+    response = await axios.post(ENDPOINT, requestBody, {
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'Accept': 'audio/mpeg',
+      },
+      responseType: 'stream',
+      timeout: 30000,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+  } catch (err) {
+    // axios throws on non-2xx when validateStatus isn't overridden. For stream
+    // responses the body is on err.response.data; consume it so we surface a
+    // readable error instead of masking it with a generic stack trace.
+    if (err.response) {
+      const status = err.response.status;
+      let body = '';
+      try {
+        const chunks = [];
+        for await (const chunk of err.response.data) chunks.push(chunk);
+        body = Buffer.concat(chunks).toString('utf-8');
+      } catch (_) { /* stream already consumed or not readable */ }
+      console.error(`[Grok TTS] ${status}: ${body.slice(0, 500)}`);
+      const wrapped = new Error(`xAI TTS error ${status}: ${body}`);
+      wrapped.status = status;
+      wrapped.body = body;
+      throw wrapped;
+    }
+    console.error('[Grok TTS] request failed:', err.message);
     throw err;
   }
 
