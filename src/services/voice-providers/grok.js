@@ -4,9 +4,16 @@
 //   POST https://api.x.ai/v1/tts
 //   Authorization: Bearer $XAI_API_KEY
 //   Content-Type: application/json
-//   Body: { text, voice_id, language }
+//   Body: { text, voice_id, language, output_format? }
 //   Response: audio/mpeg stream (MP3)
 //   Voices: eve, ara, rex, sal, leo
+//
+// output_format (undocumented in the public REST docs but confirmed by the
+// openclaw xAI-TTS integration, PR #50544, and xAI's broader snake_case
+// field convention). Omitting it returns xAI's default which is ~1KB/char of
+// audio — roughly 320kbps MP3. Setting codec=mp3, sample_rate=24000,
+// bit_rate=128000 brings a typical 2000-char Troy response from ~2.25 MB to
+// ~350-500 KB, which is what mobile cellular needs.
 //
 // Streaming contract: responseType: 'stream' is REQUIRED. Without it axios
 // buffers the whole body and tries to decode it — that corrupts binary MP3
@@ -42,6 +49,11 @@ async function tts({ text, voiceId, options = {} }) {
     text,
     voice_id: resolvedVoice,
     language: options.language || 'en',
+    output_format: options.outputFormat || {
+      codec: 'mp3',
+      sample_rate: 24000,
+      bit_rate: 128000,
+    },
   };
 
   let response;
