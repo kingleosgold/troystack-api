@@ -29,6 +29,7 @@ const dealerPricesRouter = require('./routes/dealerPrices');
 const junkSilverRouter = require('./routes/junk-silver');
 const apiKeysRouter = require('./routes/api-keys');
 const adminHealthRouter = require('./routes/admin-health');
+const adminEngagementRouter = require('./routes/admin-engagement');
 const { apiKeyAuth } = require('./middleware/api-key-auth');
 const { handleMcp } = require('./routes/mcp');
 
@@ -171,6 +172,8 @@ app.use('/v1', publicLimiter, scanUsageRouter);
 
 // Admin health — summary is public, detailed + single-check require X-Admin-Auth-Key
 app.use('/v1/admin', adminHealthRouter);
+// Admin engagement — always requires X-Admin-Auth-Key (60s in-memory cache)
+app.use('/v1/admin', adminEngagementRouter);
 {
   const { getChecks } = require('./admin/health');
   const checkCount = getChecks().length;

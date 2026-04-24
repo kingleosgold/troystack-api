@@ -377,6 +377,7 @@ Root response `GET /` now includes top-level `mcp`, `openapi`, `llms`, `sitemap`
 | GET | /v1/admin/health/:checkId | `X-Admin-Auth-Key` | Runs a single check by id and returns its result object. |
 | POST | /v1/admin/finance/run-now | `X-Admin-Auth-Key` | Manually triggers `runAllCostSources()`; returns full orchestrator response (summary + per-source results). Upserts rows into `cost_snapshots` on today's ET date. |
 | GET | /v1/admin/finance/costs/latest | `X-Admin-Auth-Key` | Returns the most recent `snapshot_date`'s rows ordered by `amount_usd` desc, plus `total_usd`, `source_count`. 404 if no snapshots exist. |
+| GET | /v1/admin/engagement | `X-Admin-Auth-Key` | Stack engagement analytics: active users, Troy messages, voice plays, Signal reads (today + 7d sparkline), 30d feature-usage matrix, voice-vs-text ratio, top 10 power users. 60s in-memory cache; gapped metrics return `available:false` + `gap_reason` instead of throwing. Lives in `src/routes/admin-engagement.js`. |
 
 Auth model: shared secret via `ADMIN_AUTH_KEY` env var (compared verbatim against `X-Admin-Auth-Key` header). If the env var is unset, protected endpoints fail-closed with 401 and a boot-time warning is logged. See §9 for the full system overview.
 
