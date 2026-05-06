@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const converter = require('number-to-words');
 const multer = require('multer');
+const { PassThrough } = require('node:stream');
 const supabase = require('../lib/supabase');
 const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
 const { getTopIntelligence } = require('../services/intelligence-scraper');
@@ -964,7 +965,12 @@ function sanitizeTTSText(text) {
 // ============================================
 async function handleSpeak(req, res, { text, userId }) {
   try {
-    console.log('🔊 [TTS] userId:', userId);
+    // Opt-in chunked-streaming path. Existing clients (TestFlight 3.0.6 and
+    // earlier) don't pass the flag and continue receiving the buffered
+    // Content-Length response below. The mobile expo-audio migration will be
+    // the first caller to set ?stream=1. See CODEBASE.md §14.
+    const wantStream = req.query?.stream === '1';
+    console.log('🔊 [TTS] userId:', userId, 'wantStream:', wantStream);
 
     if (!userId || !isUUID(userId)) {
       console.log('🔊 [TTS] Rejected: invalid userId');
@@ -1043,38 +1049,95 @@ async function handleSpeak(req, res, { text, userId }) {
       return;
     }
 
-    // Buffer the full MP3 before sending so we can set Content-Length.
-    // react-native-track-player (and some other mobile players) refuses to
-    // start playback on chunked responses without a length. Trade-off:
-    // ~1-3s added latency vs. pure streaming. See CODEBASE.md §14.
-    let audioBuffer;
-    try {
-      const chunks = [];
-      for await (const chunk of ttsResult.audioStream) {
-        chunks.push(chunk);
+    // Track delivered bytes and abort state so the post-finish bookkeeping
+    // can run in BOTH the buffered and streaming branches.
+    let bytesDelivered = 0;
+    let aborted = false;
+
+    // Voice-usage upsert + final log line both run AFTER the response is
+    // fully delivered, so we don't bill on partial responses or upstream
+    // errors. `res.destroy()` (used in the streaming error path) does NOT
+    // fire 'finish'; the `aborted` flag covers the pre-headers 502 case
+    // where `res.json()` does end the response.
+    res.on('finish', () => {
+      if (aborted) return;
+      console.log('🔊 [TTS] Provider:', ttsResult.provider, 'model:', ttsResult.model, 'chars:', ttsResult.charCount, 'costCents:', ttsResult.costCents.toFixed(4), 'bytes:', bytesDelivered);
+      supabase.from('app_state').upsert({
+        key: capKey,
+        value: String(currentUsage + 1),
+      }, { onConflict: 'key' }).then(({ error: usageErr }) => {
+        if (usageErr) console.log('🔊 [TTS] Voice usage upsert error:', usageErr.message);
+      }).catch((err) => {
+        console.log('🔊 [TTS] Voice usage upsert threw:', err.message);
+      });
+    });
+
+    if (!wantStream) {
+      // Buffered path — preserved for backward compatibility with
+      // TestFlight 3.0.6 and earlier (react-native-track-player needed
+      // Content-Length). See CODEBASE.md §14.
+      let audioBuffer;
+      try {
+        const chunks = [];
+        for await (const chunk of ttsResult.audioStream) {
+          chunks.push(chunk);
+        }
+        audioBuffer = Buffer.concat(chunks);
+      } catch (streamErr) {
+        aborted = true;
+        console.log('🔊 [TTS] Stream buffering failed:', streamErr.message);
+        if (!res.headersSent) {
+          return res.status(500).json({ error: 'TTS generation failed' });
+        }
+        return;
       }
-      audioBuffer = Buffer.concat(chunks);
-    } catch (streamErr) {
-      console.log('🔊 [TTS] Stream buffering failed:', streamErr.message);
-      if (!res.headersSent) {
-        return res.status(500).json({ error: 'TTS generation failed' });
-      }
-      return;
+
+      bytesDelivered = audioBuffer.length;
+
+      res.removeHeader('Transfer-Encoding');
+      res.setHeader('Content-Type', ttsResult.mimeType || 'audio/mpeg');
+      res.setHeader('Content-Length', audioBuffer.length);
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.end(audioBuffer);
+    } else {
+      // Streaming path — pipe the upstream Readable directly. Drop
+      // Content-Length (Node emits Transfer-Encoding: chunked when length
+      // is absent) and Accept-Ranges (range requests are meaningless on a
+      // single-pass stream).
+      res.setHeader('Content-Type', ttsResult.mimeType || 'audio/mpeg');
+      res.setHeader('Cache-Control', 'no-store');
+      res.removeHeader('Content-Length');
+
+      // Byte counter for the post-finish log line. PassThrough is a no-op
+      // duplex; pipe order is upstream → counter → res.
+      const counter = new PassThrough();
+      counter.on('data', (chunk) => { bytesDelivered += chunk.length; });
+
+      // Mid-stream upstream error. If headers have already flushed we MUST
+      // use res.destroy() (not res.end()) so 'finish' does not fire and we
+      // do not bill the user for a partial response.
+      ttsResult.audioStream.on('error', (err) => {
+        aborted = true;
+        console.log('🔊 [TTS] Upstream stream error:', err.message);
+        if (!res.headersSent) {
+          res.status(502).json({ error: 'TTS provider stream error' });
+        } else {
+          res.destroy(err);
+        }
+      });
+
+      // Client tore down the connection mid-stream. Stop pulling bytes
+      // from upstream so we don't keep paying the provider for output the
+      // user will never hear, and skip the usage upsert (aborted=true).
+      req.on('close', () => {
+        if (!res.writableEnded) {
+          aborted = true;
+          try { ttsResult.audioStream.destroy(); } catch (_) { /* ignore */ }
+        }
+      });
+
+      ttsResult.audioStream.pipe(counter).pipe(res);
     }
-
-    console.log('🔊 [TTS] Provider:', ttsResult.provider, 'model:', ttsResult.model, 'chars:', ttsResult.charCount, 'costCents:', ttsResult.costCents.toFixed(4), 'bytes:', audioBuffer.length);
-
-    // Increment voice usage counter
-    await supabase.from('app_state').upsert({
-      key: capKey,
-      value: String(currentUsage + 1),
-    }, { onConflict: 'key' });
-
-    res.removeHeader('Transfer-Encoding');
-    res.setHeader('Content-Type', ttsResult.mimeType || 'audio/mpeg');
-    res.setHeader('Content-Length', audioBuffer.length);
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.end(audioBuffer);
   } catch (error) {
     console.log('🔊 [TTS] Error:', error.message, error.stack);
     if (!res.headersSent) {
