@@ -1126,10 +1126,12 @@ async function handleSpeak(req, res, { text, userId }) {
         }
       });
 
-      // Client tore down the connection mid-stream. Stop pulling bytes
-      // from upstream so we don't keep paying the provider for output the
-      // user will never hear, and skip the usage upsert (aborted=true).
-      req.on('close', () => {
+      // Client tore down the connection (TCP socket close on the response).
+      // res.on('close') fires when the underlying connection is destroyed,
+      // which is the actual mid-stream-disconnect signal. req.on('close') is
+      // unreliable for this on Node 20+ because it fires on request-body end
+      // for empty-body GETs, regardless of whether the client is still listening.
+      res.on('close', () => {
         if (!res.writableEnded) {
           aborted = true;
           try { ttsResult.audioStream.destroy(); } catch (_) { /* ignore */ }
