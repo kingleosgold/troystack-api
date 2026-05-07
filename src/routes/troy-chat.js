@@ -1004,21 +1004,41 @@ async function handleSpeak(req, res, { text, userId }) {
     }
     console.log('🔊 [TTS] Passed tier gate');
 
-    // Voice usage cap (shared with /transcribe)
+    // Voice usage cap (shared counter with /transcribe via app_state).
+    // Atomic increment-if-under-limit: a single Supabase RPC either bumps
+    // the counter (and returns the new value) or refuses (returns null).
+    // Replaces the previous read/check/write pattern that allowed
+    // concurrent ?stream=1 requests to all pass a stale cap check before
+    // any of them wrote the increment — see migration 003 + Codex finding
+    // on PR #1.
+    //
+    // Counter semantics now: increment happens BEFORE the provider call,
+    // so requests that should be rejected never bill a provider. The
+    // trade-off is that aborts after increment over-count (a slot is
+    // consumed without successful audio delivery). Refunding aborted
+    // slots is a separate decrement-on-abort feature; over-count is the
+    // safer side vs. concurrent bypass.
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     const tier = profile.subscription_tier;
     const dailyLimit = (tier === 'gold' || tier === 'lifetime') ? 20 : 1;
     const capKey = `voice_usage_${userId}_${today}`;
-    const { data: usage } = await supabase.from('app_state').select('value').eq('key', capKey).single();
-    const currentUsage = usage ? parseInt(usage.value) : 0;
 
-    if (currentUsage >= dailyLimit) {
+    const { data: newUsage, error: capErr } = await supabase.rpc(
+      'increment_voice_cap_if_under',
+      { p_key: capKey, p_limit: dailyLimit }
+    );
+    if (capErr) {
+      console.log('🔊 [TTS] Cap RPC error:', capErr.message);
+      return res.status(500).json({ error: 'Cap check failed' });
+    }
+    if (newUsage === null || newUsage === undefined) {
       const upgradeMsg = tier === 'free'
         ? 'Free users get 1 voice exchange per day. Upgrade to Gold for 20.'
         : 'Daily voice limit reached (20/day).';
-      console.log('🔊 [TTS] Voice cap reached:', currentUsage, '/', dailyLimit);
-      return res.status(429).json({ error: 'Voice limit reached', message: upgradeMsg, limit: dailyLimit, used: currentUsage });
+      console.log('🔊 [TTS] Voice cap reached for key:', capKey);
+      return res.status(429).json({ error: 'Voice limit reached', message: upgradeMsg, limit: dailyLimit });
     }
+    console.log('🔊 [TTS] Cap incremented:', newUsage, '/', dailyLimit);
 
     const cleanText = sanitizeTTSText(text);
 
@@ -1054,22 +1074,15 @@ async function handleSpeak(req, res, { text, userId }) {
     let bytesDelivered = 0;
     let aborted = false;
 
-    // Voice-usage upsert + final log line both run AFTER the response is
-    // fully delivered, so we don't bill on partial responses or upstream
-    // errors. `res.destroy()` (used in the streaming error path) does NOT
-    // fire 'finish'; the `aborted` flag covers the pre-headers 502 case
-    // where `res.json()` does end the response.
+    // Final log line runs AFTER the response is fully delivered. The
+    // counter was already incremented atomically before the provider call
+    // (see RPC above), so no usage upsert is needed here. `res.destroy()`
+    // (used in the streaming error path) does NOT fire 'finish'; the
+    // `aborted` flag covers the pre-headers case where `res.json()` ends
+    // the response after a stream error.
     res.on('finish', () => {
       if (aborted) return;
       console.log('🔊 [TTS] Provider:', ttsResult.provider, 'model:', ttsResult.model, 'chars:', ttsResult.charCount, 'costCents:', ttsResult.costCents.toFixed(4), 'bytes:', bytesDelivered);
-      supabase.from('app_state').upsert({
-        key: capKey,
-        value: String(currentUsage + 1),
-      }, { onConflict: 'key' }).then(({ error: usageErr }) => {
-        if (usageErr) console.log('🔊 [TTS] Voice usage upsert error:', usageErr.message);
-      }).catch((err) => {
-        console.log('🔊 [TTS] Voice usage upsert threw:', err.message);
-      });
     });
 
     if (!wantStream) {
