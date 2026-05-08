@@ -17,7 +17,7 @@ const axios = require('axios');
 const MODEL = 'eleven_turbo_v2_5';
 const COST_PER_CHAR_CENTS = 0.005; // $0.05 / 1000 chars
 
-async function tts({ text, voiceId, options = {} }) {
+async function tts({ text, voiceId, signal, options = {} }) {
   const apiKey = process.env.ELEVENLABS_API_KEY;
   const resolvedVoiceId = voiceId || process.env.ELEVENLABS_VOICE_ID;
 
@@ -26,6 +26,9 @@ async function tts({ text, voiceId, options = {} }) {
 
   const charCount = text.length;
 
+  // `signal` is optional — if undefined, axios treats it as "no abort". When
+  // passed (from /v1/troy/speak's AbortController), client disconnect cancels
+  // the in-flight HTTP request to ElevenLabs so we stop billing immediately.
   const response = await axios({
     method: 'POST',
     url: `https://api.elevenlabs.io/v1/text-to-speech/${resolvedVoiceId}`,
@@ -40,6 +43,7 @@ async function tts({ text, voiceId, options = {} }) {
     },
     responseType: 'stream',
     validateStatus: () => true,
+    signal,
   });
 
   if (response.status !== 200) {

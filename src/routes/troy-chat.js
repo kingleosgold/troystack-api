@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const converter = require('number-to-words');
 const multer = require('multer');
+const { PassThrough } = require('node:stream');
 const supabase = require('../lib/supabase');
 const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
 const { getTopIntelligence } = require('../services/intelligence-scraper');
@@ -963,8 +964,51 @@ function sanitizeTTSText(text) {
 // call, buffered delivery, logging, error paths) is identical for both.
 // ============================================
 async function handleSpeak(req, res, { text, userId }) {
+  // Hoisted to function scope so the outer catch (Path F) can roll back if
+  // anything between a successful increment and a successful response
+  // throws unexpectedly. `let`/`const` inside the try block would not be
+  // visible in the catch block. capIncremented flips to true only after the
+  // atomic RPC reports a successful bump.
+  let capIncremented = false;
+  let capKey = null;
+
+  // Idempotency flag for rollbackCapIncrement. The streaming path can fire
+  // rollback from BOTH audioStream.on('error') AND res.on('close') (because
+  // res.destroy() triggers a close event), so without this guard the same
+  // request would decrement twice, granting users a free extra slot.
+  // Defended at the helper level so any future double-call path is covered.
+  let capRolledBack = false;
+
+  // Best-effort cap rollback. Called on every failure path between the
+  // atomic increment and successful response delivery. Fire-and-forget —
+  // if the rollback RPC itself fails, over-counting the cap is the safer
+  // side vs. retry-induced under-count. Defined at function scope so it is
+  // visible in both the try and the outer catch.
+  const rollbackCapIncrement = (key) => {
+    if (!key) return;
+    // Idempotent: subsequent calls within the same request are no-ops.
+    // Streaming-path failures can trigger rollback from both
+    // audioStream.on('error') and res.on('close') for the same request.
+    // The check-and-set is synchronous, so any sibling-handler re-entry
+    // hits the guard before the RPC is dispatched.
+    if (capRolledBack) return;
+    capRolledBack = true;
+    supabase.rpc('decrement_voice_cap', { p_key: key })
+      .then(({ error }) => {
+        if (error) console.log('🔊 [TTS] Cap rollback error:', error.message);
+      })
+      .catch((err) => {
+        console.log('🔊 [TTS] Cap rollback threw:', err.message);
+      });
+  };
+
   try {
-    console.log('🔊 [TTS] userId:', userId);
+    // Opt-in chunked-streaming path. Existing clients (TestFlight 3.0.6 and
+    // earlier) don't pass the flag and continue receiving the buffered
+    // Content-Length response below. The mobile expo-audio migration will be
+    // the first caller to set ?stream=1. See CODEBASE.md §14.
+    const wantStream = req.query?.stream === '1';
+    console.log('🔊 [TTS] userId:', userId, 'wantStream:', wantStream);
 
     if (!userId || !isUUID(userId)) {
       console.log('🔊 [TTS] Rejected: invalid userId');
@@ -998,21 +1042,79 @@ async function handleSpeak(req, res, { text, userId }) {
     }
     console.log('🔊 [TTS] Passed tier gate');
 
-    // Voice usage cap (shared with /transcribe)
+    // Voice usage cap (shared counter with /transcribe via app_state).
+    // Atomic increment-if-under-limit: a single Supabase RPC either bumps
+    // the counter (and returns the new value) or refuses (returns null).
+    // Replaces the previous read/check/write pattern that allowed
+    // concurrent ?stream=1 requests to all pass a stale cap check before
+    // any of them wrote the increment — see migration 003 + Codex finding
+    // on PR #1.
+    //
+    // Counter semantics now: increment happens BEFORE the provider call,
+    // so requests that should be rejected never bill a provider. The
+    // trade-off is that aborts after increment over-count (a slot is
+    // consumed without successful audio delivery). Refunding aborted
+    // slots is a separate decrement-on-abort feature; over-count is the
+    // safer side vs. concurrent bypass.
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     const tier = profile.subscription_tier;
     const dailyLimit = (tier === 'gold' || tier === 'lifetime') ? 20 : 1;
-    const capKey = `voice_usage_${userId}_${today}`;
-    const { data: usage } = await supabase.from('app_state').select('value').eq('key', capKey).single();
-    const currentUsage = usage ? parseInt(usage.value) : 0;
+    capKey = `voice_usage_${userId}_${today}`;
 
-    if (currentUsage >= dailyLimit) {
+    const { data: newUsage, error: capErr } = await supabase.rpc(
+      'increment_voice_cap_if_under',
+      { p_key: capKey, p_limit: dailyLimit }
+    );
+    if (capErr) {
+      console.log('🔊 [TTS] Cap RPC error:', capErr.message);
+      return res.status(500).json({ error: 'Cap check failed' });
+    }
+    if (newUsage === null || newUsage === undefined) {
       const upgradeMsg = tier === 'free'
         ? 'Free users get 1 voice exchange per day. Upgrade to Gold for 20.'
         : 'Daily voice limit reached (20/day).';
-      console.log('🔊 [TTS] Voice cap reached:', currentUsage, '/', dailyLimit);
-      return res.status(429).json({ error: 'Voice limit reached', message: upgradeMsg, limit: dailyLimit, used: currentUsage });
+      console.log('🔊 [TTS] Voice cap reached for key:', capKey);
+      return res.status(429).json({ error: 'Voice limit reached', message: upgradeMsg, limit: dailyLimit });
     }
+    capIncremented = true;
+    console.log('🔊 [TTS] Cap incremented:', newUsage, '/', dailyLimit);
+
+    // Hoisted above the close handler so the handler can flip `aborted`
+    // before the per-branch buffering / piping code references it.
+    let bytesDelivered = 0;
+    let aborted = false;
+
+    // AbortController for the upstream provider request. Aborting this
+    // cancels the in-flight HTTP call to ElevenLabs / Grok so we stop
+    // billing immediately when the client disconnects, instead of paying
+    // for full generation that the user will never hear. Per Codex
+    // finding 8 on PR #1. `controller.abort()` is idempotent — multiple
+    // calls are safe and cheap, so no separate guard flag needed.
+    const ttsAbortController = new AbortController();
+
+    // Register the close handler IMMEDIATELY after the cap increment,
+    // before any async work that could span a disconnect. Provider
+    // generation can take 5-30 seconds (Grok TTS) and the buffered
+    // for-await read adds more time on top — a disconnect during either
+    // of those windows previously fired 'close' before the per-branch
+    // listener attached, leaving the slot consumed without audio
+    // delivery. Per Codex finding on PR #1.
+    //
+    // Universal cleanup here: rollback the cap, flip `aborted`, and
+    // abort the upstream provider HTTP request so we stop paying for
+    // output the user will never receive. Stream-specific cleanup
+    // (audioStream.destroy in the streaming branch) is added as a SECOND
+    // listener once audioStream is in scope below — Node fires 'close'
+    // listeners in registration order, and the capRolledBack idempotency
+    // flag ensures the streaming-branch listener's call to
+    // rollbackCapIncrement no-ops harmlessly.
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        rollbackCapIncrement(capKey);
+        aborted = true;
+        ttsAbortController.abort();
+      }
+    });
 
     const cleanText = sanitizeTTSText(text);
 
@@ -1020,6 +1122,7 @@ async function handleSpeak(req, res, { text, userId }) {
     try {
       ttsProvider = getTTSProvider();
     } catch (err) {
+      rollbackCapIncrement(capKey);
       console.log('🔊 [TTS] Provider selection failed:', err.message);
       return res.status(503).json({ error: 'TTS service not configured' });
     }
@@ -1028,8 +1131,17 @@ async function handleSpeak(req, res, { text, userId }) {
 
     let ttsResult;
     try {
-      ttsResult = await ttsProvider.tts({ text: cleanText });
+      ttsResult = await ttsProvider.tts({ text: cleanText, signal: ttsAbortController.signal });
     } catch (err) {
+      rollbackCapIncrement(capKey);
+      // If the abort fired (client disconnected during generation), the
+      // close handler already flipped `aborted` and called .abort(), and
+      // res is already closed. The axios/fetch AbortError lands here.
+      // Don't try to write a response to a closed connection.
+      if (aborted) {
+        console.log('🔊 [TTS] Provider aborted (client disconnect)');
+        return;
+      }
       console.log('🔊 [TTS] Provider error:', err.status || '-', err.message);
       if (err.status === 503 || /not configured/i.test(err.message)) {
         return res.status(503).json({ error: 'TTS service not configured' });
@@ -1043,39 +1155,114 @@ async function handleSpeak(req, res, { text, userId }) {
       return;
     }
 
-    // Buffer the full MP3 before sending so we can set Content-Length.
-    // react-native-track-player (and some other mobile players) refuses to
-    // start playback on chunked responses without a length. Trade-off:
-    // ~1-3s added latency vs. pure streaming. See CODEBASE.md §14.
-    let audioBuffer;
-    try {
-      const chunks = [];
-      for await (const chunk of ttsResult.audioStream) {
-        chunks.push(chunk);
+    // Final log line runs AFTER the response is fully delivered. The
+    // counter was already incremented atomically before the provider call
+    // (see RPC above), so no usage upsert is needed here. `res.destroy()`
+    // (used in the streaming error path) does NOT fire 'finish'; the
+    // `aborted` flag covers the pre-headers case where `res.json()` ends
+    // the response after a stream error.
+    res.on('finish', () => {
+      if (aborted) return;
+      console.log('🔊 [TTS] Provider:', ttsResult.provider, 'model:', ttsResult.model, 'chars:', ttsResult.charCount, 'costCents:', ttsResult.costCents.toFixed(4), 'bytes:', bytesDelivered);
+    });
+
+    if (!wantStream) {
+      // Buffered path — preserved for backward compatibility with
+      // TestFlight 3.0.6 and earlier (react-native-track-player needed
+      // Content-Length). See CODEBASE.md §14.
+
+      // Race guard: the client may have disconnected while
+      // ttsProvider.tts() was resolving. If so, the upstream provider
+      // already produced output we paid for, but res is closed — skip
+      // the drain (would just consume bytes nobody will receive) and
+      // tear down the upstream Readable so its socket is freed.
+      if (aborted) {
+        try { ttsResult.audioStream.destroy(); } catch (_) { /* ignore */ }
+        return;
       }
-      audioBuffer = Buffer.concat(chunks);
-    } catch (streamErr) {
-      console.log('🔊 [TTS] Stream buffering failed:', streamErr.message);
-      if (!res.headersSent) {
-        return res.status(500).json({ error: 'TTS generation failed' });
+
+      let audioBuffer;
+      try {
+        const chunks = [];
+        for await (const chunk of ttsResult.audioStream) {
+          chunks.push(chunk);
+        }
+        audioBuffer = Buffer.concat(chunks);
+      } catch (streamErr) {
+        rollbackCapIncrement(capKey);
+        aborted = true;
+        console.log('🔊 [TTS] Stream buffering failed:', streamErr.message);
+        if (!res.headersSent) {
+          return res.status(500).json({ error: 'TTS generation failed' });
+        }
+        return;
       }
-      return;
+
+      bytesDelivered = audioBuffer.length;
+
+      res.removeHeader('Transfer-Encoding');
+      res.setHeader('Content-Type', ttsResult.mimeType || 'audio/mpeg');
+      res.setHeader('Content-Length', audioBuffer.length);
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.end(audioBuffer);
+    } else {
+      // Streaming path — pipe the upstream Readable directly. Drop
+      // Content-Length (Node emits Transfer-Encoding: chunked when length
+      // is absent) and Accept-Ranges (range requests are meaningless on a
+      // single-pass stream).
+
+      // Race guard: same as the buffered branch — if the client closed
+      // during ttsProvider.tts(), the upstream Readable still exists but
+      // res is gone. Tear down upstream and bail before piping into a
+      // closed response.
+      if (aborted) {
+        try { ttsResult.audioStream.destroy(); } catch (_) { /* ignore */ }
+        return;
+      }
+
+      res.setHeader('Content-Type', ttsResult.mimeType || 'audio/mpeg');
+      res.setHeader('Cache-Control', 'no-store');
+      res.removeHeader('Content-Length');
+
+      // Byte counter for the post-finish log line. PassThrough is a no-op
+      // duplex; pipe order is upstream → counter → res.
+      const counter = new PassThrough();
+      counter.on('data', (chunk) => { bytesDelivered += chunk.length; });
+
+      // Mid-stream upstream error. If headers have already flushed we MUST
+      // use res.destroy() (not res.end()) so 'finish' does not fire and we
+      // do not bill the user for a partial response.
+      ttsResult.audioStream.on('error', (err) => {
+        rollbackCapIncrement(capKey);
+        aborted = true;
+        console.log('🔊 [TTS] Upstream stream error:', err.message);
+        if (!res.headersSent) {
+          res.status(502).json({ error: 'TTS provider stream error' });
+        } else {
+          res.destroy(err);
+        }
+      });
+
+      // Stream-specific cleanup on close: stop pulling bytes from the
+      // upstream provider when the client disconnects so we don't keep
+      // paying for output the user will never hear. Cap rollback +
+      // `aborted` flag are already handled by the shared close handler
+      // registered immediately after cap increment (above). Multiple
+      // 'close' listeners fire in registration order, so the shared
+      // handler runs first and the idempotent rollbackCapIncrement
+      // no-ops on this second pass.
+      res.on('close', () => {
+        if (!res.writableEnded) {
+          try { ttsResult.audioStream.destroy(); } catch (_) { /* ignore */ }
+        }
+      });
+
+      ttsResult.audioStream.pipe(counter).pipe(res);
     }
-
-    console.log('🔊 [TTS] Provider:', ttsResult.provider, 'model:', ttsResult.model, 'chars:', ttsResult.charCount, 'costCents:', ttsResult.costCents.toFixed(4), 'bytes:', audioBuffer.length);
-
-    // Increment voice usage counter
-    await supabase.from('app_state').upsert({
-      key: capKey,
-      value: String(currentUsage + 1),
-    }, { onConflict: 'key' });
-
-    res.removeHeader('Transfer-Encoding');
-    res.setHeader('Content-Type', ttsResult.mimeType || 'audio/mpeg');
-    res.setHeader('Content-Length', audioBuffer.length);
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.end(audioBuffer);
   } catch (error) {
+    if (capIncremented && capKey) {
+      rollbackCapIncrement(capKey);
+    }
     console.log('🔊 [TTS] Error:', error.message, error.stack);
     if (!res.headersSent) {
       res.status(500).json({ error: 'TTS generation failed' });
