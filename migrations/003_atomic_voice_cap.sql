@@ -7,10 +7,12 @@
 -- SELECT ... FOR UPDATE serializes concurrent calls so they cannot all pass
 -- a stale read of the counter.
 --
--- Note on the value column: app_state.value is stored as text in this repo
--- (existing JS reads via parseInt, writes via String(...)). The function
--- casts text -> int -> text and tolerates NULL / empty-string defensively
--- in case any prior writer left a malformed row.
+-- Note on the value column: app_state.value is a jsonb column storing
+-- JSON-string scalars (e.g. "21", not the integer 21). The existing JS
+-- reads via JSON.parse and writes via JSON.stringify, so this function
+-- preserves that format using `value #>> '{}'` to extract the scalar as
+-- text and `to_jsonb(text)` to write it back. Tolerates NULL / empty-string
+-- defensively in case any prior writer left a malformed row.
 
 create or replace function increment_voice_cap_if_under(
   p_key text,
@@ -21,16 +23,19 @@ as $$
 declare
   v_old integer;
   v_new integer;
+  v_text text;
 begin
   -- Ensure a row exists so SELECT ... FOR UPDATE has something to lock.
   -- If the row already exists, this is a no-op (DO NOTHING).
   insert into app_state (key, value)
-    values (p_key, '0')
+    values (p_key, to_jsonb('0'::text))
     on conflict (key) do nothing;
 
   -- Acquire row-level lock and read the current value. Concurrent callers
-  -- queue here until each predecessor's transaction commits.
-  select coalesce(nullif(value, '')::integer, 0)
+  -- queue here until each predecessor's transaction commits. The
+  -- `value #>> '{}'` operator extracts a jsonb scalar as text (without
+  -- the JSON quotation marks).
+  select coalesce(nullif(value #>> '{}', '')::integer, 0)
     into v_old
     from app_state
     where key = p_key
@@ -41,9 +46,10 @@ begin
   end if;
 
   v_new := v_old + 1;
+  v_text := v_new::text;
 
   update app_state
-    set value = v_new::text
+    set value = to_jsonb(v_text), updated_at = now()
     where key = p_key;
 
   return v_new;
