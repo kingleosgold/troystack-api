@@ -972,6 +972,13 @@ async function handleSpeak(req, res, { text, userId }) {
   let capIncremented = false;
   let capKey = null;
 
+  // Idempotency flag for rollbackCapIncrement. The streaming path can fire
+  // rollback from BOTH audioStream.on('error') AND res.on('close') (because
+  // res.destroy() triggers a close event), so without this guard the same
+  // request would decrement twice, granting users a free extra slot.
+  // Defended at the helper level so any future double-call path is covered.
+  let capRolledBack = false;
+
   // Best-effort cap rollback. Called on every failure path between the
   // atomic increment and successful response delivery. Fire-and-forget —
   // if the rollback RPC itself fails, over-counting the cap is the safer
@@ -979,6 +986,13 @@ async function handleSpeak(req, res, { text, userId }) {
   // visible in both the try and the outer catch.
   const rollbackCapIncrement = (key) => {
     if (!key) return;
+    // Idempotent: subsequent calls within the same request are no-ops.
+    // Streaming-path failures can trigger rollback from both
+    // audioStream.on('error') and res.on('close') for the same request.
+    // The check-and-set is synchronous, so any sibling-handler re-entry
+    // hits the guard before the RPC is dispatched.
+    if (capRolledBack) return;
+    capRolledBack = true;
     supabase.rpc('decrement_voice_cap', { p_key: key })
       .then(({ error }) => {
         if (error) console.log('🔊 [TTS] Cap rollback error:', error.message);
