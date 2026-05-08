@@ -1084,6 +1084,14 @@ async function handleSpeak(req, res, { text, userId }) {
     let bytesDelivered = 0;
     let aborted = false;
 
+    // AbortController for the upstream provider request. Aborting this
+    // cancels the in-flight HTTP call to ElevenLabs / Grok so we stop
+    // billing immediately when the client disconnects, instead of paying
+    // for full generation that the user will never hear. Per Codex
+    // finding 8 on PR #1. `controller.abort()` is idempotent — multiple
+    // calls are safe and cheap, so no separate guard flag needed.
+    const ttsAbortController = new AbortController();
+
     // Register the close handler IMMEDIATELY after the cap increment,
     // before any async work that could span a disconnect. Provider
     // generation can take 5-30 seconds (Grok TTS) and the buffered
@@ -1092,17 +1100,19 @@ async function handleSpeak(req, res, { text, userId }) {
     // listener attached, leaving the slot consumed without audio
     // delivery. Per Codex finding on PR #1.
     //
-    // Universal cleanup only here: rollback the cap and flip `aborted`
-    // so any downstream completion paths skip their bookkeeping. Stream-
-    // specific cleanup (audioStream.destroy in the streaming branch) is
-    // added as a SECOND listener once audioStream is in scope below —
-    // Node fires 'close' listeners in registration order, and the
-    // capRolledBack idempotency flag ensures the streaming-branch
-    // listener's call to rollbackCapIncrement no-ops harmlessly.
+    // Universal cleanup here: rollback the cap, flip `aborted`, and
+    // abort the upstream provider HTTP request so we stop paying for
+    // output the user will never receive. Stream-specific cleanup
+    // (audioStream.destroy in the streaming branch) is added as a SECOND
+    // listener once audioStream is in scope below — Node fires 'close'
+    // listeners in registration order, and the capRolledBack idempotency
+    // flag ensures the streaming-branch listener's call to
+    // rollbackCapIncrement no-ops harmlessly.
     res.on('close', () => {
       if (!res.writableEnded) {
         rollbackCapIncrement(capKey);
         aborted = true;
+        ttsAbortController.abort();
       }
     });
 
@@ -1121,9 +1131,17 @@ async function handleSpeak(req, res, { text, userId }) {
 
     let ttsResult;
     try {
-      ttsResult = await ttsProvider.tts({ text: cleanText });
+      ttsResult = await ttsProvider.tts({ text: cleanText, signal: ttsAbortController.signal });
     } catch (err) {
       rollbackCapIncrement(capKey);
+      // If the abort fired (client disconnected during generation), the
+      // close handler already flipped `aborted` and called .abort(), and
+      // res is already closed. The axios/fetch AbortError lands here.
+      // Don't try to write a response to a closed connection.
+      if (aborted) {
+        console.log('🔊 [TTS] Provider aborted (client disconnect)');
+        return;
+      }
       console.log('🔊 [TTS] Provider error:', err.status || '-', err.message);
       if (err.status === 503 || /not configured/i.test(err.message)) {
         return res.status(503).json({ error: 'TTS service not configured' });
@@ -1152,6 +1170,17 @@ async function handleSpeak(req, res, { text, userId }) {
       // Buffered path — preserved for backward compatibility with
       // TestFlight 3.0.6 and earlier (react-native-track-player needed
       // Content-Length). See CODEBASE.md §14.
+
+      // Race guard: the client may have disconnected while
+      // ttsProvider.tts() was resolving. If so, the upstream provider
+      // already produced output we paid for, but res is closed — skip
+      // the drain (would just consume bytes nobody will receive) and
+      // tear down the upstream Readable so its socket is freed.
+      if (aborted) {
+        try { ttsResult.audioStream.destroy(); } catch (_) { /* ignore */ }
+        return;
+      }
+
       let audioBuffer;
       try {
         const chunks = [];
@@ -1181,6 +1210,16 @@ async function handleSpeak(req, res, { text, userId }) {
       // Content-Length (Node emits Transfer-Encoding: chunked when length
       // is absent) and Accept-Ranges (range requests are meaningless on a
       // single-pass stream).
+
+      // Race guard: same as the buffered branch — if the client closed
+      // during ttsProvider.tts(), the upstream Readable still exists but
+      // res is gone. Tear down upstream and bail before piping into a
+      // closed response.
+      if (aborted) {
+        try { ttsResult.audioStream.destroy(); } catch (_) { /* ignore */ }
+        return;
+      }
+
       res.setHeader('Content-Type', ttsResult.mimeType || 'audio/mpeg');
       res.setHeader('Cache-Control', 'no-store');
       res.removeHeader('Content-Length');

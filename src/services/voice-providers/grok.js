@@ -33,7 +33,7 @@ const MODEL_LABEL = 'grok-tts'; // for return metadata only — not sent in requ
 const DEFAULT_VOICE = 'leo'; // Troy's voice per VOICE-1 spec (British accent)
 const MAX_CHARS = 15000;
 
-async function tts({ text, voiceId, options = {} }) {
+async function tts({ text, voiceId, signal, options = {} }) {
   const apiKey = process.env.XAI_API_KEY;
   if (!apiKey) throw new Error('XAI_API_KEY not configured');
 
@@ -58,6 +58,9 @@ async function tts({ text, voiceId, options = {} }) {
 
   let response;
   try {
+    // `signal` is optional — undefined means "no abort". When passed from
+    // /v1/troy/speak's AbortController, client disconnect cancels the
+    // in-flight HTTP request to xAI so we stop billing immediately.
     response = await axios.post(ENDPOINT, requestBody, {
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -68,6 +71,7 @@ async function tts({ text, voiceId, options = {} }) {
       timeout: 30000,
       maxBodyLength: Infinity,
       maxContentLength: Infinity,
+      signal,
     });
   } catch (err) {
     // axios throws on non-2xx when validateStatus isn't overridden. For stream
