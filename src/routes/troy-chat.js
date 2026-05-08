@@ -964,6 +964,30 @@ function sanitizeTTSText(text) {
 // call, buffered delivery, logging, error paths) is identical for both.
 // ============================================
 async function handleSpeak(req, res, { text, userId }) {
+  // Hoisted to function scope so the outer catch (Path F) can roll back if
+  // anything between a successful increment and a successful response
+  // throws unexpectedly. `let`/`const` inside the try block would not be
+  // visible in the catch block. capIncremented flips to true only after the
+  // atomic RPC reports a successful bump.
+  let capIncremented = false;
+  let capKey = null;
+
+  // Best-effort cap rollback. Called on every failure path between the
+  // atomic increment and successful response delivery. Fire-and-forget —
+  // if the rollback RPC itself fails, over-counting the cap is the safer
+  // side vs. retry-induced under-count. Defined at function scope so it is
+  // visible in both the try and the outer catch.
+  const rollbackCapIncrement = (key) => {
+    if (!key) return;
+    supabase.rpc('decrement_voice_cap', { p_key: key })
+      .then(({ error }) => {
+        if (error) console.log('🔊 [TTS] Cap rollback error:', error.message);
+      })
+      .catch((err) => {
+        console.log('🔊 [TTS] Cap rollback threw:', err.message);
+      });
+  };
+
   try {
     // Opt-in chunked-streaming path. Existing clients (TestFlight 3.0.6 and
     // earlier) don't pass the flag and continue receiving the buffered
@@ -1021,7 +1045,7 @@ async function handleSpeak(req, res, { text, userId }) {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     const tier = profile.subscription_tier;
     const dailyLimit = (tier === 'gold' || tier === 'lifetime') ? 20 : 1;
-    const capKey = `voice_usage_${userId}_${today}`;
+    capKey = `voice_usage_${userId}_${today}`;
 
     const { data: newUsage, error: capErr } = await supabase.rpc(
       'increment_voice_cap_if_under',
@@ -1038,6 +1062,7 @@ async function handleSpeak(req, res, { text, userId }) {
       console.log('🔊 [TTS] Voice cap reached for key:', capKey);
       return res.status(429).json({ error: 'Voice limit reached', message: upgradeMsg, limit: dailyLimit });
     }
+    capIncremented = true;
     console.log('🔊 [TTS] Cap incremented:', newUsage, '/', dailyLimit);
 
     const cleanText = sanitizeTTSText(text);
@@ -1046,6 +1071,7 @@ async function handleSpeak(req, res, { text, userId }) {
     try {
       ttsProvider = getTTSProvider();
     } catch (err) {
+      rollbackCapIncrement(capKey);
       console.log('🔊 [TTS] Provider selection failed:', err.message);
       return res.status(503).json({ error: 'TTS service not configured' });
     }
@@ -1056,6 +1082,7 @@ async function handleSpeak(req, res, { text, userId }) {
     try {
       ttsResult = await ttsProvider.tts({ text: cleanText });
     } catch (err) {
+      rollbackCapIncrement(capKey);
       console.log('🔊 [TTS] Provider error:', err.status || '-', err.message);
       if (err.status === 503 || /not configured/i.test(err.message)) {
         return res.status(503).json({ error: 'TTS service not configured' });
@@ -1097,6 +1124,7 @@ async function handleSpeak(req, res, { text, userId }) {
         }
         audioBuffer = Buffer.concat(chunks);
       } catch (streamErr) {
+        rollbackCapIncrement(capKey);
         aborted = true;
         console.log('🔊 [TTS] Stream buffering failed:', streamErr.message);
         if (!res.headersSent) {
@@ -1130,6 +1158,7 @@ async function handleSpeak(req, res, { text, userId }) {
       // use res.destroy() (not res.end()) so 'finish' does not fire and we
       // do not bill the user for a partial response.
       ttsResult.audioStream.on('error', (err) => {
+        rollbackCapIncrement(capKey);
         aborted = true;
         console.log('🔊 [TTS] Upstream stream error:', err.message);
         if (!res.headersSent) {
@@ -1146,6 +1175,7 @@ async function handleSpeak(req, res, { text, userId }) {
       // for empty-body GETs, regardless of whether the client is still listening.
       res.on('close', () => {
         if (!res.writableEnded) {
+          rollbackCapIncrement(capKey);
           aborted = true;
           try { ttsResult.audioStream.destroy(); } catch (_) { /* ignore */ }
         }
@@ -1154,6 +1184,9 @@ async function handleSpeak(req, res, { text, userId }) {
       ttsResult.audioStream.pipe(counter).pipe(res);
     }
   } catch (error) {
+    if (capIncremented && capKey) {
+      rollbackCapIncrement(capKey);
+    }
     console.log('🔊 [TTS] Error:', error.message, error.stack);
     if (!res.headersSent) {
       res.status(500).json({ error: 'TTS generation failed' });

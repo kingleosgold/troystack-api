@@ -55,3 +55,41 @@ begin
   return v_new;
 end;
 $$;
+
+-- Best-effort decrement for cap rollback when a voice request fails before
+-- delivering audio. Mirrors the jsonb-string format of
+-- increment_voice_cap_if_under. Returns the new value on success, NULL if the
+-- row doesn't exist or value is already 0 (cannot decrement below zero).
+-- Fire-and-forget from the caller — if this fails, over-counting the cap is
+-- the safer side vs. risking under-count via double-decrement on retries.
+
+create or replace function decrement_voice_cap(
+  p_key text
+) returns integer
+language plpgsql
+as $$
+declare
+  v_old integer;
+  v_new integer;
+begin
+  -- Acquire row lock and read current value.
+  select coalesce(nullif(value #>> '{}', '')::integer, 0)
+    into v_old
+    from app_state
+    where key = p_key
+    for update;
+
+  -- No row, or already at zero — nothing to decrement.
+  if v_old is null or v_old <= 0 then
+    return null;
+  end if;
+
+  v_new := v_old - 1;
+
+  update app_state
+    set value = to_jsonb(v_new::text), updated_at = now()
+    where key = p_key;
+
+  return v_new;
+end;
+$$;
