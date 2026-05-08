@@ -1079,6 +1079,33 @@ async function handleSpeak(req, res, { text, userId }) {
     capIncremented = true;
     console.log('🔊 [TTS] Cap incremented:', newUsage, '/', dailyLimit);
 
+    // Hoisted above the close handler so the handler can flip `aborted`
+    // before the per-branch buffering / piping code references it.
+    let bytesDelivered = 0;
+    let aborted = false;
+
+    // Register the close handler IMMEDIATELY after the cap increment,
+    // before any async work that could span a disconnect. Provider
+    // generation can take 5-30 seconds (Grok TTS) and the buffered
+    // for-await read adds more time on top — a disconnect during either
+    // of those windows previously fired 'close' before the per-branch
+    // listener attached, leaving the slot consumed without audio
+    // delivery. Per Codex finding on PR #1.
+    //
+    // Universal cleanup only here: rollback the cap and flip `aborted`
+    // so any downstream completion paths skip their bookkeeping. Stream-
+    // specific cleanup (audioStream.destroy in the streaming branch) is
+    // added as a SECOND listener once audioStream is in scope below —
+    // Node fires 'close' listeners in registration order, and the
+    // capRolledBack idempotency flag ensures the streaming-branch
+    // listener's call to rollbackCapIncrement no-ops harmlessly.
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        rollbackCapIncrement(capKey);
+        aborted = true;
+      }
+    });
+
     const cleanText = sanitizeTTSText(text);
 
     let ttsProvider;
@@ -1109,11 +1136,6 @@ async function handleSpeak(req, res, { text, userId }) {
       }
       return;
     }
-
-    // Track delivered bytes and abort state so the post-finish bookkeeping
-    // can run in BOTH the buffered and streaming branches.
-    let bytesDelivered = 0;
-    let aborted = false;
 
     // Final log line runs AFTER the response is fully delivered. The
     // counter was already incremented atomically before the provider call
@@ -1153,25 +1175,6 @@ async function handleSpeak(req, res, { text, userId }) {
       res.setHeader('Content-Type', ttsResult.mimeType || 'audio/mpeg');
       res.setHeader('Content-Length', audioBuffer.length);
       res.setHeader('Accept-Ranges', 'bytes');
-
-      // Disconnect handling for the buffered path. Window is much narrower
-      // than streaming (milliseconds during TCP flush of an already-generated
-      // buffer vs. seconds during streaming generation), but symmetry with
-      // the streaming branch matters: both paths consume a slot
-      // pre-generation, so both should refund it on early disconnect. The
-      // rollback helper is idempotent (capRolledBack flag), so this firing
-      // alongside res.on('finish') for normal completion is harmless — the
-      // finish handler doesn't rollback, only close-while-not-ended does.
-      // Unlike the streaming branch, we do NOT call audioStream.destroy()
-      // here: the buffered for-await loop above already fully drained the
-      // upstream Readable before we got here.
-      res.on('close', () => {
-        if (!res.writableEnded) {
-          rollbackCapIncrement(capKey);
-          aborted = true;
-        }
-      });
-
       res.end(audioBuffer);
     } else {
       // Streaming path — pipe the upstream Readable directly. Drop
@@ -1201,15 +1204,16 @@ async function handleSpeak(req, res, { text, userId }) {
         }
       });
 
-      // Client tore down the connection (TCP socket close on the response).
-      // res.on('close') fires when the underlying connection is destroyed,
-      // which is the actual mid-stream-disconnect signal. req.on('close') is
-      // unreliable for this on Node 20+ because it fires on request-body end
-      // for empty-body GETs, regardless of whether the client is still listening.
+      // Stream-specific cleanup on close: stop pulling bytes from the
+      // upstream provider when the client disconnects so we don't keep
+      // paying for output the user will never hear. Cap rollback +
+      // `aborted` flag are already handled by the shared close handler
+      // registered immediately after cap increment (above). Multiple
+      // 'close' listeners fire in registration order, so the shared
+      // handler runs first and the idempotent rollbackCapIncrement
+      // no-ops on this second pass.
       res.on('close', () => {
         if (!res.writableEnded) {
-          rollbackCapIncrement(capKey);
-          aborted = true;
           try { ttsResult.audioStream.destroy(); } catch (_) { /* ignore */ }
         }
       });
