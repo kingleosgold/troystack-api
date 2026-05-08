@@ -1153,6 +1153,25 @@ async function handleSpeak(req, res, { text, userId }) {
       res.setHeader('Content-Type', ttsResult.mimeType || 'audio/mpeg');
       res.setHeader('Content-Length', audioBuffer.length);
       res.setHeader('Accept-Ranges', 'bytes');
+
+      // Disconnect handling for the buffered path. Window is much narrower
+      // than streaming (milliseconds during TCP flush of an already-generated
+      // buffer vs. seconds during streaming generation), but symmetry with
+      // the streaming branch matters: both paths consume a slot
+      // pre-generation, so both should refund it on early disconnect. The
+      // rollback helper is idempotent (capRolledBack flag), so this firing
+      // alongside res.on('finish') for normal completion is harmless — the
+      // finish handler doesn't rollback, only close-while-not-ended does.
+      // Unlike the streaming branch, we do NOT call audioStream.destroy()
+      // here: the buffered for-await loop above already fully drained the
+      // upstream Readable before we got here.
+      res.on('close', () => {
+        if (!res.writableEnded) {
+          rollbackCapIncrement(capKey);
+          aborted = true;
+        }
+      });
+
       res.end(audioBuffer);
     } else {
       // Streaming path — pipe the upstream Readable directly. Drop
