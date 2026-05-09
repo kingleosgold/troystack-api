@@ -1,21 +1,30 @@
 // Grok (xAI) TTS adapter — wired against the real documented endpoint.
 //
-// Docs: https://docs.x.ai/docs/guides/voice (retrieved 2026-04-22)
+// Docs: https://docs.x.ai/developers/model-capabilities/audio/text-to-speech
 //   POST https://api.x.ai/v1/tts
 //   Authorization: Bearer $XAI_API_KEY
 //   Content-Type: application/json
-//   Body: { text, voice_id, language, format?, sample_rate?, bit_rate? }
-//   Response: audio/mpeg stream (MP3)
+//   Body: { text, voice_id, language, output_format?,
+//           optimize_streaming_latency?, text_normalization? }
+//   Response: audio/mpeg raw bytes (described as "Unary & Server-Streamed")
 //   Voices: eve, ara, rex, sal, leo
 //
-// Format params are undocumented in the public REST docs. First attempt
-// (dac4b7a) used a nested `output_format: { codec, sample_rate, bit_rate }`
-// object sourced from openclaw's third-party integration — xAI silently
-// ignored it and kept returning ~1KB/char audio (~2.25 MB per Troy response).
-// This pass flattens to top-level `format`, `sample_rate`, `bit_rate` as the
-// next most-likely shape. Goal file size: ~350-500 KB for a 2000-char
-// response. If this is also ignored, next candidate is the realtime-style
-// nested `audio.output.format` shape from the WebSocket API schema.
+// Format params: now sent as the documented nested object
+// `output_format: { codec, sample_rate, bit_rate }`. Earlier attempts:
+// commit dac4b7a tried this shape (sourced from a third-party openclaw
+// integration) and saw it silently ignored. Commit 4e4dad9 reverted to a
+// flat top-level `format` / `sample_rate` / `bit_rate` shape, which
+// production observation suggests was ALSO silently ignored (~1.1 KB per
+// character of audio, consistent with xAI's default ~320 kbps MP3, not
+// our requested 128 kbps). xAI's developer-docs page (cited above) now
+// explicitly documents the nested shape — either xAI rolled out support
+// after Apr 22 or our earlier attempt was off in some other way; sending
+// the documented shape is correct now regardless.
+//
+// optimize_streaming_latency: 1 — documented as "reduced first-chunk size
+// for lower time-to-first-audio, with minor quality tradeoff." Default 0.
+// We are sending 1 because production end-to-end latency is dominated by
+// xAI's first-byte time on the default setting (see tts-xai-recon.md §4).
 //
 // Streaming contract: responseType: 'stream' is REQUIRED. Without it axios
 // buffers the whole body and tries to decode it — that corrupts binary MP3
@@ -51,9 +60,12 @@ async function tts({ text, voiceId, signal, options = {} }) {
     text,
     voice_id: resolvedVoice,
     language: options.language || 'en',
-    format: options.format || 'mp3',
-    sample_rate: options.sampleRate || 24000,
-    bit_rate: options.bitRate || 128000,
+    optimize_streaming_latency: 1,
+    output_format: {
+      codec: options.format || 'mp3',
+      sample_rate: options.sampleRate || 24000,
+      bit_rate: options.bitRate || 128000,
+    },
   };
 
   let response;
