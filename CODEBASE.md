@@ -339,8 +339,8 @@ Silver content per coin (troy oz): dimes 0.07234, quarters 0.18084, half_dollars
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | /privacy | Public | Privacy policy (HTML) |
-| GET | /terms | Public | Terms of use (HTML) |
+| GET | /privacy | Public | 301 redirect to troystack.com/privacy |
+| GET | /terms | Public | 301 redirect to troystack.com/terms |
 
 ### src/routes/llms.js
 - **Purpose:** LLM discoverability endpoints (contact: support@troystack.com)
