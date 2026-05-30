@@ -587,9 +587,9 @@ app.listen(PORT, () => {
 
   // ── DISABLED 2026-05-30 — see X_API_AUDIT_2026-05-30.md. Re-enable when X strategy is redefined. ──
   // Auto-tweet posting cron (X Write traffic — the 6-8 ContentCreateWithUrl/day that posted
-  // Stack Signal articles to @troystack_). With this off, no tweets are posted. Note: the Stack
-  // Signal pipeline still calls enqueueTweet (DB insert into tweet_queue, no X API call), so the
-  // queue accumulates harmlessly until this drain cron is re-enabled.
+  // Stack Signal articles to @troystack_). With this off, no tweets are posted. The Stack Signal
+  // pipeline also no longer enqueues (gated by X_DISTRIBUTION_ENABLED in stack-signal-processor.js),
+  // so tweet_queue does not accumulate a future-replay backlog.
   // Code preserved in src/services/auto-tweet.js for clean re-enablement.
   // ── Tweet queue processor: every 5 minutes ──
   // cron.schedule('*/5 * * * *', async () => {

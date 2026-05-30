@@ -6,6 +6,13 @@ const { getCachedPrices } = require('./price-fetcher');
 const { enqueueTweet } = require('./auto-tweet');
 const { getTopIntelligence } = require('./intelligence-scraper');
 
+// Master switch for X (Twitter) distribution. When false, the pipeline does NOT
+// enqueue tweets into tweet_queue — gating the machinery at the entry point so no
+// backlog accumulates while the auto-tweet posting cron is disabled. The plumbing
+// (enqueueTweet + tweet_queue) is intentionally left intact; re-enabling is just
+// flipping this one constant back to true.
+const X_DISTRIBUTION_ENABLED = false; // Disabled 2026-05-30 — see X_API_AUDIT_2026-05-30.md. Re-enable when X strategy is redefined.
+
 // ============================================
 // HELPERS
 // ============================================
@@ -818,7 +825,7 @@ async function saveArticles(articles) {
       } else {
         saved++;
         // Enqueue tweet for scheduled posting (non-blocking)
-        if (row.tweet_text) {
+        if (X_DISTRIBUTION_ENABLED && row.tweet_text) {
           try {
             await enqueueTweet({
               id: savedRow?.id,
@@ -1176,7 +1183,7 @@ async function generateClaudeDailySynthesis() {
   console.log(`[Claude Synthesis] Saved: "${title}" (${articleText.length} chars, ${todayArticles.length} source articles)`);
 
   // Enqueue tweet for scheduled posting
-  if (synthesisTweet) {
+  if (X_DISTRIBUTION_ENABLED && synthesisTweet) {
     try {
       await enqueueTweet({ id: saved?.id, slug, title, tweet_text: synthesisTweet, signal_score: 95 });
     } catch (queueErr) {
