@@ -1,5 +1,6 @@
 const supabase = require('../../../lib/supabase');
 const { defineCheck } = require('../define-check');
+const { X_DISTRIBUTION_ENABLED } = require('../../../config/feature-flags');
 
 // Per-table staleness caps. `marketSensitive: true` means the cap is multiplied
 // during weekend/off-hours when no fresh data is expected (price_log is frozen,
@@ -54,8 +55,12 @@ module.exports = [
     async run() {
       const { areMarketsClosed } = require('../../../services/price-fetcher');
       const marketsClosed = areMarketsClosed();
+      // X distribution is intentionally off: tweet_queue receives no new rows, so
+      // exclude it from the freshness sweep rather than let it drag the check red.
+      const entries = Object.entries(FRESHNESS)
+        .filter(([table]) => X_DISTRIBUTION_ENABLED || table !== 'tweet_queue');
       const probes = await Promise.all(
-        Object.entries(FRESHNESS).map(async ([table, cfg]) => {
+        entries.map(async ([table, cfg]) => {
           const capSec = marketsClosed && cfg.marketSensitive
             ? cfg.capSec * CLOSED_MARKET_MULTIPLIER
             : cfg.capSec;

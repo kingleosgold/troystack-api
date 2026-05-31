@@ -201,101 +201,13 @@ app.use('/v1/stack-signal', publicLimiter, socialRouter);
 // Dealer price comparison
 app.use('/v1/dealer-prices', publicLimiter, dealerPricesRouter);
 
-// ── Temporary test route ──
-// ?post=true to actually send to Twitter; default is dry-run
-// ?generate=true to force Gemini generation even if tweet_text exists
-app.get('/v1/test-tweet', async (req, res) => {
-  try {
-    const supabase = require('./lib/supabase');
-    const { getClient } = require('./services/auto-tweet');
-    const { generateTweetText, sanitizeTweetText } = require('./services/stack-signal-processor');
-    const shouldPost = req.query.post === 'true';
-    const forceGenerate = req.query.generate === 'true';
-
-    // 1. Fetch most recent article
-    const { data: articles } = await supabase
-      .from('stack_signal_articles')
-      .select('*')
-      .order('published_at', { ascending: false })
-      .limit(1);
-
-    if (!articles || articles.length === 0) {
-      return res.json({ error: 'No articles found' });
-    }
-    const article = articles[0];
-
-    // 2. Get tweet text — prefer pre-generated unless ?generate=true
-    let tweetText;
-    let source;
-
-    if (article.tweet_text && !forceGenerate) {
-      tweetText = sanitizeTweetText(article.tweet_text) || article.tweet_text.trim();
-      source = 'pre-generated (tweet_text column)';
-    } else {
-      tweetText = await generateTweetText(article.title, article.troy_commentary);
-      source = tweetText ? 'gemini (live)' : 'title fallback';
-      if (!tweetText) {
-        tweetText = article.title.length > 200 ? article.title.substring(0, 200) + '...' : article.title;
-      }
-    }
-
-    console.log(`[TestTweet] Source: ${source} | Tweet: ${tweetText}`);
-
-    // 3. Append URL + trim to 280
-    const url = `https://troystack.com/signal/${article.slug}`;
-    const maxTextLen = 280 - 23 - 2;  // 23 = t.co auto-shortened URL, 2 = "\n\n"
-    if (tweetText.length > maxTextLen) {
-      tweetText = tweetText.substring(0, maxTextLen - 3) + '...';
-    }
-    const finalTweet = `${tweetText}\n\n${url}`;
-
-    // 4. Optionally post
-    let tweetId = null;
-    if (shouldPost) {
-      const twitter = getClient();
-      if (!twitter) {
-        return res.json({ error: 'X credentials not configured' });
-      }
-      const result = await twitter.v2.tweet(finalTweet);
-      tweetId = result?.data?.id || null;
-      console.log(`[TestTweet] Posted: ${tweetId}`);
-    }
-
-    res.json({
-      article_title: article.title,
-      stored_tweet_text: article.tweet_text || null,
-      source,
-      sanitized_tweet: tweetText,
-      final_tweet: finalTweet,
-      tweet_id: tweetId,
-      posted: shouldPost && !!tweetId,
-    });
-  } catch (err) {
-    console.error('[TestTweet] Error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── Temporary test route — manually trigger intelligence scrapers ──
-app.get('/v1/test-scraper', async (req, res) => {
-  const source = req.query.source;
-  const { scrapeYouTubeChannels, scrapeTwitterAccounts, scrapeReddit } = require('./services/intelligence-scraper');
-
-  const scrapers = { youtube: scrapeYouTubeChannels, twitter: scrapeTwitterAccounts, reddit: scrapeReddit };
-  const fn = scrapers[source];
-
-  if (!fn) {
-    return res.status(400).json({ error: 'source required: youtube, twitter, or reddit' });
-  }
-
-  const start = Date.now();
-  try {
-    const result = await fn();
-    res.json({ source, success: true, result, duration_ms: Date.now() - start });
-  } catch (err) {
-    res.status(500).json({ source, success: false, error: err.message, duration_ms: Date.now() - start });
-  }
-});
+// ── Removed 2026-05-30 (X integration disabled) — see X_API_AUDIT_2026-05-30.md ──
+// Deleted unauthenticated GET routes /v1/test-tweet and /v1/test-scraper. They were
+// "temporary" test scaffolding that escaped to production: /v1/test-tweet?post=true
+// could post a real tweet to @troystack_ and /v1/test-scraper?source=twitter could
+// burn X API reads — both via unauthenticated GET. Their logic still lives in
+// src/services/auto-tweet.js and src/services/intelligence-scraper.js if a properly
+// authenticated admin trigger is ever needed.
 
 // Junk silver melt value calculator
 app.use('/v1/junk-silver', publicLimiter, junkSilverRouter);
@@ -658,31 +570,40 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('⚡ [Stack Signal Weekly Preview] Scheduled: Mondays at 6:15 AM EST (11:15 UTC)');
 
+  // ── DISABLED 2026-05-30 — see X_API_AUDIT_2026-05-30.md. Re-enable when X strategy is redefined. ──
+  // Weekly X thread (X Write traffic — posts a 5-7 tweet thread to @troystack_ on Sundays).
+  // Code preserved in src/services/weekly-thread.js for clean re-enablement.
   // Weekly X thread — Sunday 6:00 PM EST / 22:00 UTC
-  cron.schedule('0 22 * * 0', async () => {
-    console.log('🐦 [Weekly Thread] Running Sunday weekly X thread...');
-    try {
-      const { generateAndPostWeeklyThread } = require('./services/weekly-thread');
-      await generateAndPostWeeklyThread();
-    } catch (err) {
-      console.error('🐦 [Weekly Thread] Failed:', err.message);
-    }
-  }, { timezone: 'UTC' });
-  console.log('🐦 [Weekly Thread] Scheduled: Sundays at 6:00 PM EST (22:00 UTC)');
+  // cron.schedule('0 22 * * 0', async () => {
+  //   console.log('🐦 [Weekly Thread] Running Sunday weekly X thread...');
+  //   try {
+  //     const { generateAndPostWeeklyThread } = require('./services/weekly-thread');
+  //     await generateAndPostWeeklyThread();
+  //   } catch (err) {
+  //     console.error('🐦 [Weekly Thread] Failed:', err.message);
+  //   }
+  // }, { timezone: 'UTC' });
+  console.log('🐦 [Weekly Thread] DISABLED 2026-05-30 (X integration off) — see X_API_AUDIT_2026-05-30.md');
 
+  // ── DISABLED 2026-05-30 — see X_API_AUDIT_2026-05-30.md. Re-enable when X strategy is redefined. ──
+  // Auto-tweet posting cron (X Write traffic — the 6-8 ContentCreateWithUrl/day that posted
+  // Stack Signal articles to @troystack_). With this off, no tweets are posted. The Stack Signal
+  // pipeline also no longer enqueues (gated by X_DISTRIBUTION_ENABLED in stack-signal-processor.js),
+  // so tweet_queue does not accumulate a future-replay backlog.
+  // Code preserved in src/services/auto-tweet.js for clean re-enablement.
   // ── Tweet queue processor: every 5 minutes ──
-  cron.schedule('*/5 * * * *', async () => {
-    try {
-      const { processTweetQueue } = require('./services/auto-tweet');
-      const result = await processTweetQueue();
-      if (result.posted) {
-        console.log(`🐦 [Tweet Queue] Posted tweet ${result.tweet_id}`);
-      }
-    } catch (err) {
-      console.error('🐦 [Tweet Queue] Error:', err.message);
-    }
-  }, { timezone: 'UTC' });
-  console.log('🐦 [Tweet Queue] Scheduled: every 5 minutes');
+  // cron.schedule('*/5 * * * *', async () => {
+  //   try {
+  //     const { processTweetQueue } = require('./services/auto-tweet');
+  //     const result = await processTweetQueue();
+  //     if (result.posted) {
+  //       console.log(`🐦 [Tweet Queue] Posted tweet ${result.tweet_id}`);
+  //     }
+  //   } catch (err) {
+  //     console.error('🐦 [Tweet Queue] Error:', err.message);
+  //   }
+  // }, { timezone: 'UTC' });
+  console.log('🐦 [Tweet Queue] DISABLED 2026-05-30 (X integration off) — see X_API_AUDIT_2026-05-30.md');
 
   // ── Intelligence Scrapers ──
   cron.schedule('0 */4 * * *', async () => {
@@ -735,16 +656,21 @@ app.listen(PORT, () => {
   }, { timezone: 'America/New_York' });
   console.log('💰 [Finance] Scheduled: daily at 2:00 AM EST');
 
-  cron.schedule('0 */2 * * *', async () => {
-    console.log('📡 [Intelligence Scraper] Running Twitter scrape...');
-    try {
-      const { scrapeTwitterAccounts } = require('./services/intelligence-scraper');
-      await scrapeTwitterAccounts();
-    } catch (err) {
-      console.error('📡 [Intelligence Scraper] Twitter failed:', err.message);
-    }
-  }, { timezone: 'UTC' });
-  console.log('📡 [Intelligence Scraper] Twitter: every 2 hours');
+  // ── DISABLED 2026-05-30 — see X_API_AUDIT_2026-05-30.md. Re-enable when X strategy is redefined. ──
+  // Twitter intelligence scraper (X Read traffic — the ~216 reads/day, the bulk of the X API spend).
+  // Polled 10 hardcoded handles every 2h via userByUsername + userTimeline. The YouTube and Reddit
+  // intelligence crons below are left running (they do not touch the X API).
+  // Code preserved in src/services/intelligence-scraper.js (scrapeTwitterAccounts) for clean re-enablement.
+  // cron.schedule('0 */2 * * *', async () => {
+  //   console.log('📡 [Intelligence Scraper] Running Twitter scrape...');
+  //   try {
+  //     const { scrapeTwitterAccounts } = require('./services/intelligence-scraper');
+  //     await scrapeTwitterAccounts();
+  //   } catch (err) {
+  //     console.error('📡 [Intelligence Scraper] Twitter failed:', err.message);
+  //   }
+  // }, { timezone: 'UTC' });
+  console.log('📡 [Intelligence Scraper] Twitter: DISABLED 2026-05-30 (X integration off) — see X_API_AUDIT_2026-05-30.md');
 
   cron.schedule('0 */3 * * *', async () => {
     console.log('📡 [Intelligence Scraper] Running Reddit scrape...');
