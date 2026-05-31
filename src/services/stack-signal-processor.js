@@ -5,13 +5,12 @@ const { fetchNewArticles } = require('./rss-fetcher');
 const { getCachedPrices } = require('./price-fetcher');
 const { enqueueTweet } = require('./auto-tweet');
 const { getTopIntelligence } = require('./intelligence-scraper');
-
 // Master switch for X (Twitter) distribution. When false, the pipeline does NOT
 // enqueue tweets into tweet_queue — gating the machinery at the entry point so no
 // backlog accumulates while the auto-tweet posting cron is disabled. The plumbing
 // (enqueueTweet + tweet_queue) is intentionally left intact; re-enabling is just
-// flipping this one constant back to true.
-const X_DISTRIBUTION_ENABLED = false; // Disabled 2026-05-30 — see X_API_AUDIT_2026-05-30.md. Re-enable when X strategy is redefined.
+// flipping the shared flag back to true. See src/config/feature-flags.js.
+const { X_DISTRIBUTION_ENABLED } = require('../config/feature-flags');
 
 // ============================================
 // HELPERS

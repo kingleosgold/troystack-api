@@ -1,5 +1,6 @@
 const supabase = require('../../../lib/supabase');
 const { defineCheck } = require('../define-check');
+const { X_DISTRIBUTION_ENABLED } = require('../../../config/feature-flags');
 
 function todayET() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -11,6 +12,11 @@ module.exports = [
     category: 'distribution',
     label: 'Tweet Queue Processing',
     async run() {
+      // X distribution is intentionally off: the pipeline no longer enqueues and the
+      // drain cron is disabled, so "overdue" rows are expected. Skip rather than go red.
+      if (!X_DISTRIBUTION_ENABLED) {
+        return { status: 'green', details: 'X distribution disabled — tweet queue processing skipped' };
+      }
       const nowIso = new Date().toISOString();
       const dayAgo = new Date(Date.now() - 86400000).toISOString();
       const [overdueResp, postedResp] = await Promise.all([

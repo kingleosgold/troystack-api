@@ -1,5 +1,6 @@
 const supabase = require('../../../lib/supabase');
 const { defineCheck } = require('../define-check');
+const { X_DISTRIBUTION_ENABLED } = require('../../../config/feature-flags');
 
 module.exports = [
   defineCheck({
@@ -7,6 +8,11 @@ module.exports = [
     category: 'intelligence',
     label: 'Twitter Intelligence Freshness',
     async run() {
+      // X distribution is intentionally off: the Twitter scraper cron is disabled,
+      // so troy_intelligence gets no new twitter rows. Skip rather than go red.
+      if (!X_DISTRIBUTION_ENABLED) {
+        return { status: 'green', details: 'X distribution disabled — Twitter freshness check skipped' };
+      }
       const { data, error } = await supabase.from('troy_intelligence')
         .select('created_at').eq('source_type', 'twitter')
         .order('created_at', { ascending: false }).limit(1);
