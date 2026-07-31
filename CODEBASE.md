@@ -121,7 +121,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | GET | /v1/troy/conversations/:id | Public (UUID) | Get conversation + messages |
 | DELETE | /v1/troy/conversations/:id | Public (UUID) | Delete conversation |
 | POST | /v1/troy/conversations/:id/messages | Public (UUID, quota) | Send message to Troy (3/day free, 30/day Gold) |
-| POST | /v1/troy/speak | Public (UUID, Gold tier) | TTS via ElevenLabs — streams audio/mpeg, 2000 char limit, voice cap |
+| POST | /v1/troy/speak | Public (UUID, Gold tier) | TTS via ElevenLabs — streams audio/mpeg, 4000 char limit, voice cap |
 | POST | /v1/troy/transcribe | Public (UUID) | STT via OpenAI Whisper — multipart audio upload, voice cap |
 
 **Key functions:**
@@ -692,7 +692,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 ## 7. Voice Pipeline
 
 ### TTS — POST /v1/troy/speak
-1. Validate userId (UUID), text (non-empty, ≤2000 chars)
+1. Validate userId (UUID), text (non-empty, ≤4000 chars)
 2. Check subscription tier (Gold/Lifetime only)
 3. Check daily voice cap (app_state: `voice_usage_{userId}_{date}` — America/New_York timezone)
    - Free: 1/day, Gold/Lifetime: 20/day
