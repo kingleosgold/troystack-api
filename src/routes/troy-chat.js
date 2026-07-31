@@ -1018,9 +1018,9 @@ async function handleSpeak(req, res, { text, userId }) {
       console.log('🔊 [TTS] Rejected: missing text');
       return res.status(400).json({ error: 'text is required' });
     }
-    if (text.length > 2000) {
+    if (text.length > 4000) {
       console.log('🔊 [TTS] Rejected: text too long', text.length);
-      return res.status(400).json({ error: 'text exceeds 2000 character limit' });
+      return res.status(400).json({ error: 'text exceeds 4000 character limit' });
     }
 
     // Verify user exists and has paid tier
