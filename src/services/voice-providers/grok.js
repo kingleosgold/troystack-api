@@ -117,4 +117,18 @@ async function tts({ text, voiceId, signal, options = {} }) {
   };
 }
 
-module.exports = { tts };
+// Cache identity for the TTS audio cache (src/services/tts-cache.js).
+// MUST mirror exactly what tts() resolves and sends for a route-originated
+// call (no voiceId/options overrides): if the voice/model/format resolution
+// in tts() changes, change this too — otherwise the cache serves stale audio
+// recorded under the old settings.
+function cacheKeyParts() {
+  return {
+    provider: 'grok',
+    voice: process.env.XAI_TTS_VOICE_ID || DEFAULT_VOICE,
+    model: MODEL_LABEL,
+    format: 'mp3-24000-128000', // output_format defaults in tts()
+  };
+}
+
+module.exports = { tts, cacheKeyParts };

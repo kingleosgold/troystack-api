@@ -570,6 +570,23 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('⚡ [Stack Signal Weekly Preview] Scheduled: Mondays at 6:15 AM EST (11:15 UTC)');
 
+  // ── TTS audio cache TTL cleanup: daily 3:10 AM EST (08:10 UTC) ──
+  // Evicts cached Troy voice MP3s older than 30 days from the private
+  // troy-voice-cache bucket (Supabase Storage has no native lifecycle rules).
+  // Caps bucket growth (~300MB steady state at current volume) and bounds
+  // retention of spoken user financial data. See CODEBASE.md §7.
+  cron.schedule('10 8 * * *', async () => {
+    console.log(`\n🔊 [TTS Cache Cron] Triggered at ${new Date().toISOString()}`);
+    try {
+      const { cleanupExpired } = require('./services/tts-cache');
+      const result = await cleanupExpired();
+      console.log(`🔊 [TTS Cache Cron] Done: ${result.removed} expired file(s) removed, ${result.kept} kept`);
+    } catch (err) {
+      console.error('🔊 [TTS Cache Cron] Failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('🔊 [TTS Cache Cron] Scheduled: daily at 3:10 AM EST (08:10 UTC)');
+
   // ── DISABLED 2026-05-30 — see X_API_AUDIT_2026-05-30.md. Re-enable when X strategy is redefined. ──
   // Weekly X thread (X Write traffic — posts a 5-7 tweet thread to @troystack_ on Sundays).
   // Code preserved in src/services/weekly-thread.js for clean re-enablement.
