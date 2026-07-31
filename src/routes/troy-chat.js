@@ -7,6 +7,7 @@ const supabase = require('../lib/supabase');
 const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
 const { getTopIntelligence } = require('../services/intelligence-scraper');
 const { getTTSProvider, getSTTProvider } = require('../services/voice-providers');
+const ttsCache = require('../services/tts-cache');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -837,6 +838,14 @@ Reference these community discussions naturally when relevant — "Schiff pointe
 // TTS HELPERS
 // ============================================
 
+// Version salt for the TTS audio cache key (src/services/tts-cache.js).
+// BUMP THIS ('v1' → 'v2' → …) whenever sanitizeTTSText's OUTPUT can change
+// for any input — otherwise cached audio synthesized from the old sanitizer
+// output keeps being served for text the new sanitizer would render
+// differently. Old-version entries are stranded by the path prefix and
+// evicted by the daily TTL cron.
+const SANITIZER_VERSION = 'v1';
+
 function sanitizeTTSText(text) {
   let clean = text;
 
@@ -1127,6 +1136,42 @@ async function handleSpeak(req, res, { text, userId }) {
       return res.status(503).json({ error: 'TTS service not configured' });
     }
 
+    // ── TTS audio cache check (Phase A) ──
+    // Content-addressed lookup BEFORE paying for synthesis. Sits here because
+    // both key ingredients exist only now: sanitized text + selected provider.
+    // Quota semantics unchanged — the cap was already incremented above, so
+    // cache hits still consume a daily slot. Cache failures (or a provider
+    // without cacheKeyParts) fall through to live synthesis: the cache must
+    // never break speech.
+    let cacheKey = null;
+    if (typeof ttsProvider.cacheKeyParts === 'function') {
+      cacheKey = ttsCache.buildCacheKey({
+        sanitizedText: cleanText,
+        version: SANITIZER_VERSION,
+        ...ttsProvider.cacheKeyParts(),
+      });
+      const cachedAudio = await ttsCache.get(cacheKey);
+      if (cachedAudio) {
+        // Same race guard as the synthesis paths: the client may have
+        // disconnected during the storage download. The shared close handler
+        // already rolled back the cap.
+        if (aborted) return;
+        bytesDelivered = cachedAudio.length;
+        res.on('finish', () => {
+          if (aborted) return;
+          console.log('🔊 [TTS] cache: hit key:', cacheKey, 'bytes:', bytesDelivered);
+        });
+        // Cached bytes serve BOTH contract paths from buffer (Phase A scope
+        // ruling #1): a Content-Length response is valid HTTP for ?stream=1
+        // callers too — the contract is audio/mpeg bytes, not chunking.
+        res.removeHeader('Transfer-Encoding');
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Content-Length', cachedAudio.length);
+        res.setHeader('Accept-Ranges', 'bytes');
+        return res.end(cachedAudio);
+      }
+    }
+
     console.log('🔊 [TTS] Calling provider, text length:', cleanText.length);
 
     let ttsResult;
@@ -1163,7 +1208,7 @@ async function handleSpeak(req, res, { text, userId }) {
     // the response after a stream error.
     res.on('finish', () => {
       if (aborted) return;
-      console.log('🔊 [TTS] Provider:', ttsResult.provider, 'model:', ttsResult.model, 'chars:', ttsResult.charCount, 'costCents:', ttsResult.costCents.toFixed(4), 'bytes:', bytesDelivered);
+      console.log('🔊 [TTS] Provider:', ttsResult.provider, 'model:', ttsResult.model, 'chars:', ttsResult.charCount, 'costCents:', ttsResult.costCents.toFixed(4), 'bytes:', bytesDelivered, 'cache: miss');
     });
 
     if (!wantStream) {
@@ -1205,6 +1250,18 @@ async function handleSpeak(req, res, { text, userId }) {
       res.setHeader('Content-Length', audioBuffer.length);
       res.setHeader('Accept-Ranges', 'bytes');
       res.end(audioBuffer);
+
+      // ── TTS audio cache store (Phase A) ──
+      // Fire-and-forget AFTER delivery so response latency is unchanged.
+      // Buffered path only (scope ruling #1). The drain above completed
+      // cleanly — error and abort paths returned before this point — so the
+      // buffer holds the provider's complete audio; storing is correct even
+      // if the client disconnected during the drain.
+      if (cacheKey) {
+        ttsCache.put(cacheKey, audioBuffer).then((ok) => {
+          console.log('🔊 [TTS] cache:', ok ? 'stored' : 'store-failed', 'key:', cacheKey);
+        });
+      }
     } else {
       // Streaming path — pipe the upstream Readable directly. Drop
       // Content-Length (Node emits Transfer-Encoding: chunked when length

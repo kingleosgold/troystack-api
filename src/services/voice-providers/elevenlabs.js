@@ -67,4 +67,18 @@ async function tts({ text, voiceId, signal, options = {} }) {
   };
 }
 
-module.exports = { tts };
+// Cache identity for the TTS audio cache (src/services/tts-cache.js).
+// MUST mirror exactly what tts() resolves and sends for a route-originated
+// call (no voiceId/options overrides): if the voice/model resolution in
+// tts() changes, change this too — otherwise the cache serves stale audio
+// recorded under the old settings.
+function cacheKeyParts() {
+  return {
+    provider: 'elevenlabs',
+    voice: process.env.ELEVENLABS_VOICE_ID || 'unset',
+    model: MODEL,
+    format: 'mp3-default', // ElevenLabs default output; no format params sent
+  };
+}
+
+module.exports = { tts, cacheKeyParts };

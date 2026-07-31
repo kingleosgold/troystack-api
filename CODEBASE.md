@@ -9,7 +9,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 ## 1. API Routes
 
 ### src/index.js
-- **Purpose:** Express app entry point — CORS, middleware, route mounting, 13 cron jobs
+- **Purpose:** Express app entry point — CORS, middleware, route mounting, 14 cron jobs
 - **Exports:** None (starts server)
 - **Dependencies:** All route/service/middleware modules, dotenv, express, cors, helmet, node-cron
 - **Last modified:** 2026-03-26
@@ -446,6 +446,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `0 3 * * *` (ET) | 3:00 AM EST nightly | price_log decimation (5-min / 1-hour / daily tiers, skips rows already marked) | price-log-decimator.js `decimatePriceLog()` |
 | `0 22 28-31 * *` | 5:00 PM (last day) | Monthly recap | `generateStackSignal('monthly_recap')` |
 | `0 15 1 1 *` | 10:00 AM (Jan 1) | Yearly recap | `generateStackSignal('yearly_recap')` |
+| `10 8 * * *` | 3:10 AM | TTS audio cache TTL cleanup (evicts troy-voice-cache objects >30 days old) | tts-cache.js `cleanupExpired()` |
 | ~~`5 * * * *`~~ | ~~Every hour at :05~~ | **DISABLED** — Dealer price scraping (re-enable when affiliate integrations ready) | dealerScraper.js `scrapeAllDealers()` |
 
 ---
@@ -710,9 +711,13 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
    - Convert ranges/ratios, plus/minus signs
    - Remove parenthetical percentages, URLs, bullets, special chars
    - Collapse whitespace
-5. Call `getTTSProvider().tts({ text: cleanText })` — provider chosen by `VOICE_PROVIDER` env var, default `elevenlabs` (ElevenLabs `/v1/text-to-speech/{voiceId}`, model `eleven_turbo_v2_5`). See §14.
-6. Stream the provider's `audioStream` (audio/mpeg) back to client
-7. Increment voice usage counter
+5. **Audio cache check** (`src/services/tts-cache.js`): content-addressed lookup in the private `troy-voice-cache` Supabase Storage bucket. Key path: `{SANITIZER_VERSION}/{provider}/{voice}/{model}-{format}/{sha256(sanitizedText)}.mp3` — provider/voice/model/format come from the provider module's `cacheKeyParts()`; `SANITIZER_VERSION` (`'v1'`, const above `sanitizeTTSText` in troy-chat.js) must be bumped whenever the sanitizer's output can change. On hit: cached bytes served buffered with Content-Length (both `?stream=1` and buffered callers), `cache: hit` in log. Quota semantics unchanged — hits still consume a daily slot. Storage errors are logged and swallowed; the cache never blocks synthesis.
+6. Call `getTTSProvider().tts({ text: cleanText })` — provider chosen by `VOICE_PROVIDER` env var, default `elevenlabs` (ElevenLabs `/v1/text-to-speech/{voiceId}`, model `eleven_turbo_v2_5`). See §14.
+7. Stream the provider's `audioStream` (audio/mpeg) back to client
+8. **Audio cache store**: buffered path only — after a clean drain and delivery, fire-and-forget upload of the MP3 (`cache: stored|store-failed` in log). Streaming-path store deferred (Phase A scope).
+9. Increment voice usage counter
+
+**troy-voice-cache bucket:** private (`public: false`), 10MB/file limit, `audio/mpeg` only, no client RLS grants — service-role access exclusively, created by `scripts/create-voice-cache-bucket.js` (idempotent). Cached audio speaks user financial data; it is served only through the authed endpoint, never via URLs. A daily cron evicts objects older than 30 days (`cleanupExpired()` — see §3).
 
 ### STT — POST /v1/troy/transcribe
 1. Validate userId (UUID), check audio file exists (multer, 10MB limit)
@@ -1031,7 +1036,7 @@ Text sanitization (`sanitizeTTSText` in `src/routes/troy-chat.js`) runs in the r
 Every provider call returns `costCents`. Routes log it today (`console.log`); future FIN-3 will wire this into the `api_usage_log` table so per-call spend is tracked alongside the nightly vendor snapshots in §13.
 
 ### Adding a new provider
-1. Drop `src/services/voice-providers/{name}.js` (or `{name}-stt.js`) exporting `tts` / `stt` matching the canonical interface.
+1. Drop `src/services/voice-providers/{name}.js` (or `{name}-stt.js`) exporting `tts` / `stt` matching the canonical interface. TTS providers should also export `cacheKeyParts() → { provider, voice, model, format }` mirroring exactly what `tts()` resolves for a route-originated call — this feeds the audio cache key (§7); without it the provider still works but caching is skipped for it.
 2. Register its loader in the `KNOWN_TTS` / `KNOWN_STT` map in `index.js`.
 3. Add any new env vars to `.env.example`.
 4. Flip `VOICE_PROVIDER` / `STT_PROVIDER` — no route or consumer changes required.
@@ -1045,6 +1050,13 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 ---
 
 ## Services Reference
+
+### src/services/tts-cache.js
+- **Purpose:** Content-addressed MP3 cache for `/v1/troy/speak` — synthesize once, serve stored bytes on identical requests (Phase A)
+- **Exports:** `BUCKET`, `TTL_DAYS`, `buildCacheKey({sanitizedText, version, provider, voice, model, format})`, `get(key)`, `put(key, buffer)`, `cleanupExpired({ttlDays})`
+- **Dependencies:** node:crypto, supabase (service role)
+- **Last modified:** 2026-07-31
+- **Failure policy:** `get()` → null, `put()` → false on any storage error (logged, swallowed) — cache can never break speech. Bucket: `troy-voice-cache`, private, 30-day TTL via daily cron (§3). Tests: `test/tts-cache.test.js` (`npm test`).
 
 ### src/services/price-fetcher.js
 - **Purpose:** Fetch, cache, and log spot prices
