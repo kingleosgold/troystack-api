@@ -215,6 +215,9 @@ app.use('/v1/junk-silver', publicLimiter, junkSilverRouter);
 // API key management — Supabase JWT auth inside the router (not apiKeyAuth)
 app.use('/v1/api-keys', publicLimiter, apiKeysRouter);
 
+// Podcast — public RSS feed for "The Stack Signal" (podcast v1)
+app.use('/v1/podcast', publicLimiter, require('./routes/podcast'));
+
 // MCP routes are mounted above (before express.json()) so the transport
 // can parse its own body — see Streamable HTTP block near Stripe webhook.
 
@@ -524,15 +527,60 @@ app.listen(PORT, () => {
   // Runs 20 min before Daily Brief so synthesis is ready for the combined morning push
   cron.schedule('15 11 * * *', async () => {
     console.log(`\n📰 [Stack Signal Daily] Triggered at ${new Date().toISOString()}`);
+    let result = null;
     try {
       const { generateStackSignal } = require('./services/stack-signal-processor');
-      const result = await generateStackSignal();
+      result = await generateStackSignal();
       console.log(`📰 [Stack Signal Daily] Done: ${result ? result.slug : 'no synthesis generated'}`);
     } catch (err) {
       console.error('📰 [Stack Signal Daily] Failed:', err.message);
     }
+
+    // Podcast v1: TTS the flagship into a public episode after it publishes.
+    // Own try/catch — episode failure logs and skips, NEVER breaks the
+    // article cron. Reserve-first + stub reclaim (safe on cron re-fire).
+    if (result) {
+      try {
+        const { generateEpisode } = require('./services/podcast');
+        const ep = await generateEpisode();
+        console.log(`🎙️ [Podcast] ${ep.created ? `Episode published: ${ep.slug} (${ep.audioBytes} bytes, ~${ep.durationSec}s)` : `Skipped: ${ep.reason}`}`);
+      } catch (err) {
+        console.error('🎙️ [Podcast] Episode generation failed (article publish unaffected):', err.message);
+      }
+    }
+
+    // Catch-up sweep for PRIOR days: runs even when today's article or
+    // episode generation failed. Today's own attempt, if it just failed,
+    // is still inside its pending lease — the dedicated heal cron an hour
+    // later (12:15 UTC) picks it up. Own try/catch.
+    try {
+      const { sweepRecentEpisodes } = require('./services/podcast');
+      const sweep = await sweepRecentEpisodes();
+      const notable = sweep.filter((s) => s.action === 'generated' || s.action === 'failed');
+      console.log(`🎙️ [Podcast] Sweep: ${notable.length ? JSON.stringify(notable) : 'nothing to heal'}`);
+    } catch (err) {
+      console.error('🎙️ [Podcast] Sweep failed:', err.message);
+    }
   }, { timezone: 'UTC' });
-  console.log('📰 [Stack Signal Daily] Scheduled: daily at 6:15 AM EST (11:15 UTC)');
+  console.log('📰 [Stack Signal Daily] Scheduled: daily at 6:15 AM EST (11:15 UTC) + podcast episode hook');
+
+  // ── Podcast heal cron: daily 7:15 AM EST (12:15 UTC) ──
+  // Dedicated pass an hour after generation — past the 10-minute claim
+  // lease, and independent of the 11:15 process surviving (a Railway
+  // restart mid-generation leaves a pending row; this cron claims and
+  // completes it with zero operator action).
+  cron.schedule('15 12 * * *', async () => {
+    console.log(`\n🎙️ [Podcast Heal Cron] Triggered at ${new Date().toISOString()}`);
+    try {
+      const { sweepRecentEpisodes } = require('./services/podcast');
+      const sweep = await sweepRecentEpisodes(3);
+      const notable = sweep.filter((s) => s.action === 'generated' || s.action === 'failed');
+      console.log(`🎙️ [Podcast Heal Cron] Done: ${notable.length ? JSON.stringify(notable) : 'nothing to heal'}`);
+    } catch (err) {
+      console.error('🎙️ [Podcast Heal Cron] Failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('🎙️ [Podcast Heal Cron] Scheduled: daily at 7:15 AM EST (12:15 UTC)');
 
   // ── Evening Stack Signal — post market close (4:30 PM EST / 21:30 UTC) ──
   cron.schedule('30 21 * * 1-5', async () => {

@@ -123,6 +123,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | POST | /v1/troy/conversations/:id/messages | Public (UUID, quota) | Send message to Troy (3/day free, 30/day Gold) |
 | POST | /v1/troy/speak | Public (UUID, Gold tier) | TTS via ElevenLabs — streams audio/mpeg, 4000 char limit, voice cap |
 | POST | /v1/troy/transcribe | Public (UUID) | STT via OpenAI Whisper — multipart audio upload, voice cap |
+| GET | /v1/podcast/feed.xml | Public | Podcast RSS feed for "The Stack Signal: Daily Gold & Silver Brief" — RSS 2.0 + iTunes tags from `podcast_episodes`, 10-min in-memory cache. Lives in `src/routes/podcast.js` |
 
 **Key functions:**
 - `detectPreviewContent(response, contextData)` — returns preview type: portfolio, purchasing_power, cost_basis, chart (ratio/spot_price), dealer_link
@@ -433,7 +434,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `* * * * *` | Every 60s | Price fetch + cache update + price_log write (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 60s (decimated later) |
 | `*/5 * * * *` | Every 5 min | Price alert checker | price-alert-checker.js `checkPriceAlerts()` |
 | `*/15 * * * *` | Every 15 min | Stack Signal article pipeline (~41 feeds, signal scoring, max 5/run) | stack-signal-processor.js `runStackSignalPipeline()` |
-| `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis | stack-signal-processor.js `generateStackSignal()` |
+| `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis → podcast episode hook (TTS flagship → troy-podcast bucket → podcast_episodes) → catch-up sweep healing the last 3 days' missed/failed episodes; each in its own try/catch, never breaks the article publish | stack-signal-processor.js `generateStackSignal()` + podcast.js `generateEpisode()` / `sweepRecentEpisodes()` |
 | `30 21 * * 1-5` | 4:30 PM (weekdays) | Stack Signal evening digest | `generateStackSignal('evening')` |
 | `0 22 * * 5` | 5:00 PM (Fri) | Weekly recap | `generateStackSignal('weekly_recap')` |
 | `15 11 * * 1` | 6:15 AM (Mon) | Weekly preview | `generateStackSignal('weekly_preview')` |
@@ -447,6 +448,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `0 22 28-31 * *` | 5:00 PM (last day) | Monthly recap | `generateStackSignal('monthly_recap')` |
 | `0 15 1 1 *` | 10:00 AM (Jan 1) | Yearly recap | `generateStackSignal('yearly_recap')` |
 | `10 8 * * *` | 3:10 AM | TTS audio cache TTL cleanup (evicts troy-voice-cache objects >30 days old) | tts-cache.js `cleanupExpired()` |
+| `15 12 * * *` | 7:15 AM | Podcast heal cron — sweeps the last 3 days for missing/expired-pending episodes; an hour past generation (outside the 10-min claim lease) and independent of the 11:15 process surviving | podcast.js `sweepRecentEpisodes(3)` |
 | ~~`5 * * * *`~~ | ~~Every hour at :05~~ | **DISABLED** — Dealer price scraping (re-enable when affiliate integrations ready) | dealerScraper.js `scrapeAllDealers()` |
 
 ---
@@ -518,6 +520,16 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `user_id` (UUID, PK), `questions_used` (int), `period_start` (timestamptz)
 - Rolling 1-day window: free=3/day, gold=30/day
 - Used by: troy-chat.js
+
+### podcast_episodes
+- `slug` (text, PK — matches stack_signal_articles.slug, e.g. `the-stack-signal-2026-07-31`)
+- `audio_url` (text — public troy-podcast bucket URL, RSS enclosure), `audio_bytes` (bigint), `duration_sec` (int — bytes/16000 @128kbps CBR)
+- `status` (text: `pending` | `complete`, default `complete`), `attempt_started_at` (timestamptz — lease start of the owning attempt), `attempt_token` (uuid — identity of the owning attempt; every acquisition writes a fresh one)
+- `title`, `description` (text), `published_at`, `created_at` (timestamptz)
+- Migrations: `migrations/004_podcast_episodes.sql` (applied to production 2026-07-31) + `migrations/005_podcast_episode_status.sql` (**must be applied before podcast v1 deploys**). `scripts/setup-podcast-tables.js` prints both (display-only)
+- Used by: podcast.js (service + route)
+
+**Episode lifecycle state machine** (podcast.js): `pending` = an attempt owns the row, lease = `attempt_started_at` + 10 min (`CLAIM_LEASE_MINUTES`), identity = `attempt_token`; `complete` = finalized, served by the feed. Every ownership change is one atomic statement writing a fresh token — PK INSERT (`NEW` → pending), CAS stale-claim UPDATE (`pending` + expired lease → pending, lease + token refreshed; exactly one concurrent winner), CAS force-demote (`complete` → pending, fresh lease + token, bytes zeroed — overlapping plain calls see an active attempt), token-bound finalize (`pending` + my token → complete + real bytes; a superseded owner matches 0 rows and exits). An advisory pre-upload re-read aborts a superseded attempt before it touches storage; accepted residual: ms-scale TOCTOU between that check and the upload means a superseded upload can land after someone else's finalize — self-corrected by the next `--force`. A crash at any point leaves `pending`, claimable after the lease expires — healed automatically by the next cron fire, the 12:15 heal cron, or a manual run.
 
 ### stack_signal_articles
 - `id` (UUID, PK), `slug` (text, unique)
@@ -1050,6 +1062,13 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 ---
 
 ## Services Reference
+
+### src/services/podcast.js
+- **Purpose:** Podcast v1 — turn the daily flagship Stack Signal article into a public episode of "The Stack Signal: Daily Gold & Silver Brief"
+- **Exports:** `generateEpisode({date, force})` (explicit pending/complete state machine — see the podcast_episodes schema section for states, transitions, and the 10-min claim lease; all ownership changes are atomic CAS statements, never read-then-act; `force` = atomic demote of a complete episode then regenerate, with the trade that the episode leaves the feed until finalize or the next heal), `sweepRecentEpisodes(days=3)` (missing-or-pending = work, complete skips; runs post-generation at 11:15 and in the dedicated 12:15 heal cron), `buildEpisodeScript(article)`, `buildEpisodeDescription(article)`, `stripMarkdown(text)`, `BUCKET`, `PODCAST_VOICE`, `CLAIM_LEASE_MINUTES`
+- **Dependencies:** supabase, voice-providers/grok (PINNED — never getTTSProvider; voice `leo`, xAI Output-ownership terms), troy-chat.js `sanitizeTTSText`
+- **Last modified:** 2026-07-31
+- **Pipeline:** strip markdown → wrap intro/outro → sanitizeTTSText → grok.tts → upload `episodes/{slug}.mp3` to **troy-podcast** (PUBLIC bucket, 50MB, audio/mpeg + artwork.png, retention FOREVER — permanently excluded from all cleanup crons) → insert `podcast_episodes` row. Triggered by the 11:15 UTC cron hook after the flagship publishes; manual/backfill via `scripts/generate-episode.js [date]`. Artwork: `scripts/generate-podcast-artwork.js` (3000×3000 from the Troy coin SVG, needs `sharp` devDependency). Tests: `test/podcast.test.js`.
 
 ### src/services/tts-cache.js
 - **Purpose:** Content-addressed MP3 cache for `/v1/troy/speak` — synthesize once, serve stored bytes on identical requests (Phase A)
