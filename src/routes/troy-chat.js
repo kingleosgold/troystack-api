@@ -918,14 +918,18 @@ function sanitizeTTSText(text) {
 
   // Convert dollar amounts to spoken English: $4,657.59 → "four thousand six hundred fifty-seven dollars and fifty-nine cents"
   // Consumes ALL decimal digits (not just 2) and rounds to cents, so
-  // "$126,166.234" can't leak a trailing digit ("…cents4").
-  clean = clean.replace(/\$([0-9,]+(?:\.[0-9]+)?)/g, (match, num) => {
-    const n = parseFloat(num.replace(/,/g, ''));
-    let dollars = Math.floor(n);
-    let cents = Math.round((n - dollars) * 100);
-    if (cents === 100) { dollars += 1; cents = 0; } // $1.999 rounds up to $2
-    let result = converter.toWords(dollars) + ' dollars';
-    if (cents > 0) result += ' and ' + converter.toWords(cents) + ' cents';
+  // "$126,166.234" can't leak a trailing digit ("…cents4"). Cents are derived
+  // from the captured decimal-digit STRING with integer math only — float
+  // subtraction/multiplication here rounds half-cents wrong through binary
+  // floating-point ($1.005 → "one dollar"; $2.675 → 67 cents).
+  clean = clean.replace(/\$([0-9,]+)(?:\.([0-9]+))?/g, (match, intPart, decPart) => {
+    let dollars = parseInt(intPart.replace(/,/g, ''), 10);
+    const dec = decPart || '';
+    let cents = parseInt((dec + '00').slice(0, 2), 10);       // first two decimal digits
+    if (dec.length >= 3 && dec[2] >= '5') cents += 1;         // round half-up on the third
+    if (cents === 100) { dollars += 1; cents = 0; }           // $1.999 rounds up to $2
+    let result = converter.toWords(dollars) + (dollars === 1 ? ' dollar' : ' dollars');
+    if (cents > 0) result += ' and ' + converter.toWords(cents) + (cents === 1 ? ' cent' : ' cents');
     return result;
   });
 

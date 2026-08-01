@@ -55,6 +55,14 @@ test('cents carry: "$1.999" rounds up to two dollars', () => {
   assert.strictEqual(sanitizeTTSText('$1.999'), 'two dollars');
 });
 
+test('half-cent rounds half-up via string math: "$1.005" → one cent', () => {
+  assert.strictEqual(sanitizeTTSText('$1.005'), 'one dollar and one cent');
+});
+
+test('half-cent rounds half-up via string math: "$2.675" → sixty-eight cents', () => {
+  assert.strictEqual(sanitizeTTSText('$2.675'), 'two dollars and sixty-eight cents');
+});
+
 test('no sanitized output contains a period glued to a digit', () => {
   const inputs = [
     'Your total gain is $126,166.23 since you started stacking.',
