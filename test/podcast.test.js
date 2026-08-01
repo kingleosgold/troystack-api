@@ -236,10 +236,10 @@ test('reserve-first: double generate = one provider call; --force updates in pla
   }
 });
 
-test('stub reclaim: a failed attempt is retryable without --force', { skip: !hasEnv && 'SUPABASE env not configured' }, async () => {
+test('freshness-gated reclaim: fresh stub skips, aged stub reclaims', { skip: !hasEnv && 'SUPABASE env not configured' }, async () => {
   const supabase = require('../src/lib/supabase');
   const grok = require('../src/services/voice-providers/grok');
-  const { generateEpisode, BUCKET } = require('../src/services/podcast');
+  const { generateEpisode, BUCKET, RECLAIM_AFTER_MINUTES } = require('../src/services/podcast');
 
   const DATE = '1999-01-03'; // fixture date — cannot exist in production
   const SLUG = `the-stack-signal-${DATE}`;
@@ -252,23 +252,110 @@ test('stub reclaim: a failed attempt is retryable without --force', { skip: !has
     await insertFixtureArticle(supabase, SLUG, DATE);
 
     // Simulated provider outage AFTER reservation: generateEpisode throws,
-    // leaving a stub row (audio_bytes=0).
+    // leaving a FRESH stub row (audio_bytes=0, created_at=now).
     tts.throwWith = 'simulated provider outage';
     await assert.rejects(generateEpisode({ date: DATE }), /simulated provider outage/);
     const { data: stub } = await supabase.from('podcast_episodes')
       .select('audio_bytes').eq('slug', SLUG).single();
     assert.strictEqual(stub.audio_bytes, 0, 'failed attempt leaves a stub');
 
-    // Any later invocation reclaims the stub WITHOUT --force.
+    // Fresh stub → the gate assumes an attempt is in flight: skip, zero
+    // provider calls.
     tts.throwWith = null;
     tts.calls = 0;
+    const gated = await generateEpisode({ date: DATE });
+    assert.strictEqual(gated.skipped, true, 'fresh stub is not reclaimed');
+    assert.match(gated.reason, /likely in progress/);
+    assert.strictEqual(tts.calls, 0, 'zero provider calls while gated');
+
+    // Age the stub past the gate → plain call reclaims it.
+    const aged = new Date(Date.now() - (RECLAIM_AFTER_MINUTES + 10) * 60000).toISOString();
+    const { error: ageErr } = await supabase.from('podcast_episodes')
+      .update({ created_at: aged }).eq('slug', SLUG);
+    assert.ifError(ageErr && new Error(ageErr.message));
+
     const reclaimed = await generateEpisode({ date: DATE });
-    assert.strictEqual(reclaimed.created, true, 'stub reclaimed as winner');
+    assert.strictEqual(reclaimed.created, true, 'aged stub reclaimed as winner');
     assert.strictEqual(tts.calls, 1, 'exactly one provider call for the reclaim');
     const { data: row } = await supabase.from('podcast_episodes')
       .select('audio_bytes').eq('slug', SLUG).single();
     assert.strictEqual(row.audio_bytes, 1024, 'row updated with real audio');
   } finally {
+    grok.tts = tts.real;
+    await cleanupFixtureSlug(supabase, BUCKET, SLUG);
+  }
+});
+
+test('force demotes before overwrite: mid-force crash leaves a healable stub', { skip: !hasEnv && 'SUPABASE env not configured' }, async () => {
+  const supabase = require('../src/lib/supabase');
+  const grok = require('../src/services/voice-providers/grok');
+  const { generateEpisode, BUCKET, RECLAIM_AFTER_MINUTES } = require('../src/services/podcast');
+
+  const DATE = '1999-01-08'; // fixture date — cannot exist in production
+  const SLUG = `the-stack-signal-${DATE}`;
+
+  await assertFixtureAbsent(supabase, 'stack_signal_articles', SLUG);
+  await assertFixtureAbsent(supabase, 'podcast_episodes', SLUG);
+
+  const tts = stubTts(grok);
+  const realFrom = supabase.from.bind(supabase);
+  try {
+    await insertFixtureArticle(supabase, SLUG, DATE);
+
+    // Completed fixture episode, created_at aged past the reclaim gate so
+    // the post-crash stub is immediately healable by a plain call.
+    const aged = new Date(Date.now() - (RECLAIM_AFTER_MINUTES + 10) * 60000).toISOString();
+    const { error: doneErr } = await supabase.from('podcast_episodes').insert({
+      slug: SLUG, audio_url: 'https://example.invalid/done.mp3',
+      audio_bytes: 500, duration_sec: 1,
+      title: 'TEST FIXTURE — completed', description: 'fixture',
+      published_at: `${DATE}T11:15:00+00:00`, created_at: aged,
+    });
+    assert.ifError(doneErr && new Error(doneErr.message));
+
+    // Fail the SECOND podcast_episodes update in the force call — update #1
+    // is the demote, update #2 is the post-upload finalize. This simulates
+    // a crash after upload but before the row gets its real bytes.
+    let updateCalls = 0;
+    supabase.from = (table) => {
+      const builder = realFrom(table);
+      if (table === 'podcast_episodes') {
+        const realUpdate = builder.update.bind(builder);
+        builder.update = (...args) => {
+          updateCalls += 1;
+          if (updateCalls === 2) throw new Error('simulated post-upload update failure');
+          return realUpdate(...args);
+        };
+      }
+      return builder;
+    };
+    await assert.rejects(generateEpisode({ date: DATE, force: true }), /simulated post-upload update failure/);
+    supabase.from = realFrom;
+
+    // The row is a stub (demote landed, finalize did not)…
+    const { data: stub } = await supabase.from('podcast_episodes')
+      .select('audio_bytes, duration_sec').eq('slug', SLUG).single();
+    assert.strictEqual(stub.audio_bytes, 0, 'demoted row stayed a stub after the crash');
+    assert.strictEqual(stub.duration_sec, 0);
+
+    // …and the feed's filter excludes it (same audio_bytes > 0 predicate the
+    // route uses — the route filter itself is covered by the dedicated
+    // feed-stub test above).
+    const { data: feedRows } = await supabase.from('podcast_episodes')
+      .select('slug').gt('audio_bytes', 0).eq('slug', SLUG);
+    assert.strictEqual(feedRows.length, 0, 'feed filter excludes the demoted stub');
+
+    // A subsequent PLAIN call completes it (stub inherited the aged
+    // created_at, so the freshness gate lets it reclaim).
+    tts.calls = 0;
+    const healed = await generateEpisode({ date: DATE });
+    assert.strictEqual(healed.created, true, 'plain call completes the crashed force');
+    assert.strictEqual(tts.calls, 1);
+    const { data: row } = await supabase.from('podcast_episodes')
+      .select('audio_bytes').eq('slug', SLUG).single();
+    assert.strictEqual(row.audio_bytes, 1024, 'row finalized with real audio');
+  } finally {
+    supabase.from = realFrom;
     grok.tts = tts.real;
     await cleanupFixtureSlug(supabase, BUCKET, SLUG);
   }
@@ -297,9 +384,12 @@ test('sweepRecentEpisodes heals stub/missing dates, skips completed', { skip: !h
   try {
     for (const d of [D_STUB, D_MISSING, D_DONE]) await insertFixtureArticle(supabase, slugOf(d), d);
 
+    // Stub aged past the reclaim gate — the sweep's generateEpisode call
+    // must see it as crashed (not in-flight) to heal it.
+    const agedStub = new Date(Date.now() - 20 * 60000).toISOString();
     const { error: stubErr } = await supabase.from('podcast_episodes').insert({
       slug: slugOf(D_STUB), audio_url: 'https://example.invalid/stub.mp3',
-      audio_bytes: 0, duration_sec: 0,
+      audio_bytes: 0, duration_sec: 0, created_at: agedStub,
       title: 'TEST FIXTURE — stub', description: 'fixture', published_at: `${D_STUB}T11:15:00+00:00`,
     });
     assert.ifError(stubErr && new Error(stubErr.message));

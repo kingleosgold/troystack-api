@@ -28,6 +28,10 @@ const BYTES_PER_SEC = 16000; // 128kbps CBR MP3 — duration estimate for itunes
 // Passed explicitly so a change to grok.js's default/env voice resolution can
 // never silently reskin the podcast — same reasoning as the pinned provider.
 const PODCAST_VOICE = 'leo';
+// A stub (audio_bytes=0) younger than this is treated as an attempt in
+// flight (generation takes ~1 min; 10 min is a comfortable upper bound) —
+// reclaim only engages on older stubs. --force overrides the gate.
+const RECLAIM_AFTER_MINUTES = 10;
 
 // Strip markdown the sanitizer doesn't fully cover: links, headers, images,
 // code ticks. Bold/italic markers are also handled here so the episode script
@@ -115,18 +119,21 @@ async function generateEpisode({ date, force = false } = {}) {
     if (!isConflict) throw new Error(`reservation failed: ${insertErr.message}`);
     if (!force) {
       // Conflict: someone already holds this slug. A completed episode
-      // (audio_bytes > 0) skips; a stub (audio_bytes = 0) is a failed prior
-      // attempt — RECLAIM it and proceed as winner, so any later invocation
-      // (next cron fire, catch-up sweep, manual run) self-heals without
-      // --force. --force is only needed to REGENERATE completed episodes.
+      // (audio_bytes > 0) skips. A stub (audio_bytes = 0) is either an
+      // attempt in flight or a crashed one — the created_at freshness gate
+      // decides: younger than RECLAIM_AFTER_MINUTES → assume in flight and
+      // exit; older → crashed, RECLAIM it and proceed as winner, so any
+      // later invocation (next cron fire, catch-up sweep, manual run)
+      // self-heals without --force. --force is only needed to REGENERATE
+      // completed episodes (and overrides this gate).
       //
-      // Single-instance assumption: two concurrent reclaims of the same stub
-      // would both pass this read and double-spend synthesis (last UPDATE
-      // wins; bytes stay consistent). Acceptable on single-replica Railway —
-      // revisit with a compare-and-swap UPDATE if replicas ever exist.
+      // Residual race: two processes reclaiming the same >10-min-old
+      // crashed stub in the same instant would double-spend synthesis
+      // (last UPDATE wins; bytes stay consistent). Accepted —
+      // single-operator system.
       const { data: existing, error: readErr } = await supabase
         .from('podcast_episodes')
-        .select('audio_bytes')
+        .select('audio_bytes, created_at')
         .eq('slug', slug)
         .maybeSingle();
       if (readErr) throw new Error(`reservation conflict read failed: ${readErr.message}`);
@@ -134,7 +141,25 @@ async function generateEpisode({ date, force = false } = {}) {
         console.log(`🎙️ [Podcast] ${slug} already generated — exiting before provider spend`);
         return { skipped: true, reason: `already generated: ${slug}` };
       }
-      console.log(`🎙️ [Podcast] ${slug} has a pending/failed stub — reclaiming`);
+      const stubAgeMin = existing ? (Date.now() - new Date(existing.created_at).getTime()) / 60000 : Infinity;
+      if (stubAgeMin < RECLAIM_AFTER_MINUTES) {
+        console.log(`🎙️ [Podcast] ${slug} has a ${stubAgeMin.toFixed(1)}-min-old stub — generation likely in progress, exiting`);
+        return { skipped: true, reason: `generation likely in progress: ${slug}` };
+      }
+      console.log(`🎙️ [Podcast] ${slug} has a stale stub (${stubAgeMin.toFixed(1)} min) — reclaiming`);
+    } else {
+      // FORCE DEMOTES BEFORE OVERWRITE: re-stub the row first (the feed's
+      // audio_bytes > 0 filter hides it immediately), THEN synthesize →
+      // upload → UPDATE with real bytes. A crash anywhere mid-force leaves
+      // a stub that the reclaim path or sweepRecentEpisodes completes
+      // automatically — there is no state where the feed advertises
+      // metadata for a different file. Trade: the episode vanishes from
+      // the feed during a failed force until the next heal.
+      const { error: demoteErr } = await supabase
+        .from('podcast_episodes')
+        .update({ audio_bytes: 0, duration_sec: 0 })
+        .eq('slug', slug);
+      if (demoteErr) throw new Error(`force demote failed: ${demoteErr.message}`);
     }
   }
 
@@ -214,4 +239,4 @@ async function sweepRecentEpisodes(days = 3, { dates } = {}) {
   return results;
 }
 
-module.exports = { generateEpisode, sweepRecentEpisodes, buildEpisodeScript, buildEpisodeDescription, stripMarkdown, BUCKET, PODCAST_VOICE };
+module.exports = { generateEpisode, sweepRecentEpisodes, buildEpisodeScript, buildEpisodeDescription, stripMarkdown, BUCKET, PODCAST_VOICE, RECLAIM_AFTER_MINUTES };
