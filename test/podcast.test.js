@@ -9,8 +9,12 @@ const { XMLParser, XMLValidator } = require('fast-xml-parser');
 
 require('dotenv').config(); // src/lib/supabase.js (transitively required) needs env at load
 
-const { stripMarkdown, buildEpisodeScript, buildEpisodeDescription } = require('../src/services/podcast');
+const { stripMarkdown, buildEpisodeScript, buildEpisodeDescription, PODCAST_VOICE } = require('../src/services/podcast');
 const { buildFeedXml } = require('../src/routes/podcast');
+
+test('podcast voice is pinned to leo', () => {
+  assert.strictEqual(PODCAST_VOICE, 'leo');
+});
 
 test('stripMarkdown removes links, headers, bold, italic, code', () => {
   const md = '## Headline\n\n**Gold** hit *records*. See [COMEX data](https://example.com/x) and `spot`.\n\n_Also_ __this__.';

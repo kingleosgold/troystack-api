@@ -24,6 +24,10 @@ const { sanitizeTTSText } = require('../routes/troy-chat');
 
 const BUCKET = 'troy-podcast';
 const BYTES_PER_SEC = 16000; // 128kbps CBR MP3 — duration estimate for itunes:duration
+// Pinned-voice contract: the show's voice is part of its published identity.
+// Passed explicitly so a change to grok.js's default/env voice resolution can
+// never silently reskin the podcast — same reasoning as the pinned provider.
+const PODCAST_VOICE = 'leo';
 
 // Strip markdown the sanitizer doesn't fully cover: links, headers, images,
 // code ticks. Bold/italic markers are also handled here so the episode script
@@ -91,7 +95,7 @@ async function generateEpisode({ date } = {}) {
   const cleanText = sanitizeTTSText(script);
   console.log(`🎙️ [Podcast] Synthesizing ${slug}: script ${script.length} chars → sanitized ${cleanText.length} chars`);
 
-  const ttsResult = await grok.tts({ text: cleanText });
+  const ttsResult = await grok.tts({ text: cleanText, voiceId: PODCAST_VOICE });
   const chunks = [];
   for await (const chunk of ttsResult.audioStream) chunks.push(chunk);
   const audioBuffer = Buffer.concat(chunks);
@@ -123,4 +127,4 @@ async function generateEpisode({ date } = {}) {
   return { created: true, slug, audioUrl, audioBytes: audioBuffer.length, durationSec };
 }
 
-module.exports = { generateEpisode, buildEpisodeScript, buildEpisodeDescription, stripMarkdown, BUCKET };
+module.exports = { generateEpisode, buildEpisodeScript, buildEpisodeDescription, stripMarkdown, BUCKET, PODCAST_VOICE };

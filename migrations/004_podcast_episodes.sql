@@ -3,6 +3,9 @@
 -- (never the bucket listing). slug matches stack_signal_articles.slug for the
 -- daily flagship (the-stack-signal-YYYY-MM-DD).
 -- Apply: scripts/setup-podcast-tables.js (or paste into Supabase SQL Editor).
+-- Re-run safe: CREATE IF NOT EXISTS + ALTER ... ENABLE ROW LEVEL SECURITY are
+-- both idempotent — if the table was already created from an earlier version
+-- of this file (pre-RLS), just run the whole file again.
 
 CREATE TABLE IF NOT EXISTS podcast_episodes (
   slug TEXT PRIMARY KEY,
@@ -17,3 +20,8 @@ CREATE TABLE IF NOT EXISTS podcast_episodes (
 
 CREATE INDEX IF NOT EXISTS idx_podcast_episodes_published
   ON podcast_episodes(published_at DESC);
+
+-- RLS with no policies = deny-all for anon/authenticated PostgREST roles.
+-- The only intended readers/writers (the feed route and the episode
+-- generator) use the service-role client, which bypasses RLS.
+ALTER TABLE podcast_episodes ENABLE ROW LEVEL SECURITY;
