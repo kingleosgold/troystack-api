@@ -13,9 +13,12 @@
 const fs = require('fs');
 const path = require('path');
 
-const SQL = fs.readFileSync(path.join(__dirname, '..', 'migrations', '004_podcast_episodes.sql'), 'utf-8');
+const MIGRATIONS = ['004_podcast_episodes.sql', '005_podcast_episode_status.sql'];
 
 console.log('Podcast table setup — paste the following into the Supabase SQL Editor:');
-console.log('(re-run safe: CREATE IF NOT EXISTS + idempotent ALTER)\n');
-console.log(SQL);
+console.log('(re-run safe: CREATE IF NOT EXISTS + idempotent ALTERs)\n');
+for (const m of MIGRATIONS) {
+  console.log(`-- ─── ${m} ───`);
+  console.log(fs.readFileSync(path.join(__dirname, '..', 'migrations', m), 'utf-8'));
+}
 process.exit(0);

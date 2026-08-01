@@ -93,20 +93,41 @@ test('feed.xml handles empty episode list', () => {
   assert.strictEqual(XMLValidator.validate(xml), true);
 });
 
-// ── Integration tests (real table + bucket; skipped without env) ──
+// ── Integration tests (real table + bucket) ──
 //
 // FIXTURE-ONLY policy: every row/object these tests touch lives on a 1999
 // fixture date — impossible in production (the pipeline launched in 2026).
 // NAMESPACE CLEANUP: the 1999 namespace is test-owned by invariant, so each
-// finally block deletes its fixture-slug resources UNCONDITIONALLY (episode
-// row, storage object at the fixture path, fixture article) — even a
-// mid-test crash leaves nothing behind. FAIL-LOUD: the pre-check still
-// guards run START — if a fixture unexpectedly already exists the test
-// fails with a clear message and deletes nothing (cleanup is skipped by the
-// assertion throwing before any insert).
+// finally block deletes its fixture-slug resources UNCONDITIONALLY — even a
+// mid-test crash leaves nothing behind. FAIL-LOUD: pre-checks run BEFORE the
+// try/finally, so a surprise leftover throws first and cleanup never runs —
+// fail loud, delete nothing.
+//
+// Skips: no SUPABASE env (clean checkout) → skip; env present but migration
+// 005 not applied (status column missing) → skip with instructions.
 
-// Asserts the fixture identified by (table, column, value) does not already
-// exist. Returns nothing; throws the fail-loud message on surprise.
+let statusReadyPromise;
+function statusReady() {
+  if (!statusReadyPromise) {
+    statusReadyPromise = (async () => {
+      const supabase = require('../src/lib/supabase');
+      const { error } = await supabase.from('podcast_episodes').select('status').limit(1);
+      return !error;
+    })();
+  }
+  return statusReadyPromise;
+}
+
+// Per-test gate: returns true when the test should run; otherwise skips it.
+async function integrationReady(t) {
+  if (!hasEnv) { t.skip('SUPABASE env not configured'); return false; }
+  if (!(await statusReady())) {
+    t.skip('migration 005 not applied — paste migrations/005_podcast_episode_status.sql into the SQL Editor');
+    return false;
+  }
+  return true;
+}
+
 async function assertFixtureAbsent(supabase, table, value) {
   const { data, error } = await supabase.from(table).select('slug').eq('slug', value).maybeSingle();
   assert.ifError(error && new Error(`${table} pre-check failed: ${error.message}`));
@@ -116,44 +137,6 @@ async function assertFixtureAbsent(supabase, table, value) {
     `SURPRISE: fixture "${value}" already exists in ${table}. Refusing to run and deleting nothing — inspect and remove it manually.`
   );
 }
-
-test('feed route excludes pending stubs (audio_bytes=0)', { skip: !hasEnv && 'SUPABASE env not configured' }, async () => {
-  const supabase = require('../src/lib/supabase');
-  const express = require('express');
-  const STUB_SLUG = 'the-stack-signal-1999-01-01'; // fixture date — cannot exist in production
-
-  // Fail-loud pre-check BEFORE the try/finally: a surprise leftover throws
-  // here, so the unconditional cleanup below never runs — nothing deleted.
-  await assertFixtureAbsent(supabase, 'podcast_episodes', STUB_SLUG);
-
-  try {
-    const { error: insErr } = await supabase.from('podcast_episodes').insert({
-      slug: STUB_SLUG,
-      audio_url: 'https://example.invalid/stub.mp3',
-      audio_bytes: 0,
-      duration_sec: 0,
-      title: 'TEST FIXTURE — reservation stub, must never appear in feed',
-      description: 'podcast integration-test fixture (safe to delete)',
-      published_at: '1999-01-01T00:00:00+00:00',
-    });
-    assert.ifError(insErr && new Error(insErr.message));
-
-    const app = express();
-    app.use('/v1/podcast', require('../src/routes/podcast'));
-    const server = app.listen(0);
-    try {
-      const r = await fetch(`http://127.0.0.1:${server.address().port}/v1/podcast/feed.xml`);
-      const xml = await r.text();
-      assert.strictEqual(r.status, 200);
-      assert.ok(!xml.includes(STUB_SLUG), 'stub row must not appear in feed.xml');
-    } finally {
-      server.close();
-    }
-  } finally {
-    // Namespace cleanup: fixture slug is test-owned — delete unconditionally.
-    await supabase.from('podcast_episodes').delete().eq('slug', STUB_SLUG);
-  }
-});
 
 // Insert a clearly-labeled fixture article for a 1999 fixture date.
 async function insertFixtureArticle(supabase, slug, date) {
@@ -172,9 +155,24 @@ async function insertFixtureArticle(supabase, slug, date) {
   assert.ifError(error && new Error(`fixture article insert failed: ${error.message}`));
 }
 
-// Namespace cleanup for one fixture slug: episode row, storage object at the
-// fixture path, fixture article — unconditional (the 1999 namespace is
-// test-owned by invariant; removing absent resources is a no-op).
+// Insert a fixture episode row in a given lifecycle state.
+async function insertFixtureEpisode(supabase, slug, date, { status, attemptStartedAt, audioBytes = 0 }) {
+  const { error } = await supabase.from('podcast_episodes').insert({
+    slug,
+    audio_url: 'https://example.invalid/fixture.mp3',
+    audio_bytes: audioBytes,
+    duration_sec: audioBytes ? 1 : 0,
+    status,
+    attempt_started_at: attemptStartedAt || new Date().toISOString(),
+    title: `TEST FIXTURE — ${status}`,
+    description: 'podcast integration-test fixture (safe to delete)',
+    published_at: `${date}T11:15:00+00:00`,
+  });
+  assert.ifError(error && new Error(`fixture episode insert failed: ${error.message}`));
+}
+
+// Namespace cleanup for one fixture slug — unconditional (1999 namespace is
+// test-owned; removing absent resources is a no-op).
 async function cleanupFixtureSlug(supabase, BUCKET, slug) {
   await supabase.from('podcast_episodes').delete().eq('slug', slug);
   await supabase.storage.from(BUCKET).remove([`episodes/${slug}.mp3`]);
@@ -184,25 +182,54 @@ async function cleanupFixtureSlug(supabase, BUCKET, slug) {
 // Stubbed grok.tts returning controllable fake audio; returns handles.
 function stubTts(grok) {
   const { Readable } = require('node:stream');
-  const state = { calls: 0, bytes: Buffer.alloc(1024, 1), throwWith: null, real: grok.tts };
+  const state = { calls: 0, bytes: Buffer.alloc(1024, 1), throwWith: null, onCall: null, real: grok.tts };
   grok.tts = async () => {
     state.calls += 1;
+    if (state.onCall) await state.onCall(state.calls);
     if (state.throwWith) throw new Error(state.throwWith);
     return { audioStream: Readable.from([state.bytes]), costCents: 0, provider: 'grok', model: 'stub', charCount: 0 };
   };
   return state;
 }
 
-test('reserve-first: double generate = one provider call; --force updates in place', { skip: !hasEnv && 'SUPABASE env not configured' }, async () => {
+function agedIso(minutesPast) {
+  return new Date(Date.now() - minutesPast * 60000).toISOString();
+}
+
+test('feed route serves only complete episodes (pending hidden)', async (t) => {
+  if (!(await integrationReady(t))) return;
+  const supabase = require('../src/lib/supabase');
+  const express = require('express');
+  const SLUG = 'the-stack-signal-1999-01-01';
+
+  await assertFixtureAbsent(supabase, 'podcast_episodes', SLUG);
+  try {
+    await insertFixtureEpisode(supabase, SLUG, '1999-01-01', { status: 'pending' });
+
+    const app = express();
+    app.use('/v1/podcast', require('../src/routes/podcast'));
+    const server = app.listen(0);
+    try {
+      const r = await fetch(`http://127.0.0.1:${server.address().port}/v1/podcast/feed.xml`);
+      const xml = await r.text();
+      assert.strictEqual(r.status, 200);
+      assert.ok(!xml.includes(SLUG), 'pending row must not appear in feed.xml');
+    } finally {
+      server.close();
+    }
+  } finally {
+    await cleanupFixtureSlug(supabase, require('../src/services/podcast').BUCKET, SLUG);
+  }
+});
+
+test('lifecycle: double generate = one provider call; second sees complete', async (t) => {
+  if (!(await integrationReady(t))) return;
   const supabase = require('../src/lib/supabase');
   const grok = require('../src/services/voice-providers/grok');
   const { generateEpisode, BUCKET } = require('../src/services/podcast');
 
-  const DATE = '1999-01-02'; // fixture date — cannot exist in production
+  const DATE = '1999-01-02';
   const SLUG = `the-stack-signal-${DATE}`;
-
-  // Fail-loud pre-checks BEFORE the try/finally: on surprise, throw here and
-  // the unconditional cleanup never runs — nothing deleted.
   await assertFixtureAbsent(supabase, 'stack_signal_articles', SLUG);
   await assertFixtureAbsent(supabase, 'podcast_episodes', SLUG);
 
@@ -212,38 +239,30 @@ test('reserve-first: double generate = one provider call; --force updates in pla
 
     const first = await generateEpisode({ date: DATE });
     assert.strictEqual(first.created, true, 'first call publishes');
-    assert.strictEqual(first.audioBytes, 1024);
     assert.strictEqual(tts.calls, 1);
+    const { data: row1 } = await supabase.from('podcast_episodes')
+      .select('status, audio_bytes').eq('slug', SLUG).single();
+    assert.strictEqual(row1.status, 'complete');
+    assert.strictEqual(row1.audio_bytes, 1024);
 
     const second = await generateEpisode({ date: DATE });
-    assert.strictEqual(second.skipped, true, 'second call exits at reservation');
+    assert.strictEqual(second.skipped, true, 'second call skips');
     assert.match(second.reason, /already generated/);
     assert.strictEqual(tts.calls, 1, 'no second provider call');
-
-    tts.bytes = Buffer.alloc(2048, 2);
-    const forced = await generateEpisode({ date: DATE, force: true });
-    assert.strictEqual(forced.created, true, '--force regenerates');
-    assert.strictEqual(forced.audioBytes, 2048);
-    assert.strictEqual(tts.calls, 2);
-
-    const { data: row } = await supabase.from('podcast_episodes')
-      .select('audio_bytes, duration_sec').eq('slug', SLUG).single();
-    assert.strictEqual(row.audio_bytes, 2048, 'row updated in place');
-    assert.strictEqual(row.duration_sec, Math.round(2048 / 16000));
   } finally {
     grok.tts = tts.real;
     await cleanupFixtureSlug(supabase, BUCKET, SLUG);
   }
 });
 
-test('freshness-gated reclaim: fresh stub skips, aged stub reclaims', { skip: !hasEnv && 'SUPABASE env not configured' }, async () => {
+test('lifecycle: crash after claim leaves pending; active lease blocks plain call AND sweep; stale claim heals', async (t) => {
+  if (!(await integrationReady(t))) return;
   const supabase = require('../src/lib/supabase');
   const grok = require('../src/services/voice-providers/grok');
-  const { generateEpisode, BUCKET, RECLAIM_AFTER_MINUTES } = require('../src/services/podcast');
+  const { generateEpisode, sweepRecentEpisodes, BUCKET, CLAIM_LEASE_MINUTES } = require('../src/services/podcast');
 
-  const DATE = '1999-01-03'; // fixture date — cannot exist in production
+  const DATE = '1999-01-03';
   const SLUG = `the-stack-signal-${DATE}`;
-
   await assertFixtureAbsent(supabase, 'stack_signal_articles', SLUG);
   await assertFixtureAbsent(supabase, 'podcast_episodes', SLUG);
 
@@ -251,128 +270,185 @@ test('freshness-gated reclaim: fresh stub skips, aged stub reclaims', { skip: !h
   try {
     await insertFixtureArticle(supabase, SLUG, DATE);
 
-    // Simulated provider outage AFTER reservation: generateEpisode throws,
-    // leaving a FRESH stub row (audio_bytes=0, created_at=now).
+    // Crash after the NEW claim: row stays 'pending' with a fresh lease.
     tts.throwWith = 'simulated provider outage';
     await assert.rejects(generateEpisode({ date: DATE }), /simulated provider outage/);
-    const { data: stub } = await supabase.from('podcast_episodes')
-      .select('audio_bytes').eq('slug', SLUG).single();
-    assert.strictEqual(stub.audio_bytes, 0, 'failed attempt leaves a stub');
+    const { data: pending } = await supabase.from('podcast_episodes')
+      .select('status, audio_bytes').eq('slug', SLUG).single();
+    assert.strictEqual(pending.status, 'pending');
 
-    // Fresh stub → the gate assumes an attempt is in flight: skip, zero
-    // provider calls.
+    // Active lease blocks a plain call…
     tts.throwWith = null;
     tts.calls = 0;
     const gated = await generateEpisode({ date: DATE });
-    assert.strictEqual(gated.skipped, true, 'fresh stub is not reclaimed');
+    assert.strictEqual(gated.skipped, true);
     assert.match(gated.reason, /likely in progress/);
-    assert.strictEqual(tts.calls, 0, 'zero provider calls while gated');
+    assert.strictEqual(tts.calls, 0, 'zero provider calls while lease is active');
 
-    // Age the stub past the gate → plain call reclaims it.
-    const aged = new Date(Date.now() - (RECLAIM_AFTER_MINUTES + 10) * 60000).toISOString();
-    const { error: ageErr } = await supabase.from('podcast_episodes')
-      .update({ created_at: aged }).eq('slug', SLUG);
-    assert.ifError(ageErr && new Error(ageErr.message));
+    // …and blocks the sweep (missing-or-pending is work, but the claim
+    // machinery refuses an active lease).
+    const sweep = await sweepRecentEpisodes(1, { dates: [DATE] });
+    assert.strictEqual(sweep[0].action, 'skipped', 'sweep defers to the active lease');
+    assert.strictEqual(tts.calls, 0);
 
-    const reclaimed = await generateEpisode({ date: DATE });
-    assert.strictEqual(reclaimed.created, true, 'aged stub reclaimed as winner');
-    assert.strictEqual(tts.calls, 1, 'exactly one provider call for the reclaim');
-    const { data: row } = await supabase.from('podcast_episodes')
-      .select('audio_bytes').eq('slug', SLUG).single();
-    assert.strictEqual(row.audio_bytes, 1024, 'row updated with real audio');
+    // Expire the lease → plain call claims and completes.
+    await supabase.from('podcast_episodes')
+      .update({ attempt_started_at: agedIso(CLAIM_LEASE_MINUTES + 10) }).eq('slug', SLUG);
+    const healed = await generateEpisode({ date: DATE });
+    assert.strictEqual(healed.created, true, 'stale claim heals the crashed attempt');
+    assert.strictEqual(tts.calls, 1);
+    const { data: done } = await supabase.from('podcast_episodes')
+      .select('status, audio_bytes').eq('slug', SLUG).single();
+    assert.strictEqual(done.status, 'complete');
+    assert.strictEqual(done.audio_bytes, 1024);
   } finally {
     grok.tts = tts.real;
     await cleanupFixtureSlug(supabase, BUCKET, SLUG);
   }
 });
 
-test('force demotes before overwrite: mid-force crash leaves a healable stub', { skip: !hasEnv && 'SUPABASE env not configured' }, async () => {
+test('stale claim is atomic: two identical claim UPDATEs, exactly one row returned', async (t) => {
+  if (!(await integrationReady(t))) return;
+  const supabase = require('../src/lib/supabase');
+  const { BUCKET, CLAIM_LEASE_MINUTES } = require('../src/services/podcast');
+
+  const DATE = '1999-01-09';
+  const SLUG = `the-stack-signal-${DATE}`;
+  await assertFixtureAbsent(supabase, 'podcast_episodes', SLUG);
+
+  try {
+    await insertFixtureEpisode(supabase, SLUG, DATE, {
+      status: 'pending',
+      attemptStartedAt: agedIso(CLAIM_LEASE_MINUTES + 10),
+    });
+
+    // The exact claim CAS generateEpisode issues, run twice back to back.
+    const claim = () => supabase
+      .from('podcast_episodes')
+      .update({ attempt_started_at: new Date().toISOString(), audio_bytes: 0, duration_sec: 0 })
+      .eq('slug', SLUG)
+      .eq('status', 'pending')
+      .lt('attempt_started_at', new Date(Date.now() - CLAIM_LEASE_MINUTES * 60000).toISOString())
+      .select('slug');
+
+    const first = await claim();
+    assert.ifError(first.error && new Error(first.error.message));
+    const second = await claim();
+    assert.ifError(second.error && new Error(second.error.message));
+    const total = (first.data?.length || 0) + (second.data?.length || 0);
+    assert.strictEqual(first.data.length, 1, 'first claim wins');
+    assert.strictEqual(total, 1, 'exactly one row returned across both claims — the second sees a fresh lease');
+  } finally {
+    await cleanupFixtureSlug(supabase, BUCKET, SLUG);
+  }
+});
+
+test('force demote: overlapping plain call mid-force sees an active attempt and skips', async (t) => {
+  if (!(await integrationReady(t))) return;
   const supabase = require('../src/lib/supabase');
   const grok = require('../src/services/voice-providers/grok');
-  const { generateEpisode, BUCKET, RECLAIM_AFTER_MINUTES } = require('../src/services/podcast');
+  const { generateEpisode, BUCKET } = require('../src/services/podcast');
 
-  const DATE = '1999-01-08'; // fixture date — cannot exist in production
+  const DATE = '1999-01-08';
   const SLUG = `the-stack-signal-${DATE}`;
-
   await assertFixtureAbsent(supabase, 'stack_signal_articles', SLUG);
   await assertFixtureAbsent(supabase, 'podcast_episodes', SLUG);
 
   const tts = stubTts(grok);
-  const realFrom = supabase.from.bind(supabase);
   try {
     await insertFixtureArticle(supabase, SLUG, DATE);
-
-    // Completed fixture episode, created_at aged past the reclaim gate so
-    // the post-crash stub is immediately healable by a plain call.
-    const aged = new Date(Date.now() - (RECLAIM_AFTER_MINUTES + 10) * 60000).toISOString();
-    const { error: doneErr } = await supabase.from('podcast_episodes').insert({
-      slug: SLUG, audio_url: 'https://example.invalid/done.mp3',
-      audio_bytes: 500, duration_sec: 1,
-      title: 'TEST FIXTURE — completed', description: 'fixture',
-      published_at: `${DATE}T11:15:00+00:00`, created_at: aged,
+    await insertFixtureEpisode(supabase, SLUG, DATE, {
+      status: 'complete',
+      attemptStartedAt: agedIso(60),
+      audioBytes: 500,
     });
-    assert.ifError(doneErr && new Error(doneErr.message));
 
-    // Fail the SECOND podcast_episodes update in the force call — update #1
-    // is the demote, update #2 is the post-upload finalize. This simulates
-    // a crash after upload but before the row gets its real bytes.
-    let updateCalls = 0;
-    supabase.from = (table) => {
-      const builder = realFrom(table);
-      if (table === 'podcast_episodes') {
-        const realUpdate = builder.update.bind(builder);
-        builder.update = (...args) => {
-          updateCalls += 1;
-          if (updateCalls === 2) throw new Error('simulated post-upload update failure');
-          return realUpdate(...args);
-        };
-      }
-      return builder;
+    // During the forced synthesis (row already demoted to pending with a
+    // fresh lease), fire an overlapping PLAIN call — it must skip.
+    let overlapResult = null;
+    tts.onCall = async (n) => {
+      if (n === 1) overlapResult = await generateEpisode({ date: DATE });
     };
-    await assert.rejects(generateEpisode({ date: DATE, force: true }), /simulated post-upload update failure/);
-    supabase.from = realFrom;
+    const forced = await generateEpisode({ date: DATE, force: true });
+    assert.strictEqual(forced.created, true, 'force completes');
+    assert.ok(overlapResult, 'overlapping call ran');
+    assert.strictEqual(overlapResult.skipped, true, 'overlap skips mid-force');
+    assert.match(overlapResult.reason, /likely in progress/, 'demote refreshed the lease');
+    assert.strictEqual(tts.calls, 1, 'only the force synthesized');
 
-    // The row is a stub (demote landed, finalize did not)…
-    const { data: stub } = await supabase.from('podcast_episodes')
-      .select('audio_bytes, duration_sec').eq('slug', SLUG).single();
-    assert.strictEqual(stub.audio_bytes, 0, 'demoted row stayed a stub after the crash');
-    assert.strictEqual(stub.duration_sec, 0);
-
-    // …and the feed's filter excludes it (same audio_bytes > 0 predicate the
-    // route uses — the route filter itself is covered by the dedicated
-    // feed-stub test above).
-    const { data: feedRows } = await supabase.from('podcast_episodes')
-      .select('slug').gt('audio_bytes', 0).eq('slug', SLUG);
-    assert.strictEqual(feedRows.length, 0, 'feed filter excludes the demoted stub');
-
-    // A subsequent PLAIN call completes it (stub inherited the aged
-    // created_at, so the freshness gate lets it reclaim).
-    tts.calls = 0;
-    const healed = await generateEpisode({ date: DATE });
-    assert.strictEqual(healed.created, true, 'plain call completes the crashed force');
-    assert.strictEqual(tts.calls, 1);
     const { data: row } = await supabase.from('podcast_episodes')
-      .select('audio_bytes').eq('slug', SLUG).single();
-    assert.strictEqual(row.audio_bytes, 1024, 'row finalized with real audio');
+      .select('status, audio_bytes').eq('slug', SLUG).single();
+    assert.strictEqual(row.status, 'complete');
+    assert.strictEqual(row.audio_bytes, 1024);
   } finally {
-    supabase.from = realFrom;
     grok.tts = tts.real;
     await cleanupFixtureSlug(supabase, BUCKET, SLUG);
   }
 });
 
-test('sweepRecentEpisodes heals stub/missing dates, skips completed', { skip: !hasEnv && 'SUPABASE env not configured' }, async () => {
+test('crash after force-demote: pending row heals via stale claim', async (t) => {
+  if (!(await integrationReady(t))) return;
   const supabase = require('../src/lib/supabase');
   const grok = require('../src/services/voice-providers/grok');
-  const { generateEpisode, sweepRecentEpisodes, BUCKET } = require('../src/services/podcast');
+  const { generateEpisode, BUCKET, CLAIM_LEASE_MINUTES } = require('../src/services/podcast');
 
-  // Four fixture dates, one per sweep case. The dates override keeps the
-  // sweep inside the test-owned 1999 namespace (never real/current dates).
-  const D_STUB = '1999-01-04';    // article + stub row → generated (reclaim)
-  const D_MISSING = '1999-01-05'; // article, no episode row → generated
-  const D_DONE = '1999-01-06';    // article + completed row → skipped-complete
+  const DATE = '1999-01-10';
+  const SLUG = `the-stack-signal-${DATE}`;
+  await assertFixtureAbsent(supabase, 'stack_signal_articles', SLUG);
+  await assertFixtureAbsent(supabase, 'podcast_episodes', SLUG);
+
+  const tts = stubTts(grok);
+  try {
+    await insertFixtureArticle(supabase, SLUG, DATE);
+    await insertFixtureEpisode(supabase, SLUG, DATE, {
+      status: 'complete',
+      attemptStartedAt: agedIso(60),
+      audioBytes: 500,
+    });
+
+    // Force crashes after the demote (provider outage) → row is pending,
+    // hidden from the feed, lease fresh.
+    tts.throwWith = 'simulated provider outage';
+    await assert.rejects(generateEpisode({ date: DATE, force: true }), /simulated provider outage/);
+    const { data: pending } = await supabase.from('podcast_episodes')
+      .select('status, audio_bytes').eq('slug', SLUG).single();
+    assert.strictEqual(pending.status, 'pending', 'demote landed before the crash');
+    assert.strictEqual(pending.audio_bytes, 0);
+
+    // Feed predicate excludes it (route filter covered by the feed test).
+    const { data: feedRows } = await supabase.from('podcast_episodes')
+      .select('slug').eq('status', 'complete').gt('audio_bytes', 0).eq('slug', SLUG);
+    assert.strictEqual(feedRows.length, 0);
+
+    // Lease expires → a PLAIN call stale-claims and completes it.
+    tts.throwWith = null;
+    tts.calls = 0;
+    await supabase.from('podcast_episodes')
+      .update({ attempt_started_at: agedIso(CLAIM_LEASE_MINUTES + 10) }).eq('slug', SLUG);
+    const healed = await generateEpisode({ date: DATE });
+    assert.strictEqual(healed.created, true);
+    assert.strictEqual(tts.calls, 1);
+    const { data: done } = await supabase.from('podcast_episodes')
+      .select('status, audio_bytes').eq('slug', SLUG).single();
+    assert.strictEqual(done.status, 'complete');
+    assert.strictEqual(done.audio_bytes, 1024);
+  } finally {
+    grok.tts = tts.real;
+    await cleanupFixtureSlug(supabase, BUCKET, SLUG);
+  }
+});
+
+test('sweepRecentEpisodes: missing-or-pending is work, complete skips', async (t) => {
+  if (!(await integrationReady(t))) return;
+  const supabase = require('../src/lib/supabase');
+  const grok = require('../src/services/voice-providers/grok');
+  const { sweepRecentEpisodes, BUCKET, CLAIM_LEASE_MINUTES } = require('../src/services/podcast');
+
+  const D_STALE = '1999-01-04';   // article + expired pending → generated
+  const D_MISSING = '1999-01-05'; // article, no row → generated
+  const D_DONE = '1999-01-06';    // article + complete → skipped-complete
   const D_NOART = '1999-01-07';   // no article → no-article
-  const ALL = [D_STUB, D_MISSING, D_DONE, D_NOART];
+  const ALL = [D_STALE, D_MISSING, D_DONE, D_NOART];
   const slugOf = (d) => `the-stack-signal-${d}`;
 
   for (const d of ALL) {
@@ -382,31 +458,24 @@ test('sweepRecentEpisodes heals stub/missing dates, skips completed', { skip: !h
 
   const tts = stubTts(grok);
   try {
-    for (const d of [D_STUB, D_MISSING, D_DONE]) await insertFixtureArticle(supabase, slugOf(d), d);
-
-    // Stub aged past the reclaim gate — the sweep's generateEpisode call
-    // must see it as crashed (not in-flight) to heal it.
-    const agedStub = new Date(Date.now() - 20 * 60000).toISOString();
-    const { error: stubErr } = await supabase.from('podcast_episodes').insert({
-      slug: slugOf(D_STUB), audio_url: 'https://example.invalid/stub.mp3',
-      audio_bytes: 0, duration_sec: 0, created_at: agedStub,
-      title: 'TEST FIXTURE — stub', description: 'fixture', published_at: `${D_STUB}T11:15:00+00:00`,
+    for (const d of [D_STALE, D_MISSING, D_DONE]) await insertFixtureArticle(supabase, slugOf(d), d);
+    await insertFixtureEpisode(supabase, slugOf(D_STALE), D_STALE, {
+      status: 'pending',
+      attemptStartedAt: agedIso(CLAIM_LEASE_MINUTES + 10),
     });
-    assert.ifError(stubErr && new Error(stubErr.message));
-    const { error: doneErr } = await supabase.from('podcast_episodes').insert({
-      slug: slugOf(D_DONE), audio_url: 'https://example.invalid/done.mp3',
-      audio_bytes: 500, duration_sec: 1,
-      title: 'TEST FIXTURE — completed', description: 'fixture', published_at: `${D_DONE}T11:15:00+00:00`,
+    await insertFixtureEpisode(supabase, slugOf(D_DONE), D_DONE, {
+      status: 'complete',
+      attemptStartedAt: agedIso(60),
+      audioBytes: 500,
     });
-    assert.ifError(doneErr && new Error(doneErr.message));
 
     const results = await sweepRecentEpisodes(ALL.length, { dates: ALL });
     const byDate = Object.fromEntries(results.map((r) => [r.date, r.action]));
-    assert.strictEqual(byDate[D_STUB], 'generated', 'stub row is healed');
+    assert.strictEqual(byDate[D_STALE], 'generated', 'expired pending is healed');
     assert.strictEqual(byDate[D_MISSING], 'generated', 'missing row is generated');
-    assert.strictEqual(byDate[D_DONE], 'skipped-complete', 'completed episode untouched');
+    assert.strictEqual(byDate[D_DONE], 'skipped-complete', 'complete episode untouched');
     assert.strictEqual(byDate[D_NOART], 'no-article');
-    assert.strictEqual(tts.calls, 2, 'exactly two provider calls (stub + missing)');
+    assert.strictEqual(tts.calls, 2, 'exactly two provider calls (stale + missing)');
   } finally {
     grok.tts = tts.real;
     for (const d of ALL) await cleanupFixtureSlug(supabase, BUCKET, slugOf(d));

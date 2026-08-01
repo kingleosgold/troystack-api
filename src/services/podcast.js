@@ -28,10 +28,11 @@ const BYTES_PER_SEC = 16000; // 128kbps CBR MP3 — duration estimate for itunes
 // Passed explicitly so a change to grok.js's default/env voice resolution can
 // never silently reskin the podcast — same reasoning as the pinned provider.
 const PODCAST_VOICE = 'leo';
-// A stub (audio_bytes=0) younger than this is treated as an attempt in
-// flight (generation takes ~1 min; 10 min is a comfortable upper bound) —
-// reclaim only engages on older stubs. --force overrides the gate.
-const RECLAIM_AFTER_MINUTES = 10;
+// Lease length for a 'pending' claim: an attempt owns the row from
+// attempt_started_at for this many minutes (generation takes ~1 min; 10 is a
+// comfortable upper bound). The interval lives ONLY in the stale-claim CAS
+// UPDATE below — there is no read-side age logic anywhere.
+const CLAIM_LEASE_MINUTES = 10;
 
 // Strip markdown the sanitizer doesn't fully cover: links, headers, images,
 // code ticks. Bold/italic markers are also handled here so the episode script
@@ -70,15 +71,19 @@ function buildEpisodeDescription(article) {
 // Generate the episode for a date (YYYY-MM-DD, default: today America/New_York).
 // Returns { skipped, reason } | { created, slug, audioUrl, audioBytes, durationSec }.
 //
-// Reserve-first concurrency (no schema change): the row is INSERTed (plain
-// insert, not upsert) BEFORE any provider spend, with audio_bytes=0 /
-// duration_sec=0 as the pending sentinel. A PK conflict means another caller
-// already reserved or published this slug — the loser exits without paying.
-// The winner synthesizes, uploads, then UPDATEs the row with real bytes.
-// A crash between reservation and update leaves a stub row: the feed hides
-// stubs (audio_bytes > 0 filter) and `generate-episode.js --force` repairs
-// them in place — also the documented path for regenerating an episode after
-// sanitizer changes.
+// EXPLICIT LIFECYCLE STATE MACHINE (migration 005). Row states:
+//   'pending'  — an attempt owns the row; attempt_started_at is its lease
+//                start (lease = CLAIM_LEASE_MINUTES).
+//   'complete' — audio uploaded and finalized; served by the feed.
+// Transitions — every claim is ONE conditional UPDATE (compare-and-swap) or
+// the PK INSERT itself; ownership is never taken by read-then-act:
+//   NEW:         INSERT status='pending'          (PK conflict → not owned)
+//   STALE CLAIM: pending + lease expired → pending (lease refreshed)
+//   FORCE DEMOTE: complete → pending               (fresh lease, bytes zeroed)
+//   FINALIZE:    pending → complete + real bytes
+// Any throw after owning leaves the row 'pending'; it becomes claimable when
+// the lease expires (next cron fire, heal cron, sweep, or manual run — no
+// operator action needed). The feed serves only status='complete'.
 async function generateEpisode({ date, force = false } = {}) {
   const dateStr = date || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
@@ -97,69 +102,81 @@ async function generateEpisode({ date, force = false } = {}) {
   }
 
   // Deterministic public URL — known before the object exists, so the
-  // reservation row satisfies NOT NULL audio_url.
+  // pending row satisfies NOT NULL audio_url.
   const storagePath = `episodes/${slug}.mp3`;
   const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(storagePath);
   const audioUrl = pub.publicUrl;
 
-  // Atomic reservation. Under --force a conflict is expected (repairing a
-  // stub or regenerating a published episode) and we proceed to overwrite.
-  const reservation = {
+  let owned = false;
+
+  // NEW: create the row as a pending claim. Success = ownership.
+  const { error: insertErr } = await supabase.from('podcast_episodes').insert({
     slug,
     audio_url: audioUrl,
     audio_bytes: 0,
     duration_sec: 0,
+    status: 'pending',
+    attempt_started_at: new Date().toISOString(),
     title: article.title,
     description: buildEpisodeDescription(article),
     published_at: article.published_at,
-  };
-  const { error: insertErr } = await supabase.from('podcast_episodes').insert(reservation);
-  if (insertErr) {
+  });
+  if (!insertErr) {
+    owned = true;
+  } else {
     const isConflict = insertErr.code === '23505' || /duplicate key/i.test(insertErr.message);
-    if (!isConflict) throw new Error(`reservation failed: ${insertErr.message}`);
-    if (!force) {
-      // Conflict: someone already holds this slug. A completed episode
-      // (audio_bytes > 0) skips. A stub (audio_bytes = 0) is either an
-      // attempt in flight or a crashed one — the created_at freshness gate
-      // decides: younger than RECLAIM_AFTER_MINUTES → assume in flight and
-      // exit; older → crashed, RECLAIM it and proceed as winner, so any
-      // later invocation (next cron fire, catch-up sweep, manual run)
-      // self-heals without --force. --force is only needed to REGENERATE
-      // completed episodes (and overrides this gate).
-      //
-      // Residual race: two processes reclaiming the same >10-min-old
-      // crashed stub in the same instant would double-spend synthesis
-      // (last UPDATE wins; bytes stay consistent). Accepted —
-      // single-operator system.
-      const { data: existing, error: readErr } = await supabase
+    if (!isConflict) throw new Error(`claim insert failed: ${insertErr.message}`);
+
+    if (force) {
+      // FORCE DEMOTE (atomic): complete → pending with a FRESH lease and
+      // zeroed bytes, so the feed hides it immediately and overlapping
+      // plain calls see an ACTIVE attempt and skip. Then synthesize →
+      // upload → finalize. A crash anywhere mid-force leaves a pending
+      // row that heals via the stale claim once the lease expires.
+      // Trade: the episode vanishes from the feed during a failed force
+      // until the next heal.
+      const { data: demoted, error: demoteErr } = await supabase
         .from('podcast_episodes')
-        .select('audio_bytes, created_at')
+        .update({ status: 'pending', attempt_started_at: new Date().toISOString(), audio_bytes: 0, duration_sec: 0 })
         .eq('slug', slug)
-        .maybeSingle();
-      if (readErr) throw new Error(`reservation conflict read failed: ${readErr.message}`);
-      if (existing && existing.audio_bytes > 0) {
-        console.log(`🎙️ [Podcast] ${slug} already generated — exiting before provider spend`);
-        return { skipped: true, reason: `already generated: ${slug}` };
-      }
-      const stubAgeMin = existing ? (Date.now() - new Date(existing.created_at).getTime()) / 60000 : Infinity;
-      if (stubAgeMin < RECLAIM_AFTER_MINUTES) {
-        console.log(`🎙️ [Podcast] ${slug} has a ${stubAgeMin.toFixed(1)}-min-old stub — generation likely in progress, exiting`);
-        return { skipped: true, reason: `generation likely in progress: ${slug}` };
-      }
-      console.log(`🎙️ [Podcast] ${slug} has a stale stub (${stubAgeMin.toFixed(1)} min) — reclaiming`);
-    } else {
-      // FORCE DEMOTES BEFORE OVERWRITE: re-stub the row first (the feed's
-      // audio_bytes > 0 filter hides it immediately), THEN synthesize →
-      // upload → UPDATE with real bytes. A crash anywhere mid-force leaves
-      // a stub that the reclaim path or sweepRecentEpisodes completes
-      // automatically — there is no state where the feed advertises
-      // metadata for a different file. Trade: the episode vanishes from
-      // the feed during a failed force until the next heal.
-      const { error: demoteErr } = await supabase
-        .from('podcast_episodes')
-        .update({ audio_bytes: 0, duration_sec: 0 })
-        .eq('slug', slug);
+        .eq('status', 'complete')
+        .select('slug');
       if (demoteErr) throw new Error(`force demote failed: ${demoteErr.message}`);
+      if (demoted && demoted.length === 1) owned = true;
+      // 0 rows: the row is pending (not complete) — fall through to the
+      // stale claim like any plain call.
+    }
+
+    if (!owned) {
+      // STALE CLAIM (atomic): take over a pending row whose lease expired,
+      // refreshing the lease in the same statement. Exactly one concurrent
+      // caller can win this UPDATE. Note: the cutoff uses this process's
+      // clock (PostgREST can't reference server-side now() here) — clock
+      // skew shifts the lease boundary by skew amount, which is harmless
+      // at a 10-minute scale.
+      const cutoff = new Date(Date.now() - CLAIM_LEASE_MINUTES * 60000).toISOString();
+      const { data: claimed, error: claimErr } = await supabase
+        .from('podcast_episodes')
+        .update({ attempt_started_at: new Date().toISOString(), audio_bytes: 0, duration_sec: 0 })
+        .eq('slug', slug)
+        .eq('status', 'pending')
+        .lt('attempt_started_at', cutoff)
+        .select('slug');
+      if (claimErr) throw new Error(`stale claim failed: ${claimErr.message}`);
+      if (claimed && claimed.length === 1) {
+        owned = true;
+        console.log(`🎙️ [Podcast] ${slug}: claimed expired pending attempt`);
+      } else {
+        // Complete, or actively pending. Follow-up read is for LOGGING
+        // only — no ownership decision rests on it.
+        const { data: row } = await supabase
+          .from('podcast_episodes').select('status').eq('slug', slug).maybeSingle();
+        const why = row && row.status === 'complete'
+          ? `already generated: ${slug}`
+          : `generation likely in progress: ${slug}`;
+        console.log(`🎙️ [Podcast] ${why} — exiting before provider spend`);
+        return { skipped: true, reason: why };
+      }
     }
   }
 
@@ -178,10 +195,12 @@ async function generateEpisode({ date, force = false } = {}) {
     .upload(storagePath, audioBuffer, { contentType: 'audio/mpeg', upsert: true });
   if (uploadErr) throw new Error(`upload failed: ${uploadErr.message}`);
 
+  // FINALIZE: pending → complete with the real bytes.
   const durationSec = Math.round(audioBuffer.length / BYTES_PER_SEC);
   const { error: updateErr } = await supabase
     .from('podcast_episodes')
     .update({
+      status: 'complete',
       audio_url: audioUrl,
       audio_bytes: audioBuffer.length,
       duration_sec: durationSec,
@@ -190,7 +209,7 @@ async function generateEpisode({ date, force = false } = {}) {
       published_at: article.published_at,
     })
     .eq('slug', slug);
-  if (updateErr) throw new Error(`episode record update failed: ${updateErr.message}`);
+  if (updateErr) throw new Error(`finalize failed: ${updateErr.message}`);
 
   console.log(`🎙️ [Podcast] Published ${slug}: ${audioBuffer.length} bytes, ~${durationSec}s, cost ${ttsResult.costCents}¢`);
   return { created: true, slug, audioUrl, audioBytes: audioBuffer.length, durationSec };
@@ -224,10 +243,12 @@ async function sweepRecentEpisodes(days = 3, { dates } = {}) {
       if (artErr) throw new Error(`article lookup failed: ${artErr.message}`);
       if (!article) { results.push({ date, action: 'no-article' }); continue; }
 
+      // Missing or pending = work; generateEpisode's claim machinery decides
+      // whether the pending attempt is stale enough to take over.
       const { data: ep, error: epErr } = await supabase
-        .from('podcast_episodes').select('audio_bytes').eq('slug', slug).maybeSingle();
+        .from('podcast_episodes').select('status').eq('slug', slug).maybeSingle();
       if (epErr) throw new Error(`episode lookup failed: ${epErr.message}`);
-      if (ep && ep.audio_bytes > 0) { results.push({ date, action: 'skipped-complete' }); continue; }
+      if (ep && ep.status === 'complete') { results.push({ date, action: 'skipped-complete' }); continue; }
 
       const r = await generateEpisode({ date });
       results.push({ date, action: r.created ? 'generated' : 'skipped', reason: r.reason });
@@ -239,4 +260,4 @@ async function sweepRecentEpisodes(days = 3, { dates } = {}) {
   return results;
 }
 
-module.exports = { generateEpisode, sweepRecentEpisodes, buildEpisodeScript, buildEpisodeDescription, stripMarkdown, BUCKET, PODCAST_VOICE, RECLAIM_AFTER_MINUTES };
+module.exports = { generateEpisode, sweepRecentEpisodes, buildEpisodeScript, buildEpisodeDescription, stripMarkdown, BUCKET, PODCAST_VOICE, CLAIM_LEASE_MINUTES };

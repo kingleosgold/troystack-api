@@ -549,10 +549,10 @@ app.listen(PORT, () => {
       }
     }
 
-    // Catch-up sweep: self-heal the last few days' missed or failed episodes
-    // (stub reclaim makes retries safe), so a transient failure recovers
-    // within 24h with zero operator action. Runs even when today's article
-    // or episode generation failed — that's the point. Own try/catch.
+    // Catch-up sweep for PRIOR days: runs even when today's article or
+    // episode generation failed. Today's own attempt, if it just failed,
+    // is still inside its pending lease — the dedicated heal cron an hour
+    // later (12:15 UTC) picks it up. Own try/catch.
     try {
       const { sweepRecentEpisodes } = require('./services/podcast');
       const sweep = await sweepRecentEpisodes();
@@ -563,6 +563,24 @@ app.listen(PORT, () => {
     }
   }, { timezone: 'UTC' });
   console.log('📰 [Stack Signal Daily] Scheduled: daily at 6:15 AM EST (11:15 UTC) + podcast episode hook');
+
+  // ── Podcast heal cron: daily 7:15 AM EST (12:15 UTC) ──
+  // Dedicated pass an hour after generation — past the 10-minute claim
+  // lease, and independent of the 11:15 process surviving (a Railway
+  // restart mid-generation leaves a pending row; this cron claims and
+  // completes it with zero operator action).
+  cron.schedule('15 12 * * *', async () => {
+    console.log(`\n🎙️ [Podcast Heal Cron] Triggered at ${new Date().toISOString()}`);
+    try {
+      const { sweepRecentEpisodes } = require('./services/podcast');
+      const sweep = await sweepRecentEpisodes(3);
+      const notable = sweep.filter((s) => s.action === 'generated' || s.action === 'failed');
+      console.log(`🎙️ [Podcast Heal Cron] Done: ${notable.length ? JSON.stringify(notable) : 'nothing to heal'}`);
+    } catch (err) {
+      console.error('🎙️ [Podcast Heal Cron] Failed:', err.message);
+    }
+  }, { timezone: 'UTC' });
+  console.log('🎙️ [Podcast Heal Cron] Scheduled: daily at 7:15 AM EST (12:15 UTC)');
 
   // ── Evening Stack Signal — post market close (4:30 PM EST / 21:30 UTC) ──
   cron.schedule('30 21 * * 1-5', async () => {
