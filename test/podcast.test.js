@@ -30,12 +30,12 @@ test('stripMarkdown removes links, headers, bold, italic, code', () => {
 
 test('buildEpisodeScript wraps body with exact intro and outro', () => {
   const article = {
-    title: 'The Stack Signal — July 31, 2026',
+    title: 'The Stack Signal — January 31, 1999',
     troy_commentary: '**Gold** is up.',
-    published_at: '2026-07-31T11:15:00+00:00',
+    published_at: '1999-01-31T11:15:00+00:00',
   };
   const script = buildEpisodeScript(article);
-  assert.ok(script.startsWith("This is The Stack Signal for July 31, 2026. I'm Troy. Here's what matters in metals today."));
+  assert.ok(script.startsWith("This is The Stack Signal for January 31, 1999. I'm Troy. Here's what matters in metals today."));
   assert.ok(script.endsWith("That's the signal. The Stack Signal is generated daily by Troy, TroyStack's AI analyst. Track your own stack — TroyStack on the App Store, or troystack.com."));
   assert.ok(script.includes('Gold is up.'), 'body present, markdown stripped');
 });
@@ -48,14 +48,16 @@ test('buildEpisodeDescription = one-liner + first paragraph', () => {
   assert.strictEqual(d, 'Silver squeeze continues.\n\nFirst paragraph here.');
 });
 
+// Pure in-memory fixture — 1999 dates by policy: no test may reference a
+// real/current date slug, so a grep for current-year dates stays clean.
 const FIXTURE_EPISODES = [{
-  slug: 'the-stack-signal-2026-07-31',
-  audio_url: 'https://example.supabase.co/storage/v1/object/public/troy-podcast/episodes/the-stack-signal-2026-07-31.mp3',
+  slug: 'the-stack-signal-1999-01-31',
+  audio_url: 'https://example.supabase.co/storage/v1/object/public/troy-podcast/episodes/the-stack-signal-1999-01-31.mp3',
   audio_bytes: 4180000,
   duration_sec: 261,
-  title: 'The Stack Signal — July 31, 2026',
+  title: 'The Stack Signal — January 31, 1999',
   description: 'Gains & losses <today>.\n\nFirst paragraph.',
-  published_at: '2026-07-31T11:15:00+00:00',
+  published_at: '1999-01-31T11:15:00+00:00',
 }];
 
 test('feed.xml is well-formed with required channel + episode tags', () => {
@@ -76,14 +78,14 @@ test('feed.xml is well-formed with required channel + episode tags', () => {
   assert.ok(ch['itunes:image']['@_href'].includes('troy-podcast/artwork.png'));
 
   const item = ch.item;
-  assert.strictEqual(item.title, 'The Stack Signal — July 31, 2026');
+  assert.strictEqual(item.title, 'The Stack Signal — January 31, 1999');
   assert.strictEqual(item.enclosure['@_url'], FIXTURE_EPISODES[0].audio_url);
   assert.strictEqual(Number(item.enclosure['@_length']), FIXTURE_EPISODES[0].audio_bytes);
   assert.strictEqual(item.enclosure['@_type'], 'audio/mpeg');
-  assert.strictEqual(item.guid['#text'], 'the-stack-signal-2026-07-31');
+  assert.strictEqual(item.guid['#text'], 'the-stack-signal-1999-01-31');
   assert.strictEqual(String(item.guid['@_isPermaLink']), 'false');
   assert.strictEqual(item['itunes:duration'], 261);
-  assert.ok(new Date(item.pubDate).toISOString().startsWith('2026-07-31T11:15:00'));
+  assert.ok(new Date(item.pubDate).toISOString().startsWith('1999-01-31T11:15:00'));
 });
 
 test('feed.xml handles empty episode list', () => {
@@ -92,22 +94,45 @@ test('feed.xml handles empty episode list', () => {
 });
 
 // ── Integration tests (real table + bucket; skipped without env) ──
+//
+// FIXTURE-ONLY policy: every row/object these tests touch lives on a 1999
+// fixture date — impossible in production (the pipeline launched in 2026).
+// TRACKED CLEANUP: each test records exactly what IT inserted and finally
+// deletes only that. FAIL-LOUD: if a fixture unexpectedly already exists,
+// the test fails with a clear message and deletes nothing — never "cleans
+// up" data it did not create.
+
+// Asserts the fixture identified by (table, column, value) does not already
+// exist. Returns nothing; throws the fail-loud message on surprise.
+async function assertFixtureAbsent(supabase, table, value) {
+  const { data, error } = await supabase.from(table).select('slug').eq('slug', value).maybeSingle();
+  assert.ifError(error && new Error(`${table} pre-check failed: ${error.message}`));
+  assert.strictEqual(
+    data,
+    null,
+    `SURPRISE: fixture "${value}" already exists in ${table}. Refusing to run and deleting nothing — inspect and remove it manually.`
+  );
+}
 
 test('feed route excludes pending stubs (audio_bytes=0)', { skip: !hasEnv && 'SUPABASE env not configured' }, async () => {
   const supabase = require('../src/lib/supabase');
   const express = require('express');
-  const STUB_SLUG = 'the-stack-signal-1999-01-01'; // no such article; clearly a test row
+  const STUB_SLUG = 'the-stack-signal-1999-01-01'; // fixture date — cannot exist in production
+  const inserted = { episode: false };
   try {
+    await assertFixtureAbsent(supabase, 'podcast_episodes', STUB_SLUG);
+
     const { error: insErr } = await supabase.from('podcast_episodes').insert({
       slug: STUB_SLUG,
       audio_url: 'https://example.invalid/stub.mp3',
       audio_bytes: 0,
       duration_sec: 0,
-      title: 'STUB — must never appear in feed',
-      description: 'reservation stub',
+      title: 'TEST FIXTURE — reservation stub, must never appear in feed',
+      description: 'podcast integration-test fixture (safe to delete)',
       published_at: '1999-01-01T00:00:00+00:00',
     });
     assert.ifError(insErr && new Error(insErr.message));
+    inserted.episode = true;
 
     const app = express();
     app.use('/v1/podcast', require('../src/routes/podcast'));
@@ -121,7 +146,10 @@ test('feed route excludes pending stubs (audio_bytes=0)', { skip: !hasEnv && 'SU
       server.close();
     }
   } finally {
-    await supabase.from('podcast_episodes').delete().eq('slug', STUB_SLUG);
+    // Tracked cleanup: only the row THIS test inserted.
+    if (inserted.episode) {
+      await supabase.from('podcast_episodes').delete().eq('slug', STUB_SLUG);
+    }
   }
 });
 
@@ -131,10 +159,13 @@ test('reserve-first: double generate = one provider call; --force updates in pla
   const grok = require('../src/services/voice-providers/grok');
   const { generateEpisode, BUCKET } = require('../src/services/podcast');
 
-  // 2026-07-30 has a real flagship article and no published episode; the fake
-  // audio + row are fully cleaned up in finally.
-  const DATE = '2026-07-30';
+  // Fixture date — cannot exist in production. The flow needs a source
+  // article, so a clearly-labeled fixture article is inserted for this date
+  // and tracked; generateEpisode then creates the episode row and uploads the
+  // (stubbed) audio object at fixture-slug paths, both tracked below.
+  const DATE = '1999-01-02';
   const SLUG = `the-stack-signal-${DATE}`;
+  const inserted = { article: false, episode: false, storageObject: false };
   const realTts = grok.tts;
   let ttsCalls = 0;
   let fakeBytes = Buffer.alloc(1024, 1);
@@ -144,8 +175,30 @@ test('reserve-first: double generate = one provider call; --force updates in pla
   };
 
   try {
+    // Fail-loud pre-checks: neither the fixture article nor the fixture
+    // episode may already exist. On surprise: fail, delete nothing.
+    await assertFixtureAbsent(supabase, 'stack_signal_articles', SLUG);
+    await assertFixtureAbsent(supabase, 'podcast_episodes', SLUG);
+
+    const { error: artErr } = await supabase.from('stack_signal_articles').insert({
+      slug: SLUG,
+      title: 'TEST FIXTURE — podcast integration article (safe to delete)',
+      troy_commentary: '**Test** fixture body.\n\nSecond paragraph for description checks.',
+      troy_one_liner: 'Podcast integration-test fixture.',
+      category: 'macro',
+      is_stack_signal: false,
+      relevance_score: 0,
+      signal_score: 0,
+      urgent: false,
+      published_at: '1999-01-02T11:15:00+00:00',
+    });
+    assert.ifError(artErr && new Error(`fixture article insert failed: ${artErr.message}`));
+    inserted.article = true;
+
     const first = await generateEpisode({ date: DATE });
     assert.strictEqual(first.created, true, 'first call publishes');
+    inserted.episode = true;       // created by generateEpisode on our behalf
+    inserted.storageObject = true; // uploaded by generateEpisode on our behalf
     assert.strictEqual(first.audioBytes, 1024);
     assert.strictEqual(ttsCalls, 1);
 
@@ -166,7 +219,15 @@ test('reserve-first: double generate = one provider call; --force updates in pla
     assert.strictEqual(row.duration_sec, Math.round(2048 / 16000));
   } finally {
     grok.tts = realTts;
-    await supabase.from('podcast_episodes').delete().eq('slug', SLUG);
-    await supabase.storage.from(BUCKET).remove([`episodes/${SLUG}.mp3`]);
+    // Tracked cleanup: exactly the fixtures this test caused, nothing else.
+    if (inserted.episode) {
+      await supabase.from('podcast_episodes').delete().eq('slug', SLUG);
+    }
+    if (inserted.storageObject) {
+      await supabase.storage.from(BUCKET).remove([`episodes/${SLUG}.mp3`]);
+    }
+    if (inserted.article) {
+      await supabase.from('stack_signal_articles').delete().eq('slug', SLUG);
+    }
   }
 });
