@@ -7,7 +7,15 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-require('dotenv').config(); // src/lib/supabase.js (transitively required) needs env at load
+require('dotenv').config(); // real env first when present (shell or .env)
+// Env guard (Codex P2): requiring troy-chat.js transitively loads
+// src/lib/supabase.js, whose createClient throws in a clean checkout with no
+// env. These tests are pure-function only and never touch the network, so
+// default exactly the two vars supabase.js reads to harmless dummies. ||=
+// keeps any real value (shell env or dotenv above) untouched.
+process.env.SUPABASE_URL ||= 'http://localhost:54321';
+process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-dummy-service-role-key';
+
 const { sanitizeTTSText } = require('../src/routes/troy-chat');
 
 test('"The Fed held rates" keeps a single article', () => {
