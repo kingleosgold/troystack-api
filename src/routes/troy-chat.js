@@ -1418,3 +1418,7 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
 });
 
 module.exports = router;
+// Additive export for src/services/podcast.js — the podcast episode pipeline
+// reuses the exact /speak sanitizer so spoken output policy stays single-
+// sourced here (alongside SANITIZER_VERSION). Function body unchanged.
+module.exports.sanitizeTTSText = sanitizeTTSText;

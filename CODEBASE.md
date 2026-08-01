@@ -123,6 +123,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | POST | /v1/troy/conversations/:id/messages | Public (UUID, quota) | Send message to Troy (3/day free, 30/day Gold) |
 | POST | /v1/troy/speak | Public (UUID, Gold tier) | TTS via ElevenLabs — streams audio/mpeg, 4000 char limit, voice cap |
 | POST | /v1/troy/transcribe | Public (UUID) | STT via OpenAI Whisper — multipart audio upload, voice cap |
+| GET | /v1/podcast/feed.xml | Public | Podcast RSS feed for "The Stack Signal: Daily Gold & Silver Brief" — RSS 2.0 + iTunes tags from `podcast_episodes`, 10-min in-memory cache. Lives in `src/routes/podcast.js` |
 
 **Key functions:**
 - `detectPreviewContent(response, contextData)` — returns preview type: portfolio, purchasing_power, cost_basis, chart (ratio/spot_price), dealer_link
@@ -433,7 +434,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `* * * * *` | Every 60s | Price fetch + cache update + price_log write (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 60s (decimated later) |
 | `*/5 * * * *` | Every 5 min | Price alert checker | price-alert-checker.js `checkPriceAlerts()` |
 | `*/15 * * * *` | Every 15 min | Stack Signal article pipeline (~41 feeds, signal scoring, max 5/run) | stack-signal-processor.js `runStackSignalPipeline()` |
-| `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis | stack-signal-processor.js `generateStackSignal()` |
+| `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis → then podcast episode hook (TTS flagship → troy-podcast bucket → podcast_episodes; own try/catch, never breaks the article publish) | stack-signal-processor.js `generateStackSignal()` + podcast.js `generateEpisode()` |
 | `30 21 * * 1-5` | 4:30 PM (weekdays) | Stack Signal evening digest | `generateStackSignal('evening')` |
 | `0 22 * * 5` | 5:00 PM (Fri) | Weekly recap | `generateStackSignal('weekly_recap')` |
 | `15 11 * * 1` | 6:15 AM (Mon) | Weekly preview | `generateStackSignal('weekly_preview')` |
@@ -518,6 +519,13 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `user_id` (UUID, PK), `questions_used` (int), `period_start` (timestamptz)
 - Rolling 1-day window: free=3/day, gold=30/day
 - Used by: troy-chat.js
+
+### podcast_episodes
+- `slug` (text, PK — matches stack_signal_articles.slug, e.g. `the-stack-signal-2026-07-31`)
+- `audio_url` (text — public troy-podcast bucket URL, RSS enclosure), `audio_bytes` (bigint), `duration_sec` (int — bytes/16000 @128kbps CBR)
+- `title`, `description` (text), `published_at`, `created_at` (timestamptz)
+- Migration: `migrations/004_podcast_episodes.sql` (apply via `scripts/setup-podcast-tables.js` or SQL Editor)
+- Used by: podcast.js (service + route)
 
 ### stack_signal_articles
 - `id` (UUID, PK), `slug` (text, unique)
@@ -1050,6 +1058,13 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 ---
 
 ## Services Reference
+
+### src/services/podcast.js
+- **Purpose:** Podcast v1 — turn the daily flagship Stack Signal article into a public episode of "The Stack Signal: Daily Gold & Silver Brief"
+- **Exports:** `generateEpisode({date})` (idempotent per slug), `buildEpisodeScript(article)`, `buildEpisodeDescription(article)`, `stripMarkdown(text)`, `BUCKET`
+- **Dependencies:** supabase, voice-providers/grok (PINNED — never getTTSProvider; voice `leo`, xAI Output-ownership terms), troy-chat.js `sanitizeTTSText`
+- **Last modified:** 2026-07-31
+- **Pipeline:** strip markdown → wrap intro/outro → sanitizeTTSText → grok.tts → upload `episodes/{slug}.mp3` to **troy-podcast** (PUBLIC bucket, 50MB, audio/mpeg + artwork.png, retention FOREVER — permanently excluded from all cleanup crons) → insert `podcast_episodes` row. Triggered by the 11:15 UTC cron hook after the flagship publishes; manual/backfill via `scripts/generate-episode.js [date]`. Artwork: `scripts/generate-podcast-artwork.js` (3000×3000 from the Troy coin SVG, needs `sharp` devDependency). Tests: `test/podcast.test.js`.
 
 ### src/services/tts-cache.js
 - **Purpose:** Content-addressed MP3 cache for `/v1/troy/speak` — synthesize once, serve stored bytes on identical requests (Phase A)

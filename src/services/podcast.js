@@ -1,0 +1,126 @@
+// Podcast v1 — "The Stack Signal: Daily Gold & Silver Brief"
+//
+// Turns the daily flagship Stack Signal article (stack_signal_articles,
+// slug the-stack-signal-YYYY-MM-DD) into a public podcast episode:
+//   strip markdown → wrap intro/outro → sanitizeTTSText → Grok TTS (pinned)
+//   → upload MP3 to the public troy-podcast bucket → record in podcast_episodes.
+//
+// Provider is PINNED to grok via direct require — never getTTSProvider().
+// Two reasons: a VOICE_PROVIDER env flip must not silently change the show's
+// voice (leo), and the cleared-rights position (xAI assigns Output ownership
+// to the customer) is provider-specific.
+//
+// Idempotent per slug: an existing podcast_episodes row short-circuits before
+// any provider spend. Callers (the 11:15 cron hook, scripts/generate-episode.js)
+// treat throws as log-and-skip — episode failure must never break the article cron.
+
+const supabase = require('../lib/supabase');
+const grok = require('./voice-providers/grok'); // pinned — see header
+// Layering note: sanitizeTTSText lives in the troy-chat route module (it is
+// the /speak sanitizer and owns SANITIZER_VERSION). Requiring a route from a
+// service is a known wart, accepted to keep sanitization policy single-sourced.
+// No require cycle: troy-chat.js does not require podcast.js.
+const { sanitizeTTSText } = require('../routes/troy-chat');
+
+const BUCKET = 'troy-podcast';
+const BYTES_PER_SEC = 16000; // 128kbps CBR MP3 — duration estimate for itunes:duration
+
+// Strip markdown the sanitizer doesn't fully cover: links, headers, images,
+// code ticks. Bold/italic markers are also handled here so the episode script
+// is clean prose before wrapping (sanitizeTTSText would catch **/*/_ anyway).
+function stripMarkdown(text) {
+  let out = text;
+  out = out.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1');   // images → alt text
+  out = out.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');    // links → link text
+  out = out.replace(/^#{1,6}\s+/gm, '');                // headers
+  out = out.replace(/\*\*([^*]+)\*\*/g, '$1');          // bold
+  out = out.replace(/\*([^*]+)\*/g, '$1');              // italic
+  out = out.replace(/__([^_]+)__/g, '$1');              // bold (underscore)
+  out = out.replace(/_([^_]+)_/g, '$1');                // italic (underscore)
+  out = out.replace(/`+/g, '');                         // code ticks
+  return out.trim();
+}
+
+// Episode script wrapper — exact copy per podcast v1 ruling #3.
+function buildEpisodeScript(article) {
+  const dateSpoken = new Date(article.published_at).toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
+  });
+  const intro = `This is The Stack Signal for ${dateSpoken}. I'm Troy. Here's what matters in metals today.`;
+  const outro = `That's the signal. The Stack Signal is generated daily by Troy, TroyStack's AI analyst. Track your own stack — TroyStack on the App Store, or troystack.com.`;
+  return `${intro}\n\n${stripMarkdown(article.troy_commentary)}\n\n${outro}`;
+}
+
+// Episode description for the feed: one-liner + first paragraph of the article.
+function buildEpisodeDescription(article) {
+  const body = stripMarkdown(article.troy_commentary || '');
+  const firstParagraph = body.split(/\n\s*\n/)[0] || '';
+  const oneLiner = (article.troy_one_liner || '').trim();
+  return [oneLiner, firstParagraph].filter(Boolean).join('\n\n');
+}
+
+// Generate the episode for a date (YYYY-MM-DD, default: today America/New_York).
+// Returns { skipped, reason } | { created, slug, audioUrl, audioBytes, durationSec }.
+async function generateEpisode({ date } = {}) {
+  const dateStr = date || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    throw new Error(`Invalid date "${dateStr}" — expected YYYY-MM-DD`);
+  }
+  const slug = `the-stack-signal-${dateStr}`;
+
+  // Idempotency gate — before any provider spend.
+  const { data: existing, error: existErr } = await supabase
+    .from('podcast_episodes')
+    .select('slug')
+    .eq('slug', slug)
+    .maybeSingle();
+  if (existErr) throw new Error(`podcast_episodes lookup failed: ${existErr.message}`);
+  if (existing) return { skipped: true, reason: `episode already exists for ${slug}` };
+
+  const { data: article, error: artErr } = await supabase
+    .from('stack_signal_articles')
+    .select('slug, title, troy_commentary, troy_one_liner, published_at')
+    .eq('slug', slug)
+    .maybeSingle();
+  if (artErr) throw new Error(`article lookup failed: ${artErr.message}`);
+  if (!article || !article.troy_commentary) {
+    return { skipped: true, reason: `no flagship article for ${slug}` };
+  }
+
+  const script = buildEpisodeScript(article);
+  const cleanText = sanitizeTTSText(script);
+  console.log(`🎙️ [Podcast] Synthesizing ${slug}: script ${script.length} chars → sanitized ${cleanText.length} chars`);
+
+  const ttsResult = await grok.tts({ text: cleanText });
+  const chunks = [];
+  for await (const chunk of ttsResult.audioStream) chunks.push(chunk);
+  const audioBuffer = Buffer.concat(chunks);
+  if (audioBuffer.length === 0) throw new Error('provider returned 0 bytes');
+
+  const storagePath = `episodes/${slug}.mp3`;
+  const { error: uploadErr } = await supabase.storage
+    .from(BUCKET)
+    .upload(storagePath, audioBuffer, { contentType: 'audio/mpeg', upsert: true });
+  if (uploadErr) throw new Error(`upload failed: ${uploadErr.message}`);
+
+  const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(storagePath);
+  const audioUrl = pub.publicUrl;
+  const durationSec = Math.round(audioBuffer.length / BYTES_PER_SEC);
+
+  const row = {
+    slug,
+    audio_url: audioUrl,
+    audio_bytes: audioBuffer.length,
+    duration_sec: durationSec,
+    title: article.title,
+    description: buildEpisodeDescription(article),
+    published_at: article.published_at,
+  };
+  const { error: insertErr } = await supabase.from('podcast_episodes').insert(row);
+  if (insertErr) throw new Error(`episode record failed: ${insertErr.message}`);
+
+  console.log(`🎙️ [Podcast] Published ${slug}: ${audioBuffer.length} bytes, ~${durationSec}s, cost ${ttsResult.costCents}¢`);
+  return { created: true, slug, audioUrl, audioBytes: audioBuffer.length, durationSec };
+}
+
+module.exports = { generateEpisode, buildEpisodeScript, buildEpisodeDescription, stripMarkdown, BUCKET };

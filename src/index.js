@@ -215,6 +215,9 @@ app.use('/v1/junk-silver', publicLimiter, junkSilverRouter);
 // API key management — Supabase JWT auth inside the router (not apiKeyAuth)
 app.use('/v1/api-keys', publicLimiter, apiKeysRouter);
 
+// Podcast — public RSS feed for "The Stack Signal" (podcast v1)
+app.use('/v1/podcast', publicLimiter, require('./routes/podcast'));
+
 // MCP routes are mounted above (before express.json()) so the transport
 // can parse its own body — see Streamable HTTP block near Stripe webhook.
 
@@ -524,15 +527,29 @@ app.listen(PORT, () => {
   // Runs 20 min before Daily Brief so synthesis is ready for the combined morning push
   cron.schedule('15 11 * * *', async () => {
     console.log(`\n📰 [Stack Signal Daily] Triggered at ${new Date().toISOString()}`);
+    let result = null;
     try {
       const { generateStackSignal } = require('./services/stack-signal-processor');
-      const result = await generateStackSignal();
+      result = await generateStackSignal();
       console.log(`📰 [Stack Signal Daily] Done: ${result ? result.slug : 'no synthesis generated'}`);
     } catch (err) {
       console.error('📰 [Stack Signal Daily] Failed:', err.message);
     }
+
+    // Podcast v1: TTS the flagship into a public episode after it publishes.
+    // Own try/catch — episode failure logs and skips, NEVER breaks the
+    // article cron. Idempotent per slug (safe on cron re-fire).
+    if (result) {
+      try {
+        const { generateEpisode } = require('./services/podcast');
+        const ep = await generateEpisode();
+        console.log(`🎙️ [Podcast] ${ep.created ? `Episode published: ${ep.slug} (${ep.audioBytes} bytes, ~${ep.durationSec}s)` : `Skipped: ${ep.reason}`}`);
+      } catch (err) {
+        console.error('🎙️ [Podcast] Episode generation failed (article publish unaffected):', err.message);
+      }
+    }
   }, { timezone: 'UTC' });
-  console.log('📰 [Stack Signal Daily] Scheduled: daily at 6:15 AM EST (11:15 UTC)');
+  console.log('📰 [Stack Signal Daily] Scheduled: daily at 6:15 AM EST (11:15 UTC) + podcast episode hook');
 
   // ── Evening Stack Signal — post market close (4:30 PM EST / 21:30 UTC) ──
   cron.schedule('30 21 * * 1-5', async () => {
