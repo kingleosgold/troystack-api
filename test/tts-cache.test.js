@@ -10,6 +10,15 @@ const assert = require('node:assert');
 const crypto = require('node:crypto');
 
 require('dotenv').config();
+// hasEnv MUST be computed before the dummy defaults below — it gates the
+// real-bucket round-trip test, which must skip when only dummies are present.
+const hasEnv = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+// Env guard (same pattern as sanitizer.test.js): the require below transitively
+// loads src/lib/supabase.js, whose createClient throws in a clean checkout
+// with no env. Key-derivation tests are pure — dummies keep the load safe.
+process.env.SUPABASE_URL ||= 'http://localhost:54321';
+process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-dummy-service-role-key';
+
 const { buildCacheKey, get, put } = require('../src/services/tts-cache');
 
 const baseParts = {
@@ -55,8 +64,6 @@ test('provider cacheKeyParts feed distinct keys per provider', () => {
   const b = buildCacheKey({ sanitizedText: 'x', version: 'v1', ...eleven.cacheKeyParts() });
   assert.notStrictEqual(a, b);
 });
-
-const hasEnv = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 test('get/put round-trip against the real bucket', { skip: !hasEnv && 'SUPABASE env not configured' }, async () => {
   const supabase = require('../src/lib/supabase');
