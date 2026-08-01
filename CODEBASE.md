@@ -524,7 +524,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `slug` (text, PK — matches stack_signal_articles.slug, e.g. `the-stack-signal-2026-07-31`)
 - `audio_url` (text — public troy-podcast bucket URL, RSS enclosure), `audio_bytes` (bigint), `duration_sec` (int — bytes/16000 @128kbps CBR)
 - `title`, `description` (text), `published_at`, `created_at` (timestamptz)
-- Migration: `migrations/004_podcast_episodes.sql` (apply via `scripts/setup-podcast-tables.js` or SQL Editor)
+- Migration: `migrations/004_podcast_episodes.sql` — applied to production 2026-07-31. Paste into the Supabase SQL Editor to apply elsewhere (`scripts/setup-podcast-tables.js` prints it; display-only)
 - Used by: podcast.js (service + route)
 
 ### stack_signal_articles
