@@ -96,6 +96,7 @@ router.get('/feed.xml', async (_req, res) => {
     const { data: episodes, error } = await supabase
       .from('podcast_episodes')
       .select('slug, audio_url, audio_bytes, duration_sec, title, description, published_at')
+      .gt('audio_bytes', 0) // exclude pending/failed reservation stubs (reserve-first writes audio_bytes=0 until the audio is real)
       .order('published_at', { ascending: false })
       .limit(MAX_FEED_ITEMS);
     if (error) throw new Error(error.message);

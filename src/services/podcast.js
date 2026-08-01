@@ -65,21 +65,22 @@ function buildEpisodeDescription(article) {
 
 // Generate the episode for a date (YYYY-MM-DD, default: today America/New_York).
 // Returns { skipped, reason } | { created, slug, audioUrl, audioBytes, durationSec }.
-async function generateEpisode({ date } = {}) {
+//
+// Reserve-first concurrency (no schema change): the row is INSERTed (plain
+// insert, not upsert) BEFORE any provider spend, with audio_bytes=0 /
+// duration_sec=0 as the pending sentinel. A PK conflict means another caller
+// already reserved or published this slug — the loser exits without paying.
+// The winner synthesizes, uploads, then UPDATEs the row with real bytes.
+// A crash between reservation and update leaves a stub row: the feed hides
+// stubs (audio_bytes > 0 filter) and `generate-episode.js --force` repairs
+// them in place — also the documented path for regenerating an episode after
+// sanitizer changes.
+async function generateEpisode({ date, force = false } = {}) {
   const dateStr = date || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
     throw new Error(`Invalid date "${dateStr}" — expected YYYY-MM-DD`);
   }
   const slug = `the-stack-signal-${dateStr}`;
-
-  // Idempotency gate — before any provider spend.
-  const { data: existing, error: existErr } = await supabase
-    .from('podcast_episodes')
-    .select('slug')
-    .eq('slug', slug)
-    .maybeSingle();
-  if (existErr) throw new Error(`podcast_episodes lookup failed: ${existErr.message}`);
-  if (existing) return { skipped: true, reason: `episode already exists for ${slug}` };
 
   const { data: article, error: artErr } = await supabase
     .from('stack_signal_articles')
@@ -91,9 +92,36 @@ async function generateEpisode({ date } = {}) {
     return { skipped: true, reason: `no flagship article for ${slug}` };
   }
 
+  // Deterministic public URL — known before the object exists, so the
+  // reservation row satisfies NOT NULL audio_url.
+  const storagePath = `episodes/${slug}.mp3`;
+  const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(storagePath);
+  const audioUrl = pub.publicUrl;
+
+  // Atomic reservation. Under --force a conflict is expected (repairing a
+  // stub or regenerating a published episode) and we proceed to overwrite.
+  const reservation = {
+    slug,
+    audio_url: audioUrl,
+    audio_bytes: 0,
+    duration_sec: 0,
+    title: article.title,
+    description: buildEpisodeDescription(article),
+    published_at: article.published_at,
+  };
+  const { error: insertErr } = await supabase.from('podcast_episodes').insert(reservation);
+  if (insertErr) {
+    const isConflict = insertErr.code === '23505' || /duplicate key/i.test(insertErr.message);
+    if (!isConflict) throw new Error(`reservation failed: ${insertErr.message}`);
+    if (!force) {
+      console.log(`🎙️ [Podcast] ${slug} already reserved/generated — exiting before provider spend`);
+      return { skipped: true, reason: `already reserved/generated: ${slug}` };
+    }
+  }
+
   const script = buildEpisodeScript(article);
   const cleanText = sanitizeTTSText(script);
-  console.log(`🎙️ [Podcast] Synthesizing ${slug}: script ${script.length} chars → sanitized ${cleanText.length} chars`);
+  console.log(`🎙️ [Podcast] Synthesizing ${slug}: script ${script.length} chars → sanitized ${cleanText.length} chars${force ? ' (--force)' : ''}`);
 
   const ttsResult = await grok.tts({ text: cleanText, voiceId: PODCAST_VOICE });
   const chunks = [];
@@ -101,27 +129,24 @@ async function generateEpisode({ date } = {}) {
   const audioBuffer = Buffer.concat(chunks);
   if (audioBuffer.length === 0) throw new Error('provider returned 0 bytes');
 
-  const storagePath = `episodes/${slug}.mp3`;
   const { error: uploadErr } = await supabase.storage
     .from(BUCKET)
     .upload(storagePath, audioBuffer, { contentType: 'audio/mpeg', upsert: true });
   if (uploadErr) throw new Error(`upload failed: ${uploadErr.message}`);
 
-  const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(storagePath);
-  const audioUrl = pub.publicUrl;
   const durationSec = Math.round(audioBuffer.length / BYTES_PER_SEC);
-
-  const row = {
-    slug,
-    audio_url: audioUrl,
-    audio_bytes: audioBuffer.length,
-    duration_sec: durationSec,
-    title: article.title,
-    description: buildEpisodeDescription(article),
-    published_at: article.published_at,
-  };
-  const { error: insertErr } = await supabase.from('podcast_episodes').insert(row);
-  if (insertErr) throw new Error(`episode record failed: ${insertErr.message}`);
+  const { error: updateErr } = await supabase
+    .from('podcast_episodes')
+    .update({
+      audio_url: audioUrl,
+      audio_bytes: audioBuffer.length,
+      duration_sec: durationSec,
+      title: article.title,
+      description: buildEpisodeDescription(article),
+      published_at: article.published_at,
+    })
+    .eq('slug', slug);
+  if (updateErr) throw new Error(`episode record update failed: ${updateErr.message}`);
 
   console.log(`🎙️ [Podcast] Published ${slug}: ${audioBuffer.length} bytes, ~${durationSec}s, cost ${ttsResult.costCents}¢`);
   return { created: true, slug, audioUrl, audioBytes: audioBuffer.length, durationSec };

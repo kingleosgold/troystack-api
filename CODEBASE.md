@@ -1061,7 +1061,7 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 
 ### src/services/podcast.js
 - **Purpose:** Podcast v1 — turn the daily flagship Stack Signal article into a public episode of "The Stack Signal: Daily Gold & Silver Brief"
-- **Exports:** `generateEpisode({date})` (idempotent per slug), `buildEpisodeScript(article)`, `buildEpisodeDescription(article)`, `stripMarkdown(text)`, `BUCKET`
+- **Exports:** `generateEpisode({date, force})` (reserve-first: atomic INSERT with audio_bytes=0 sentinel before provider spend; PK conflict exits — `force` regenerates/repairs in place), `buildEpisodeScript(article)`, `buildEpisodeDescription(article)`, `stripMarkdown(text)`, `BUCKET`, `PODCAST_VOICE`
 - **Dependencies:** supabase, voice-providers/grok (PINNED — never getTTSProvider; voice `leo`, xAI Output-ownership terms), troy-chat.js `sanitizeTTSText`
 - **Last modified:** 2026-07-31
 - **Pipeline:** strip markdown → wrap intro/outro → sanitizeTTSText → grok.tts → upload `episodes/{slug}.mp3` to **troy-podcast** (PUBLIC bucket, 50MB, audio/mpeg + artwork.png, retention FOREVER — permanently excluded from all cleanup crons) → insert `podcast_episodes` row. Triggered by the 11:15 UTC cron hook after the flagship publishes; manual/backfill via `scripts/generate-episode.js [date]`. Artwork: `scripts/generate-podcast-artwork.js` (3000×3000 from the Troy coin SVG, needs `sharp` devDependency). Tests: `test/podcast.test.js`.
