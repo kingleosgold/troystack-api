@@ -114,8 +114,27 @@ async function generateEpisode({ date, force = false } = {}) {
     const isConflict = insertErr.code === '23505' || /duplicate key/i.test(insertErr.message);
     if (!isConflict) throw new Error(`reservation failed: ${insertErr.message}`);
     if (!force) {
-      console.log(`🎙️ [Podcast] ${slug} already reserved/generated — exiting before provider spend`);
-      return { skipped: true, reason: `already reserved/generated: ${slug}` };
+      // Conflict: someone already holds this slug. A completed episode
+      // (audio_bytes > 0) skips; a stub (audio_bytes = 0) is a failed prior
+      // attempt — RECLAIM it and proceed as winner, so any later invocation
+      // (next cron fire, catch-up sweep, manual run) self-heals without
+      // --force. --force is only needed to REGENERATE completed episodes.
+      //
+      // Single-instance assumption: two concurrent reclaims of the same stub
+      // would both pass this read and double-spend synthesis (last UPDATE
+      // wins; bytes stay consistent). Acceptable on single-replica Railway —
+      // revisit with a compare-and-swap UPDATE if replicas ever exist.
+      const { data: existing, error: readErr } = await supabase
+        .from('podcast_episodes')
+        .select('audio_bytes')
+        .eq('slug', slug)
+        .maybeSingle();
+      if (readErr) throw new Error(`reservation conflict read failed: ${readErr.message}`);
+      if (existing && existing.audio_bytes > 0) {
+        console.log(`🎙️ [Podcast] ${slug} already generated — exiting before provider spend`);
+        return { skipped: true, reason: `already generated: ${slug}` };
+      }
+      console.log(`🎙️ [Podcast] ${slug} has a pending/failed stub — reclaiming`);
     }
   }
 
@@ -152,4 +171,47 @@ async function generateEpisode({ date, force = false } = {}) {
   return { created: true, slug, audioUrl, audioBytes: audioBuffer.length, durationSec };
 }
 
-module.exports = { generateEpisode, buildEpisodeScript, buildEpisodeDescription, stripMarkdown, BUCKET, PODCAST_VOICE };
+// Last `days` ET dates (today first) as YYYY-MM-DD strings.
+function recentEtDates(days) {
+  const todayEt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const base = new Date(`${todayEt}T00:00:00Z`);
+  return Array.from({ length: days }, (_, i) =>
+    new Date(base.getTime() - i * 86400000).toISOString().slice(0, 10));
+}
+
+// Catch-up sweep — self-heal missed or failed episodes with zero operator
+// action. For each of the last `days` ET dates that has a flagship article:
+// missing episode row OR stub (audio_bytes = 0) → attempt generation (stub
+// reclaim in generateEpisode makes the retry safe); completed episodes skip.
+// Called from the 11:15 cron hook after today's generation; per-date errors
+// are contained so one bad date never stops the sweep.
+//
+// opts.dates overrides the date list — FOR TESTS ONLY (fixture-only policy:
+// tests must never sweep real/current dates).
+async function sweepRecentEpisodes(days = 3, { dates } = {}) {
+  const sweepDates = dates || recentEtDates(days);
+  const results = [];
+  for (const date of sweepDates) {
+    const slug = `the-stack-signal-${date}`;
+    try {
+      const { data: article, error: artErr } = await supabase
+        .from('stack_signal_articles').select('slug').eq('slug', slug).maybeSingle();
+      if (artErr) throw new Error(`article lookup failed: ${artErr.message}`);
+      if (!article) { results.push({ date, action: 'no-article' }); continue; }
+
+      const { data: ep, error: epErr } = await supabase
+        .from('podcast_episodes').select('audio_bytes').eq('slug', slug).maybeSingle();
+      if (epErr) throw new Error(`episode lookup failed: ${epErr.message}`);
+      if (ep && ep.audio_bytes > 0) { results.push({ date, action: 'skipped-complete' }); continue; }
+
+      const r = await generateEpisode({ date });
+      results.push({ date, action: r.created ? 'generated' : 'skipped', reason: r.reason });
+    } catch (err) {
+      console.error(`🎙️ [Podcast] Sweep failed for ${date}:`, err.message);
+      results.push({ date, action: 'failed', reason: err.message });
+    }
+  }
+  return results;
+}
+
+module.exports = { generateEpisode, sweepRecentEpisodes, buildEpisodeScript, buildEpisodeDescription, stripMarkdown, BUCKET, PODCAST_VOICE };

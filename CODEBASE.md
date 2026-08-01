@@ -434,7 +434,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `* * * * *` | Every 60s | Price fetch + cache update + price_log write (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 60s (decimated later) |
 | `*/5 * * * *` | Every 5 min | Price alert checker | price-alert-checker.js `checkPriceAlerts()` |
 | `*/15 * * * *` | Every 15 min | Stack Signal article pipeline (~41 feeds, signal scoring, max 5/run) | stack-signal-processor.js `runStackSignalPipeline()` |
-| `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis → then podcast episode hook (TTS flagship → troy-podcast bucket → podcast_episodes; own try/catch, never breaks the article publish) | stack-signal-processor.js `generateStackSignal()` + podcast.js `generateEpisode()` |
+| `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis → podcast episode hook (TTS flagship → troy-podcast bucket → podcast_episodes) → catch-up sweep healing the last 3 days' missed/failed episodes; each in its own try/catch, never breaks the article publish | stack-signal-processor.js `generateStackSignal()` + podcast.js `generateEpisode()` / `sweepRecentEpisodes()` |
 | `30 21 * * 1-5` | 4:30 PM (weekdays) | Stack Signal evening digest | `generateStackSignal('evening')` |
 | `0 22 * * 5` | 5:00 PM (Fri) | Weekly recap | `generateStackSignal('weekly_recap')` |
 | `15 11 * * 1` | 6:15 AM (Mon) | Weekly preview | `generateStackSignal('weekly_preview')` |
@@ -1061,7 +1061,7 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 
 ### src/services/podcast.js
 - **Purpose:** Podcast v1 — turn the daily flagship Stack Signal article into a public episode of "The Stack Signal: Daily Gold & Silver Brief"
-- **Exports:** `generateEpisode({date, force})` (reserve-first: atomic INSERT with audio_bytes=0 sentinel before provider spend; PK conflict exits — `force` regenerates/repairs in place), `buildEpisodeScript(article)`, `buildEpisodeDescription(article)`, `stripMarkdown(text)`, `BUCKET`, `PODCAST_VOICE`
+- **Exports:** `generateEpisode({date, force})` (reserve-first: atomic INSERT with audio_bytes=0 sentinel before provider spend; conflict on a completed episode exits, conflict on a stub RECLAIMS it — any later invocation self-heals a failed attempt; `force` only needed to regenerate completed episodes), `sweepRecentEpisodes(days=3)` (catch-up: heals missing/stub episodes for recent article dates; runs in the 11:15 cron after today's generation), `buildEpisodeScript(article)`, `buildEpisodeDescription(article)`, `stripMarkdown(text)`, `BUCKET`, `PODCAST_VOICE`
 - **Dependencies:** supabase, voice-providers/grok (PINNED — never getTTSProvider; voice `leo`, xAI Output-ownership terms), troy-chat.js `sanitizeTTSText`
 - **Last modified:** 2026-07-31
 - **Pipeline:** strip markdown → wrap intro/outro → sanitizeTTSText → grok.tts → upload `episodes/{slug}.mp3` to **troy-podcast** (PUBLIC bucket, 50MB, audio/mpeg + artwork.png, retention FOREVER — permanently excluded from all cleanup crons) → insert `podcast_episodes` row. Triggered by the 11:15 UTC cron hook after the flagship publishes; manual/backfill via `scripts/generate-episode.js [date]`. Artwork: `scripts/generate-podcast-artwork.js` (3000×3000 from the Troy coin SVG, needs `sharp` devDependency). Tests: `test/podcast.test.js`.

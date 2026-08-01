@@ -538,7 +538,7 @@ app.listen(PORT, () => {
 
     // Podcast v1: TTS the flagship into a public episode after it publishes.
     // Own try/catch — episode failure logs and skips, NEVER breaks the
-    // article cron. Idempotent per slug (safe on cron re-fire).
+    // article cron. Reserve-first + stub reclaim (safe on cron re-fire).
     if (result) {
       try {
         const { generateEpisode } = require('./services/podcast');
@@ -547,6 +547,19 @@ app.listen(PORT, () => {
       } catch (err) {
         console.error('🎙️ [Podcast] Episode generation failed (article publish unaffected):', err.message);
       }
+    }
+
+    // Catch-up sweep: self-heal the last few days' missed or failed episodes
+    // (stub reclaim makes retries safe), so a transient failure recovers
+    // within 24h with zero operator action. Runs even when today's article
+    // or episode generation failed — that's the point. Own try/catch.
+    try {
+      const { sweepRecentEpisodes } = require('./services/podcast');
+      const sweep = await sweepRecentEpisodes();
+      const notable = sweep.filter((s) => s.action === 'generated' || s.action === 'failed');
+      console.log(`🎙️ [Podcast] Sweep: ${notable.length ? JSON.stringify(notable) : 'nothing to heal'}`);
+    } catch (err) {
+      console.error('🎙️ [Podcast] Sweep failed:', err.message);
     }
   }, { timezone: 'UTC' });
   console.log('📰 [Stack Signal Daily] Scheduled: daily at 6:15 AM EST (11:15 UTC) + podcast episode hook');
