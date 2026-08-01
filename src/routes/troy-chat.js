@@ -844,7 +844,7 @@ Reference these community discussions naturally when relevant — "Schiff pointe
 // output keeps being served for text the new sanitizer would render
 // differently. Old-version entries are stranded by the path prefix and
 // evicted by the daily TTL cron.
-const SANITIZER_VERSION = 'v1';
+const SANITIZER_VERSION = 'v2'; // v2 (2026-08-01): Fed article guard, bare comma-decimal expansion, cents rounding
 
 function sanitizeTTSText(text) {
   let clean = text;
@@ -881,7 +881,9 @@ function sanitizeTTSText(text) {
   clean = clean.replace(/\bYoY\b/gi, 'year over year');
   clean = clean.replace(/\bMoM\b/gi, 'month over month');
   clean = clean.replace(/\bBRICS\b/g, 'BRICKS');
-  clean = clean.replace(/\bFed\b/g, 'the Fed');
+  // Lookbehind guard: "The Fed" / "the Fed" already carry an article — only
+  // bare "Fed" gets one, so we never emit "the the Fed".
+  clean = clean.replace(/\b(?<![Tt]he )Fed\b/g, 'the Fed');
   clean = clean.replace(/\bIMF\b/g, 'the I M F');
   clean = clean.replace(/\bGDP\b/g, 'G D P');
   clean = clean.replace(/\bCPI\b/g, 'C P I');
@@ -915,13 +917,26 @@ function sanitizeTTSText(text) {
   clean = clean.replace(/(\d+\.\d)0\b/g, '$1');
 
   // Convert dollar amounts to spoken English: $4,657.59 → "four thousand six hundred fifty-seven dollars and fifty-nine cents"
-  clean = clean.replace(/\$([0-9,]+(?:\.[0-9]{1,2})?)/g, (match, num) => {
+  // Consumes ALL decimal digits (not just 2) and rounds to cents, so
+  // "$126,166.234" can't leak a trailing digit ("…cents4").
+  clean = clean.replace(/\$([0-9,]+(?:\.[0-9]+)?)/g, (match, num) => {
     const n = parseFloat(num.replace(/,/g, ''));
-    const dollars = Math.floor(n);
-    const cents = Math.round((n - dollars) * 100);
+    let dollars = Math.floor(n);
+    let cents = Math.round((n - dollars) * 100);
+    if (cents === 100) { dollars += 1; cents = 0; } // $1.999 rounds up to $2
     let result = converter.toWords(dollars) + ' dollars';
     if (cents > 0) result += ' and ' + converter.toWords(cents) + ' cents';
     return result;
+  });
+
+  // Bare comma-grouped decimals (no $): 126,166.23 → "… point two three".
+  // Without this, the comma-integer rule below converts only the integer part
+  // and strands ".23" glued onto the words ("sixty-six.23") — a period
+  // followed by digits, which TTS engines can read as a sentence break.
+  // (.00 never reaches here — stripped earlier. %-suffixed decimals are left
+  // for the percentage rules below.)
+  clean = clean.replace(/\b([0-9]{1,3}(?:,[0-9]{3})+)\.([0-9]+)\b(?!%)/g, (match, int, dec) => {
+    return converter.toWords(parseInt(int.replace(/,/g, ''))) + ' point ' + dec.split('').map(d => converter.toWords(parseInt(d))).join(' ');
   });
 
   // Convert plain large numbers with commas: 6,096 → "six thousand ninety-six"
@@ -1418,3 +1433,7 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
 });
 
 module.exports = router;
+// Additive export for src/services/podcast.js — the podcast episode pipeline
+// reuses the exact /speak sanitizer so spoken output policy stays single-
+// sourced here (alongside SANITIZER_VERSION). Function body unchanged.
+module.exports.sanitizeTTSText = sanitizeTTSText;
