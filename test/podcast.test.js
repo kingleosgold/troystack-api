@@ -111,7 +111,9 @@ function statusReady() {
   if (!statusReadyPromise) {
     statusReadyPromise = (async () => {
       const supabase = require('../src/lib/supabase');
-      const { error } = await supabase.from('podcast_episodes').select('status').limit(1);
+      // Probe the newest 005 column (attempt_token) — an older partial 005
+      // without it must also gate the tests.
+      const { error } = await supabase.from('podcast_episodes').select('status, attempt_token').limit(1);
       return !error;
     })();
   }
@@ -479,5 +481,102 @@ test('sweepRecentEpisodes: missing-or-pending is work, complete skips', async (t
   } finally {
     grok.tts = tts.real;
     for (const d of ALL) await cleanupFixtureSlug(supabase, BUCKET, slugOf(d));
+  }
+});
+
+test('token-bound finalize: a superseded owner cannot finalize (0 rows)', async (t) => {
+  if (!(await integrationReady(t))) return;
+  const supabase = require('../src/lib/supabase');
+  const grok = require('../src/services/voice-providers/grok');
+  const { generateEpisode, BUCKET, CLAIM_LEASE_MINUTES } = require('../src/services/podcast');
+  const { randomUUID } = require('node:crypto');
+
+  const DATE = '1999-01-11';
+  const SLUG = `the-stack-signal-${DATE}`;
+  await assertFixtureAbsent(supabase, 'stack_signal_articles', SLUG);
+  await assertFixtureAbsent(supabase, 'podcast_episodes', SLUG);
+
+  const tts = stubTts(grok);
+  const realStorageFrom = supabase.storage.from.bind(supabase.storage);
+  try {
+    await insertFixtureArticle(supabase, SLUG, DATE);
+
+    // Intercept the storage upload: BETWEEN caller A's pre-upload ownership
+    // check and its finalize, another process expires A's lease and wins the
+    // stale-claim CAS with a fresh token. A's upload still lands (that IS
+    // the documented residual), but A's token-bound finalize must match 0
+    // rows and exit.
+    supabase.storage.from = (bucket) => {
+      const builder = realStorageFrom(bucket);
+      if (bucket === BUCKET) {
+        const realUpload = builder.upload.bind(builder);
+        builder.upload = async (...args) => {
+          // Steal the lease: age it, then run the exact claim CAS with a new token.
+          await supabase.from('podcast_episodes')
+            .update({ attempt_started_at: agedIso(CLAIM_LEASE_MINUTES + 10) }).eq('slug', SLUG);
+          const { data: stolen } = await supabase.from('podcast_episodes')
+            .update({ attempt_started_at: new Date().toISOString(), attempt_token: randomUUID(), audio_bytes: 0, duration_sec: 0 })
+            .eq('slug', SLUG).eq('status', 'pending')
+            .lt('attempt_started_at', new Date(Date.now() - CLAIM_LEASE_MINUTES * 60000).toISOString())
+            .select('slug');
+          assert.strictEqual(stolen.length, 1, 'second claim wins with a new token');
+          return realUpload(...args);
+        };
+      }
+      return builder;
+    };
+
+    const result = await generateEpisode({ date: DATE });
+    assert.strictEqual(result.skipped, true, 'superseded owner exits');
+    assert.match(result.reason, /lost lease at finalize/);
+    assert.strictEqual(tts.calls, 1);
+
+    // The row still belongs to the thief's pending attempt — untouched by
+    // A's finalize.
+    const { data: row } = await supabase.from('podcast_episodes')
+      .select('status, audio_bytes').eq('slug', SLUG).single();
+    assert.strictEqual(row.status, 'pending', 'finalize matched 0 rows');
+    assert.strictEqual(row.audio_bytes, 0);
+  } finally {
+    supabase.storage.from = realStorageFrom;
+    grok.tts = tts.real;
+    await cleanupFixtureSlug(supabase, BUCKET, SLUG);
+  }
+});
+
+test('pre-upload gate: token swapped mid-synthesis aborts before touching storage', async (t) => {
+  if (!(await integrationReady(t))) return;
+  const supabase = require('../src/lib/supabase');
+  const grok = require('../src/services/voice-providers/grok');
+  const { generateEpisode, BUCKET } = require('../src/services/podcast');
+  const { randomUUID } = require('node:crypto');
+
+  const DATE = '1999-01-12';
+  const SLUG = `the-stack-signal-${DATE}`;
+  await assertFixtureAbsent(supabase, 'stack_signal_articles', SLUG);
+  await assertFixtureAbsent(supabase, 'podcast_episodes', SLUG);
+
+  const tts = stubTts(grok);
+  try {
+    await insertFixtureArticle(supabase, SLUG, DATE);
+
+    // Swap the row's token while the provider call is in flight.
+    tts.onCall = async () => {
+      await supabase.from('podcast_episodes')
+        .update({ attempt_token: randomUUID() }).eq('slug', SLUG);
+    };
+
+    const result = await generateEpisode({ date: DATE });
+    assert.strictEqual(result.skipped, true, 'aborts on lost lease');
+    assert.match(result.reason, /lost lease before upload/);
+    assert.strictEqual(tts.calls, 1);
+
+    // Storage untouched: no object exists at the fixture path.
+    const { data: dl, error: dlErr } = await supabase.storage
+      .from(BUCKET).download(`episodes/${SLUG}.mp3`);
+    assert.ok(dlErr || !dl, 'no upload happened');
+  } finally {
+    grok.tts = tts.real;
+    await cleanupFixtureSlug(supabase, BUCKET, SLUG);
   }
 });

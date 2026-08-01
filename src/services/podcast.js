@@ -14,6 +14,7 @@
 // any provider spend. Callers (the 11:15 cron hook, scripts/generate-episode.js)
 // treat throws as log-and-skip — episode failure must never break the article cron.
 
+const crypto = require('node:crypto');
 const supabase = require('../lib/supabase');
 const grok = require('./voice-providers/grok'); // pinned — see header
 // Layering note: sanitizeTTSText lives in the troy-chat route module (it is
@@ -108,6 +109,9 @@ async function generateEpisode({ date, force = false } = {}) {
   const audioUrl = pub.publicUrl;
 
   let owned = false;
+  // Ownership is bound to this token: every acquisition below writes it, the
+  // pre-upload gate re-checks it, and finalize only lands where it matches.
+  const myToken = crypto.randomUUID();
 
   // NEW: create the row as a pending claim. Success = ownership.
   const { error: insertErr } = await supabase.from('podcast_episodes').insert({
@@ -117,6 +121,7 @@ async function generateEpisode({ date, force = false } = {}) {
     duration_sec: 0,
     status: 'pending',
     attempt_started_at: new Date().toISOString(),
+    attempt_token: myToken,
     title: article.title,
     description: buildEpisodeDescription(article),
     published_at: article.published_at,
@@ -128,16 +133,16 @@ async function generateEpisode({ date, force = false } = {}) {
     if (!isConflict) throw new Error(`claim insert failed: ${insertErr.message}`);
 
     if (force) {
-      // FORCE DEMOTE (atomic): complete → pending with a FRESH lease and
-      // zeroed bytes, so the feed hides it immediately and overlapping
-      // plain calls see an ACTIVE attempt and skip. Then synthesize →
-      // upload → finalize. A crash anywhere mid-force leaves a pending
-      // row that heals via the stale claim once the lease expires.
+      // FORCE DEMOTE (atomic): complete → pending with a FRESH lease, a
+      // fresh token, and zeroed bytes, so the feed hides it immediately and
+      // overlapping plain calls see an ACTIVE attempt and skip. Then
+      // synthesize → upload → finalize. A crash anywhere mid-force leaves a
+      // pending row that heals via the stale claim once the lease expires.
       // Trade: the episode vanishes from the feed during a failed force
       // until the next heal.
       const { data: demoted, error: demoteErr } = await supabase
         .from('podcast_episodes')
-        .update({ status: 'pending', attempt_started_at: new Date().toISOString(), audio_bytes: 0, duration_sec: 0 })
+        .update({ status: 'pending', attempt_started_at: new Date().toISOString(), attempt_token: myToken, audio_bytes: 0, duration_sec: 0 })
         .eq('slug', slug)
         .eq('status', 'complete')
         .select('slug');
@@ -149,15 +154,15 @@ async function generateEpisode({ date, force = false } = {}) {
 
     if (!owned) {
       // STALE CLAIM (atomic): take over a pending row whose lease expired,
-      // refreshing the lease in the same statement. Exactly one concurrent
-      // caller can win this UPDATE. Note: the cutoff uses this process's
-      // clock (PostgREST can't reference server-side now() here) — clock
-      // skew shifts the lease boundary by skew amount, which is harmless
-      // at a 10-minute scale.
+      // refreshing the lease and writing OUR token in the same statement.
+      // Exactly one concurrent caller can win this UPDATE. Note: the cutoff
+      // uses this process's clock (PostgREST can't reference server-side
+      // now() here) — clock skew shifts the lease boundary by skew amount,
+      // which is harmless at a 10-minute scale.
       const cutoff = new Date(Date.now() - CLAIM_LEASE_MINUTES * 60000).toISOString();
       const { data: claimed, error: claimErr } = await supabase
         .from('podcast_episodes')
-        .update({ attempt_started_at: new Date().toISOString(), audio_bytes: 0, duration_sec: 0 })
+        .update({ attempt_started_at: new Date().toISOString(), attempt_token: myToken, audio_bytes: 0, duration_sec: 0 })
         .eq('slug', slug)
         .eq('status', 'pending')
         .lt('attempt_started_at', cutoff)
@@ -190,14 +195,35 @@ async function generateEpisode({ date, force = false } = {}) {
   const audioBuffer = Buffer.concat(chunks);
   if (audioBuffer.length === 0) throw new Error('provider returned 0 bytes');
 
+  // Pre-upload ownership gate: if the lease was stolen while we were
+  // synthesizing (long provider call), do not touch storage. ADVISORY —
+  // there is a ms-scale TOCTOU window between this check and the upload;
+  // see the residual note at finalize.
+  const { data: ownerRow, error: ownerErr } = await supabase
+    .from('podcast_episodes')
+    .select('status, attempt_token')
+    .eq('slug', slug)
+    .maybeSingle();
+  if (ownerErr) throw new Error(`pre-upload ownership read failed: ${ownerErr.message}`);
+  if (!ownerRow || ownerRow.status !== 'pending' || ownerRow.attempt_token !== myToken) {
+    console.log(`🎙️ [Podcast] ${slug}: lost lease — aborting before upload`);
+    return { skipped: true, reason: `lost lease before upload: ${slug}` };
+  }
+
   const { error: uploadErr } = await supabase.storage
     .from(BUCKET)
     .upload(storagePath, audioBuffer, { contentType: 'audio/mpeg', upsert: true });
   if (uploadErr) throw new Error(`upload failed: ${uploadErr.message}`);
 
-  // FINALIZE: pending → complete with the real bytes.
+  // FINALIZE: pending → complete, token-bound — only the current owner's
+  // finalize can land. ACCEPTED RESIDUAL: the pre-upload check above is
+  // advisory (ms-scale TOCTOU between check and upload); with finalize
+  // token-bound, the row always describes the finalizing owner's buffer,
+  // and the worst residual is a superseded upload landing in storage after
+  // someone else's finalize — self-corrected by the next --force.
+  // Acceptable, single-operator system.
   const durationSec = Math.round(audioBuffer.length / BYTES_PER_SEC);
-  const { error: updateErr } = await supabase
+  const { data: finalized, error: updateErr } = await supabase
     .from('podcast_episodes')
     .update({
       status: 'complete',
@@ -208,8 +234,15 @@ async function generateEpisode({ date, force = false } = {}) {
       description: buildEpisodeDescription(article),
       published_at: article.published_at,
     })
-    .eq('slug', slug);
+    .eq('slug', slug)
+    .eq('status', 'pending')
+    .eq('attempt_token', myToken)
+    .select('slug');
   if (updateErr) throw new Error(`finalize failed: ${updateErr.message}`);
+  if (!finalized || finalized.length === 0) {
+    console.log(`🎙️ [Podcast] ${slug}: lost lease — not finalizing`);
+    return { skipped: true, reason: `lost lease at finalize: ${slug}` };
+  }
 
   console.log(`🎙️ [Podcast] Published ${slug}: ${audioBuffer.length} bytes, ~${durationSec}s, cost ${ttsResult.costCents}¢`);
   return { created: true, slug, audioUrl, audioBytes: audioBuffer.length, durationSec };

@@ -524,12 +524,12 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 ### podcast_episodes
 - `slug` (text, PK — matches stack_signal_articles.slug, e.g. `the-stack-signal-2026-07-31`)
 - `audio_url` (text — public troy-podcast bucket URL, RSS enclosure), `audio_bytes` (bigint), `duration_sec` (int — bytes/16000 @128kbps CBR)
-- `status` (text: `pending` | `complete`, default `complete`), `attempt_started_at` (timestamptz — lease start of the owning attempt)
+- `status` (text: `pending` | `complete`, default `complete`), `attempt_started_at` (timestamptz — lease start of the owning attempt), `attempt_token` (uuid — identity of the owning attempt; every acquisition writes a fresh one)
 - `title`, `description` (text), `published_at`, `created_at` (timestamptz)
 - Migrations: `migrations/004_podcast_episodes.sql` (applied to production 2026-07-31) + `migrations/005_podcast_episode_status.sql` (**must be applied before podcast v1 deploys**). `scripts/setup-podcast-tables.js` prints both (display-only)
 - Used by: podcast.js (service + route)
 
-**Episode lifecycle state machine** (podcast.js): `pending` = an attempt owns the row, lease = `attempt_started_at` + 10 min (`CLAIM_LEASE_MINUTES`); `complete` = finalized, served by the feed. Every ownership change is one atomic statement — PK INSERT (`NEW` → pending), CAS stale-claim UPDATE (`pending` + expired lease → pending, lease refreshed; exactly one concurrent winner), CAS force-demote (`complete` → pending, fresh lease, bytes zeroed — overlapping plain calls see an active attempt), finalize (`pending` → complete + real bytes). A crash at any point leaves `pending`, claimable after the lease expires — healed automatically by the next cron fire, the 12:15 heal cron, or a manual run.
+**Episode lifecycle state machine** (podcast.js): `pending` = an attempt owns the row, lease = `attempt_started_at` + 10 min (`CLAIM_LEASE_MINUTES`), identity = `attempt_token`; `complete` = finalized, served by the feed. Every ownership change is one atomic statement writing a fresh token — PK INSERT (`NEW` → pending), CAS stale-claim UPDATE (`pending` + expired lease → pending, lease + token refreshed; exactly one concurrent winner), CAS force-demote (`complete` → pending, fresh lease + token, bytes zeroed — overlapping plain calls see an active attempt), token-bound finalize (`pending` + my token → complete + real bytes; a superseded owner matches 0 rows and exits). An advisory pre-upload re-read aborts a superseded attempt before it touches storage; accepted residual: ms-scale TOCTOU between that check and the upload means a superseded upload can land after someone else's finalize — self-corrected by the next `--force`. A crash at any point leaves `pending`, claimable after the lease expires — healed automatically by the next cron fire, the 12:15 heal cron, or a manual run.
 
 ### stack_signal_articles
 - `id` (UUID, PK), `slug` (text, unique)

@@ -8,6 +8,11 @@
 -- (they were only ever written fully-formed before this migration).
 -- Paste into the Supabase SQL Editor. Re-run safe: ADD COLUMN IF NOT EXISTS.
 
+-- attempt_token binds ownership to a specific attempt: every acquisition
+-- (NEW insert, stale claim, force demote) writes a fresh token the caller
+-- keeps, and finalize only lands WHERE attempt_token matches — a caller
+-- whose lease was stolen can never finalize over the new owner's attempt.
 ALTER TABLE podcast_episodes
   ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'complete' CHECK (status IN ('pending','complete')),
-  ADD COLUMN IF NOT EXISTS attempt_started_at TIMESTAMPTZ NOT NULL DEFAULT now();
+  ADD COLUMN IF NOT EXISTS attempt_started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS attempt_token UUID NOT NULL DEFAULT gen_random_uuid();
