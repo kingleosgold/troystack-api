@@ -7,6 +7,11 @@
 // Channel constants below are the submitted show identity (Apple Podcasts
 // Connect / Spotify) — treat edits as show-level changes, not code cleanup.
 // itunes:owner email is what Spotify sends its verification code to.
+//
+// Items carry <link> and <itunes:author> as well as the RSS basics. Both were
+// absent when Apple Podcasts Connect refused the feed twice with a generic
+// error, and both are recommended at item level; they are cheap and they clear
+// the two leading suspects.
 
 const express = require('express');
 const supabase = require('../lib/supabase');
@@ -15,6 +20,11 @@ const router = express.Router();
 
 const SITE_URL = 'https://troystack.com';
 const FEED_SELF_URL = 'https://api.troystack.ai/v1/podcast/feed.xml';
+// Per-episode <link> target. Every episode slug has a live article page at
+// this base (verified across the full archive, oldest and newest). Apple and
+// Spotify both want an item-level link; pointing one at a 404 is worse than
+// omitting it, so this base moves only if that page route moves.
+const EPISODE_PAGE_BASE = `${SITE_URL}/signal/`;
 const CHANNEL = {
   title: 'The Stack Signal: Daily Gold & Silver Brief',
   author: 'TroyStack',
@@ -51,10 +61,12 @@ function cdata(s) {
 function buildFeedXml(episodes) {
   const items = episodes.map((ep) => `    <item>
       <title>${xmlEscape(ep.title)}</title>
+      <link>${xmlEscape(EPISODE_PAGE_BASE + ep.slug)}</link>
       <description>${cdata(ep.description)}</description>
       <enclosure url="${xmlEscape(ep.audio_url)}" length="${ep.audio_bytes}" type="audio/mpeg"/>
       <guid isPermaLink="false">${xmlEscape(ep.slug)}</guid>
       <pubDate>${new Date(ep.published_at).toUTCString()}</pubDate>
+      <itunes:author>${xmlEscape(CHANNEL.author)}</itunes:author>
       <itunes:duration>${ep.duration_sec}</itunes:duration>
       <itunes:explicit>${CHANNEL.explicit}</itunes:explicit>
     </item>`).join('\n');
