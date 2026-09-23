@@ -79,6 +79,8 @@ test('feed.xml is well-formed with required channel + episode tags', () => {
 
   const item = ch.item;
   assert.strictEqual(item.title, 'The Stack Signal — January 31, 1999');
+  assert.strictEqual(item.link, 'https://troystack.com/signal/the-stack-signal-1999-01-31');
+  assert.strictEqual(item['itunes:author'], 'TroyStack');
   assert.strictEqual(item.enclosure['@_url'], FIXTURE_EPISODES[0].audio_url);
   assert.strictEqual(Number(item.enclosure['@_length']), FIXTURE_EPISODES[0].audio_bytes);
   assert.strictEqual(item.enclosure['@_type'], 'audio/mpeg');
