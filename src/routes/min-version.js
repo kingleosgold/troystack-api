@@ -5,7 +5,7 @@ router.get('/', (req, res) => {
   res.json({
     ios: {
       minVersion: process.env.MIN_VERSION_IOS || '2.0.0',
-      store_url: 'https://apps.apple.com/us/app/troystack/id6738029817',
+      store_url: 'https://apps.apple.com/us/app/troystack-gold-silver-ai/id6757343766',
     },
     android: {
       minVersion: process.env.MIN_VERSION_ANDROID || '2.0.0',

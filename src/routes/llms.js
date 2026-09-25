@@ -114,7 +114,7 @@ Manifest: https://api.troystack.ai/.well-known/mcp.json
 
 ## Links
 - Website: https://troystack.com
-- App Store: https://apps.apple.com/app/troystack/id6738029817
+- App Store: https://apps.apple.com/us/app/troystack-gold-silver-ai/id6757343766
 - API Docs: https://api.troystack.ai
 - Contact: support@troystack.com
 `);
