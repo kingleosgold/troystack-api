@@ -228,8 +228,12 @@ router.post('/articles/:id/comments', async (req, res) => {
 
 // GET /v1/stack-signal/articles/:id/comments
 // Returns comments for an article, newest first. No auth required.
+// Authors stay private: user_id is never returned, because it is the key the
+// userId-trusting endpoints accept. A caller that passes its own userId gets
+// is_own on each comment so a delete button can still render.
 router.get('/articles/:id/comments', async (req, res) => {
   const { id } = req.params;
+  const viewerId = getUserId(req);
   const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 100);
   const offset = Math.max(parseInt(req.query.offset) || 0, 0);
 
@@ -243,7 +247,11 @@ router.get('/articles/:id/comments', async (req, res) => {
 
     if (error) throw error;
 
-    res.json({ success: true, comments: data || [] });
+    const comments = (data || []).map(({ user_id, ...comment }) => ({
+      ...comment,
+      is_own: !!viewerId && user_id === viewerId,
+    }));
+    res.json({ success: true, comments });
   } catch (err) {
     console.error('[Social] Get comments error:', err.message);
     res.status(500).json({ error: 'Failed to fetch comments' });

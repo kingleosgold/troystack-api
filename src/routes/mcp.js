@@ -24,6 +24,7 @@ const supabase = require('../lib/supabase');
 const { getSpotPrices, getCachedPrices } = require('../services/price-fetcher');
 const { callGemini, MODELS } = require('../services/ai-router');
 const { hashKey } = require('../middleware/api-key-auth');
+const { createDailyBudget } = require('../lib/daily-budget');
 
 // ============================================
 // TOOL IMPLEMENTATIONS
@@ -239,6 +240,10 @@ async function fetchHoldings(userId) {
 // AUTHENTICATED TOOL IMPLEMENTATIONS
 // ============================================
 
+// Anonymous chat_with_troy calls are paid model calls with no key behind
+// them. A process-wide daily budget caps that spend; keyed calls don't count.
+const anonChatBudget = createDailyBudget(Number(process.env.MCP_ANON_CHAT_DAILY_BUDGET) || 300);
+
 async function tool_chatWithTroy({ message, api_key }) {
   let prices = getCachedPrices() || {};
   if (!prices.gold) {
@@ -249,9 +254,11 @@ async function tool_chatWithTroy({ message, api_key }) {
   let stackContext = '';
 
   // If api_key, enrich with portfolio data
+  let keyed = false;
   if (api_key) {
     const auth = await validateApiKey(api_key);
     if (!auth.error) {
+      keyed = true;
       const holdings = await fetchHoldings(auth.userId);
       const metalTotals = { gold: { oz: 0, cost: 0 }, silver: { oz: 0, cost: 0 }, platinum: { oz: 0, cost: 0 }, palladium: { oz: 0, cost: 0 } };
 
@@ -276,6 +283,10 @@ async function tool_chatWithTroy({ message, api_key }) {
 
       stackContext = `\n\nUSER'S STACK:\nTotal Value: $${totalValue.toFixed(2)} | Cost: $${totalCost.toFixed(2)} | ${totalValue >= totalCost ? 'Gain' : 'Loss'}: $${Math.abs(totalValue - totalCost).toFixed(2)}\nHoldings: ${metalSummary || 'Empty stack'}`;
     }
+  }
+
+  if (!keyed && !anonChatBudget.take()) {
+    return { error: 'Troy has reached today\'s limit for chats without an API key. Get a free key at https://app.stacktrackergold.com/developers and pass it as api_key.' };
   }
 
   const systemPrompt = `You are Troy, a sharp precious metals analyst. Direct, opinionated, data-driven. Say "your stack" not "your portfolio". No emojis, no exclamation points, no "not financial advice". Dips are buying opportunities. You never recommend selling.

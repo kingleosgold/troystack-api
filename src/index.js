@@ -88,9 +88,9 @@ app.post('/v1/webhooks/stripe', cors(corsOptions), express.raw({ type: 'applicat
 // POST bodies don't get rejected by the global JSON parser. Single /mcp
 // endpoint handles POST (client→server), GET (SSE stream), DELETE (session end).
 // ============================================================
-app.post('/mcp', cors(corsOptions), handleMcp);
-app.get('/mcp', cors(corsOptions), handleMcp);
-app.delete('/mcp', cors(corsOptions), handleMcp);
+app.post('/mcp', cors(corsOptions), publicLimiter, handleMcp);
+app.get('/mcp', cors(corsOptions), publicLimiter, handleMcp);
+app.delete('/mcp', cors(corsOptions), publicLimiter, handleMcp);
 
 // Apply CORS and JSON parsing for everything else
 app.use(cors(corsOptions));
