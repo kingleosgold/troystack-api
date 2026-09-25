@@ -95,6 +95,24 @@ test('feed.xml handles empty episode list', () => {
   assert.strictEqual(XMLValidator.validate(xml), true);
 });
 
+test('feed show notes carry the article link and the App Store link', () => {
+  const xml = buildFeedXml(FIXTURE_EPISODES);
+  assert.strictEqual(XMLValidator.validate(xml), true);
+  const parsed = new XMLParser({ ignoreAttributes: false, cdataPropName: '__cdata' }).parse(xml);
+  const desc = String(parsed.rss.channel.item.description.__cdata);
+  assert.ok(desc.startsWith(FIXTURE_EPISODES[0].description), 'stored description stays first');
+  assert.ok(desc.includes('Read the full Signal: https://troystack.com/signal/the-stack-signal-1999-01-31'));
+  assert.ok(desc.includes('https://apps.apple.com/app/apple-store/id6757343766?pt=96487801&ct=podcast&mt=8'));
+  assert.ok(!desc.includes('6738029817'), 'the dead App Store id never appears');
+});
+
+test('show notes still get the footer when the stored description is empty', () => {
+  const { showNotes } = require('../src/routes/podcast');
+  const notes = showNotes({ slug: 'the-stack-signal-1999-01-31', description: '' });
+  assert.ok(notes.startsWith('Read the full Signal: '));
+  assert.ok(notes.includes('ct=podcast'));
+});
+
 // ── Integration tests (real table + bucket) ──
 //
 // FIXTURE-ONLY policy: every row/object these tests touch lives on a 1999

@@ -25,6 +25,18 @@ const FEED_SELF_URL = 'https://api.troystack.ai/v1/podcast/feed.xml';
 // Spotify both want an item-level link; pointing one at a 404 is worse than
 // omitting it, so this base moves only if that page route moves.
 const EPISODE_PAGE_BASE = `${SITE_URL}/signal/`;
+// Show notes get a footer at render time, so every episode in the feed, old
+// and new, carries its article link and an App Store link. ct=podcast lets
+// App Store Connect attribute installs that come from the show.
+const APP_STORE_PODCAST_URL = 'https://apps.apple.com/app/apple-store/id6757343766?pt=96487801&ct=podcast&mt=8';
+
+function showNotes(ep) {
+  const footer = [
+    `Read the full Signal: ${EPISODE_PAGE_BASE}${ep.slug}`,
+    `Track your own stack with TroyStack, free on the App Store: ${APP_STORE_PODCAST_URL}`,
+  ].join('\n');
+  return [ep.description, footer].filter(Boolean).join('\n\n');
+}
 const CHANNEL = {
   title: 'The Stack Signal: Daily Gold & Silver Brief',
   author: 'TroyStack',
@@ -62,7 +74,7 @@ function buildFeedXml(episodes) {
   const items = episodes.map((ep) => `    <item>
       <title>${xmlEscape(ep.title)}</title>
       <link>${xmlEscape(EPISODE_PAGE_BASE + ep.slug)}</link>
-      <description>${cdata(ep.description)}</description>
+      <description>${cdata(showNotes(ep))}</description>
       <enclosure url="${xmlEscape(ep.audio_url)}" length="${ep.audio_bytes}" type="audio/mpeg"/>
       <guid isPermaLink="false">${xmlEscape(ep.slug)}</guid>
       <pubDate>${new Date(ep.published_at).toUTCString()}</pubDate>
@@ -131,3 +143,4 @@ router.get('/feed.xml', async (_req, res) => {
 
 module.exports = router;
 module.exports.buildFeedXml = buildFeedXml;
+module.exports.showNotes = showNotes;
