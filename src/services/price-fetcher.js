@@ -226,38 +226,49 @@ async function getLastKnownPtPd() {
 // ============================================
 
 /**
- * Priority 1: Yahoo Finance futures (Au, Ag — free, no API key)
- * Uses GC=F (gold front-month) and SI=F (silver front-month).
- * Pt/Pd sourced from MetalPriceAPI or last known values.
+ * Priority 1: Yahoo Finance futures (free, no API key), all four metals.
+ * GC=F, SI=F, PL=F and PA=F are the front-month gold, silver, platinum and
+ * palladium contracts. Gold and silver must come back or this source fails.
+ * Platinum and palladium fall back to MetalPriceAPI, then to the last live
+ * value. They used to come only from MetalPriceAPI, polled every minute,
+ * and when that stopped answering they froze at a months-old price.
  */
 async function fetchFromYahooFinance() {
   console.log('   Attempting Yahoo Finance (primary)...');
   const headers = { 'User-Agent': 'Mozilla/5.0 (compatible; TroyStack/1.0)' };
+  const quote = (symbol) => axios
+    .get(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}`, { headers, timeout: 8000 })
+    .then((res) => res?.data?.chart?.result?.[0]?.meta?.regularMarketPrice || null)
+    .catch(() => null);
+  const round2 = (n) => Math.round(n * 100) / 100;
 
-  const [goldRes, silverRes] = await Promise.all([
-    axios.get('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', { headers, timeout: 8000 }),
-    axios.get('https://query1.finance.yahoo.com/v8/finance/chart/SI=F', { headers, timeout: 8000 }),
+  const [goldPrice, silverPrice, platinumPrice, palladiumPrice] = await Promise.all([
+    quote('GC=F'), quote('SI=F'), quote('PL=F'), quote('PA=F'),
   ]);
-
-  const goldPrice = goldRes?.data?.chart?.result?.[0]?.meta?.regularMarketPrice;
-  const silverPrice = silverRes?.data?.chart?.result?.[0]?.meta?.regularMarketPrice;
 
   if (!goldPrice || !silverPrice) throw new Error('Yahoo Finance returned no gold/silver prices');
 
-  // Pt/Pd: try MetalPriceAPI if available, otherwise use last known
-  let platinum = lastKnownPtPd.platinum;
-  let palladium = lastKnownPtPd.palladium;
-  try {
-    const ptpdResult = await fetchPtPdFromMetalPriceAPI();
-    if (ptpdResult.platinum) platinum = ptpdResult.platinum;
-    if (ptpdResult.palladium) palladium = ptpdResult.palladium;
-  } catch { /* use last known */ }
+  let platinum = platinumPrice ? round2(platinumPrice) : null;
+  let palladium = palladiumPrice ? round2(palladiumPrice) : null;
+
+  if (!platinum || !palladium) {
+    try {
+      const ptpdResult = await fetchPtPdFromMetalPriceAPI();
+      platinum = platinum || ptpdResult.platinum;
+      palladium = palladium || ptpdResult.palladium;
+    } catch { /* fall back to the last live value */ }
+  }
+
+  // Remember live values, so a later miss falls back to today's price
+  // rather than whatever price_log held when the server started.
+  if (platinum) lastKnownPtPd.platinum = platinum;
+  if (palladium) lastKnownPtPd.palladium = palladium;
 
   return {
-    gold: Math.round(goldPrice * 100) / 100,
-    silver: Math.round(silverPrice * 100) / 100,
-    platinum,
-    palladium,
+    gold: round2(goldPrice),
+    silver: round2(silverPrice),
+    platinum: platinum || lastKnownPtPd.platinum,
+    palladium: palladium || lastKnownPtPd.palladium,
     source: 'yahoo_finance',
   };
 }
@@ -555,4 +566,5 @@ module.exports = {
   initPriceFetcher,
   areMarketsClosed,
   logPriceToSupabase,
+  fetchFromYahooFinance,
 };
