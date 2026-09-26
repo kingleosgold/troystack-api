@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../lib/supabase');
-const { areMarketsClosed } = require('../services/price-fetcher');
 
 // ============================================
 // Shared: filter out market-closed rows
@@ -28,22 +27,6 @@ function isDuringMarketClose(isoTimestamp) {
     (day === 0 && hour < 18) ||     // Sunday before 6PM ET
     (day === 5 && hour >= 17)       // Friday at/after 5PM ET
   );
-}
-
-/**
- * Remove consecutive rows where the primary price (gold) is identical.
- * Keeps first and last occurrence to preserve time range.
- */
-function dedupeConsecutive(rows) {
-  if (rows.length <= 2) return rows;
-  const result = [rows[0]];
-  for (let i = 1; i < rows.length - 1; i++) {
-    if (parseFloat(rows[i].gold_price) !== parseFloat(rows[i - 1].gold_price)) {
-      result.push(rows[i]);
-    }
-  }
-  result.push(rows[rows.length - 1]);
-  return result;
 }
 
 /**
@@ -85,90 +68,55 @@ function removeOutliers(rows) {
 }
 
 /**
- * Get the last trading session's data for weekend sparklines.
- * Queries the most recent 500 price_log rows, filters to trading hours,
- * and removes consecutive duplicate prices for clean charts.
+ * The last `points` 15-minute buckets of trading-hours price_log, oldest
+ * first, so 96 points is the last 24 trading hours. Weekends are skipped, so
+ * on a Saturday this is the 24 trading hours up to Friday's close.
+ *
+ * price_log is written every 60s, so 24 trading hours is ~1,400 rows. The
+ * old reader took the newest 96 rows, which is 96 minutes, and on weekdays it
+ * read a 72-hour window oldest-first, so a row cap (Supabase defaults to
+ * 1,000) would drop the newest rows first. This reads newest-first in pages
+ * and keeps the newest row in each bucket.
  */
-async function getLastTradingSession() {
-  // Fetch the most recent 500 rows (DESC), then reverse for chronological order.
-  // 500 rows at 15-min intervals ≈ 5 days of data — more than enough for a full session.
-  const { data, error } = await supabase
-    .from('price_log')
-    .select('timestamp, gold_price, silver_price, platinum_price, palladium_price')
-    .order('timestamp', { ascending: false })
-    .limit(500);
+const SPARK_BUCKET_MS = 15 * 60 * 1000;
+const PRICE_LOG_PAGE = 1000;
+const PRICE_LOG_MAX_PAGES = 3;
+const TRADING_ROWS_TTL_MS = 60 * 1000;
+let tradingRowsCache = { at: 0, points: 0, rows: null };
 
-  if (error) throw error;
-  if (!data || data.length === 0) return [];
-
-  // Reverse to chronological order and filter to trading hours only
-  const trading = data.reverse().filter(row => !isDuringMarketClose(row.timestamp));
-  if (trading.length === 0) return [];
-
-  // Find the last trading day's data
-  const etDayFmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  });
-
-  const lastTradingDate = etDayFmt.format(new Date(trading[trading.length - 1].timestamp));
-
-  // Collect last trading day rows + prior evening session
-  const lastDayRows = trading.filter(r =>
-    etDayFmt.format(new Date(r.timestamp)) === lastTradingDate
-  );
-
-  // Include prior evening session (e.g. Thursday 6PM–midnight for Friday's session)
-  let sessionRows = lastDayRows;
-  if (lastDayRows.length > 0) {
-    const sessionStart = new Date(lastDayRows[0].timestamp);
-    sessionStart.setHours(sessionStart.getHours() - 12);
-    const priorRows = trading.filter(r => {
-      const t = new Date(r.timestamp);
-      return t >= sessionStart && t < new Date(lastDayRows[0].timestamp);
-    });
-    sessionRows = [...priorRows, ...lastDayRows];
+async function getTradingRows(points = 96) {
+  const now = Date.now();
+  if (tradingRowsCache.rows && tradingRowsCache.points === points && now - tradingRowsCache.at < TRADING_ROWS_TTL_MS) {
+    return tradingRowsCache.rows;
   }
 
-  // Remove consecutive duplicate prices
-  sessionRows = dedupeConsecutive(sessionRows);
+  const buckets = [];
+  let lastBucket = null;
+  let from = 0;
+  for (let page = 0; page < PRICE_LOG_MAX_PAGES && buckets.length < points; page++) {
+    const { data, error } = await supabase
+      .from('price_log')
+      .select('timestamp, gold_price, silver_price, platinum_price, palladium_price')
+      .order('timestamp', { ascending: false })
+      .range(from, from + PRICE_LOG_PAGE - 1);
 
-  // Fallback: if too few points, use all available trading data
-  if (sessionRows.length < 10) {
-    sessionRows = dedupeConsecutive(trading);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    from += data.length;
+
+    for (const row of data) {
+      if (isDuringMarketClose(row.timestamp)) continue;
+      const bucket = Math.floor(new Date(row.timestamp).getTime() / SPARK_BUCKET_MS);
+      if (bucket === lastBucket) continue;
+      buckets.push(row);
+      lastBucket = bucket;
+      if (buckets.length >= points) break;
+    }
   }
 
-  return sessionRows;
-}
-
-/**
- * Fetch trading-hours-only price_log rows.
- * On weekends: returns the last full trading session (Friday).
- * On weekdays: looks back 72 hours, filters out market-closed rows.
- */
-async function getTradingRows(limit = 96) {
-  if (areMarketsClosed()) {
-    const session = await getLastTradingSession();
-    return removeOutliers(session.slice(-limit));
-  }
-
-  const since = new Date();
-  since.setHours(since.getHours() - 72);
-
-  const { data, error } = await supabase
-    .from('price_log')
-    .select('timestamp, gold_price, silver_price, platinum_price, palladium_price')
-    .gte('timestamp', since.toISOString())
-    .order('timestamp', { ascending: true });
-
-  if (error) throw error;
-  if (!data || data.length === 0) return [];
-
-  // Filter out weekend/closed-market rows
-  const trading = data.filter(row => !isDuringMarketClose(row.timestamp));
-
-  // Take the most recent `limit` rows
-  return removeOutliers(trading.slice(-limit));
+  const rows = removeOutliers(buckets.reverse());
+  tradingRowsCache = { at: now, points, rows };
+  return rows;
 }
 
 // GET /v1/widget-data — Widget display data with sparklines
