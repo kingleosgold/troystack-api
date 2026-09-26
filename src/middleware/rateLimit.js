@@ -1,8 +1,9 @@
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = rateLimit;
 const supabase = require('../lib/supabase');
 
 // Public endpoints: 100 requests/min per IP
-const publicLimiter = rateLimit({
+const publicLimiterCore = rateLimit({
   windowMs: 60 * 1000,
   max: 100,
   standardHeaders: true,
@@ -10,13 +11,23 @@ const publicLimiter = rateLimit({
   message: { error: 'Too many requests, please try again later.' },
 });
 
+// index.js mounts the public limiter on overlapping prefixes ('/v1', '/',
+// '/v1/troy' and more), so one request used to pass it up to eight times (a
+// Troy chat call, seven) and one app launch could spend the whole minute's
+// budget. Count each request once, wherever it first meets the limiter.
+function publicLimiter(req, res, next) {
+  if (req.publicLimitCounted) return next();
+  req.publicLimitCounted = true;
+  return publicLimiterCore(req, res, next);
+}
+
 // Authenticated endpoints: 30 requests/min per user
 const authenticatedLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.userId || req.ip,
+  keyGenerator: (req) => req.userId || ipKeyGenerator(req.ip),
   message: { error: 'Too many requests, please try again later.' },
 });
 
@@ -35,7 +46,7 @@ const developerLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.apiKeyId || req.userId || req.ip,
+  keyGenerator: (req) => req.apiKeyId || req.userId || ipKeyGenerator(req.ip),
   message: { error: 'Rate limit exceeded for your API tier. Upgrade for higher limits.' },
 });
 
