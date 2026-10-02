@@ -146,38 +146,39 @@ router.get('/', async (req, res) => {
 // returns at most 1,000 rows per select, and this route used to read the
 // range oldest-first in a single select, so every chart stopped a few days
 // in and drew a straight line from there to today. This walks the table in
-// pages and keeps the first valid row of each UTC day. The result is cached
-// and refreshed in the background, so the four metal requests a chart makes
-// share one scan.
+// pages, newest first, and keeps the first valid row of each UTC day. If the
+// table ever outgrows the page cap (say decimation falls behind), the days
+// that drop off are the oldest ones, never the recent ones. The result is
+// cached and refreshed in the background, so the four metal requests a chart
+// makes share one scan.
 const PRICE_LOG_PAGE = 1000;
 const PRICE_LOG_MAX_PAGES = 200;
 const DAILY_LOG_TTL_MS = 10 * 60 * 1000;
 let dailyLog = { at: 0, days: null };
 let dailyLogScan = null;
 
-async function scanDailyPriceLog() {
+async function scanDailyPriceLog({ maxPages = PRICE_LOG_MAX_PAGES } = {}) {
   const days = {};
   let cursor = null;
-  for (let page = 0; page < PRICE_LOG_MAX_PAGES; page++) {
+  for (let page = 0; page < maxPages; page++) {
     let query = supabase
       .from('price_log')
       .select('timestamp, gold_price, silver_price, platinum_price, palladium_price');
-    if (cursor) query = query.gt('timestamp', cursor);
+    if (cursor) query = query.lt('timestamp', cursor);
     const { data, error } = await query
-      .order('timestamp', { ascending: true })
+      .order('timestamp', { ascending: false })
       .limit(PRICE_LOG_PAGE);
 
     if (error) throw new Error(`price_log page ${page + 1} failed: ${error.message}`);
-    if (!data || data.length === 0) break;
+    if (!data || data.length === 0) return days;
 
     for (const row of data) {
       const gold = parseFloat(row.gold_price) || 0;
       const silver = parseFloat(row.silver_price) || 0;
       // Skip rows where gold and silver are both 0/null (bad data)
       if (gold <= 0 && silver <= 0) continue;
-      const date = String(row.timestamp).split('T')[0];
-      if (days[date]) continue; // oldest first, so the first row seen is the day's first
-      days[date] = {
+      // Newest first, so the last valid row written for a day is its first
+      days[String(row.timestamp).split('T')[0]] = {
         gold,
         silver,
         platinum: row.platinum_price ? parseFloat(row.platinum_price) : 0,
@@ -186,9 +187,10 @@ async function scanDailyPriceLog() {
     }
 
     const next = data[data.length - 1].timestamp;
-    if (data.length < PRICE_LOG_PAGE || next === cursor) break;
+    if (data.length < PRICE_LOG_PAGE || next === cursor) return days;
     cursor = next;
   }
+  console.warn(`price_log scan stopped at ${maxPages} pages; days before ${cursor} are left out of history`);
   return days;
 }
 
@@ -781,3 +783,4 @@ router.get('/composite', async (req, res) => {
 
 module.exports = router;
 module.exports.buildPriceHistory = buildPriceHistory;
+module.exports.scanDailyPriceLog = scanDailyPriceLog;
