@@ -107,6 +107,9 @@ test('arguments are checked before anything runs', () => {
   assert.throws(() => parseArgs(['--undo']));
   assert.throws(() => parseArgs(['--undo', 'undo.json', '--apply']));
   assert.throws(() => parseArgs(['--from', '5/1']));
+  assert.throws(() => parseArgs(['--to', '2026-02-31']), /real date/);
+  assert.throws(() => parseArgs(['--from', '2026-13-01']), /real date/);
+  assert.deepStrictEqual(parseArgs(['--from', '2028-02-29', '--to', '2028-03-01']).to, '2028-03-01');
   assert.throws(() => parseArgs(['--from', '2026-06-01', '--to', '2026-05-01']));
   assert.throws(() => parseArgs(['--yes']));
 });
