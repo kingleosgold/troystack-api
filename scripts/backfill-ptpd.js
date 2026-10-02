@@ -100,26 +100,27 @@ function closeOn(bars, date) {
   return found;
 }
 
-// Every price_log row in [from, to], oldest first, paged past Supabase's
-// 1,000-row cap.
+// Every price_log row in [from, to], paged past Supabase's 1,000-row cap.
+// Pages walk the unique id, because timestamps can repeat and a page that
+// ends inside a run of equal timestamps would drop the rest of that run.
 async function readRows(supabase, from, to) {
   const start = `${from}T00:00:00Z`;
   const end = new Date(Date.parse(`${to}T00:00:00Z`) + DAY_MS).toISOString();
   const rows = [];
-  let cursor = null;
+  let lastId = null;
   for (let page = 0; page < MAX_PAGES; page++) {
     let query = supabase
       .from('price_log')
       .select('id, timestamp, platinum_price, palladium_price')
+      .gte('timestamp', start)
       .lt('timestamp', end);
-    query = cursor ? query.gt('timestamp', cursor) : query.gte('timestamp', start);
-    const { data, error } = await query.order('timestamp', { ascending: true }).limit(PAGE);
+    if (lastId !== null) query = query.gt('id', lastId);
+    const { data, error } = await query.order('id', { ascending: true }).limit(PAGE);
     if (error) throw new Error(`price_log page ${page + 1} failed: ${error.message}`);
     if (!data || data.length === 0) return rows;
     rows.push(...data);
-    const next = data[data.length - 1].timestamp;
-    if (data.length < PAGE || next === cursor) return rows;
-    cursor = next;
+    if (data.length < PAGE) return rows;
+    lastId = data[data.length - 1].id;
   }
   throw new Error(`price_log read stopped at ${MAX_PAGES} pages, narrow --from and --to`);
 }
