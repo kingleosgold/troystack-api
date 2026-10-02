@@ -40,6 +40,14 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const round2 = (n) => Math.round(n * 100) / 100;
 const utcDate = (timestamp) => String(timestamp).split('T')[0];
 
+// YYYY-MM-DD that names a real day. Date.parse would quietly turn 2026-02-31
+// into March 3, so the date has to survive a round trip.
+function isRealDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+}
+
 function parseArgs(argv) {
   const args = { apply: false, undo: null, from: DEFAULT_FROM, to: DEFAULT_TO };
   for (let i = 0; i < argv.length; i++) {
@@ -55,7 +63,7 @@ function parseArgs(argv) {
     return args;
   }
   for (const key of ['from', 'to']) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(args[key] || '')) throw new Error(`--${key} must be YYYY-MM-DD`);
+    if (!isRealDate(args[key])) throw new Error(`--${key} must be a real date, YYYY-MM-DD`);
   }
   if (args.from > args.to) throw new Error('--from is after --to');
   return args;
