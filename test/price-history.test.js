@@ -66,17 +66,19 @@ function fakeSupabase(rows) {
     calls,
     from(table) {
       assert.strictEqual(table, 'price_log');
-      const q = { cols: '', gt: null, asc: true, limit: Infinity };
+      const q = { cols: '', gt: null, lt: null, asc: true, limit: Infinity };
       const builder = {
         select(cols) { q.cols = cols; return builder; },
         gt(col, value) { assert.strictEqual(col, 'timestamp'); q.gt = value; return builder; },
+        lt(col, value) { assert.strictEqual(col, 'timestamp'); q.lt = value; return builder; },
         order(col, opts) { assert.strictEqual(col, 'timestamp'); q.asc = opts?.ascending !== false; return builder; },
         limit(n) { q.limit = n; return builder; },
         then(resolve, reject) {
           calls.push({ ...q });
           const after = q.gt == null ? -Infinity : Date.parse(q.gt);
+          const before = q.lt == null ? Infinity : Date.parse(q.lt);
           const picked = rows
-            .filter((r) => Date.parse(r.timestamp) > after)
+            .filter((r) => Date.parse(r.timestamp) > after && Date.parse(r.timestamp) < before)
             .sort((a, b) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)) * (q.asc ? 1 : -1))
             .slice(0, Math.min(q.limit, 1000));
           const cols = q.cols.split(',').map((c) => c.trim());
@@ -135,6 +137,20 @@ test('one price_log scan serves the next request for another metal', async () =>
   assert.strictEqual(supabase.calls.length, scans, 'the second request used the cached series');
   const yesterday = isoDate(new Date(Date.now() - DAY_MS));
   assert.strictEqual(silver.prices.find((p) => p.date === yesterday).price, 50 + dayIndex(yesterday));
+});
+
+test('a page cap drops the oldest days, never the newest', async () => {
+  const { rows, dayIndex } = makeRows();
+  const { scanDailyPriceLog } = loadWith('routes/prices', fakeSupabase(rows));
+
+  const days = await scanDailyPriceLog({ maxPages: 3 });
+  const today = isoDate(new Date());
+  const yesterday = isoDate(new Date(Date.now() - DAY_MS));
+  const oldest = rows[0].timestamp.split('T')[0];
+
+  assert.strictEqual(days[yesterday].gold, 4000 + dayIndex(yesterday), "yesterday keeps its first row");
+  assert.ok(days[today], 'today is there');
+  assert.strictEqual(days[oldest], undefined, 'the oldest day is the one left out');
 });
 
 test('a bad metal is a 400, not a 500', async () => {
