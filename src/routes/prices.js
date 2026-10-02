@@ -137,200 +137,280 @@ router.get('/', async (req, res) => {
 });
 
 // ============================================
-// GET /v1/prices/history — Historical + recent
+// price_log daily series, shared by GET /v1/prices/history and the MCP
+// get_price_history tool
 // ============================================
+
+// price_log keeps 60s rows for the last day, 5-minute rows to 30 days and
+// coarser rows after that, so one month is several thousand rows. Supabase
+// returns at most 1,000 rows per select, and this route used to read the
+// range oldest-first in a single select, so every chart stopped a few days
+// in and drew a straight line from there to today. This walks the table in
+// pages and keeps the first valid row of each UTC day. The result is cached
+// and refreshed in the background, so the four metal requests a chart makes
+// share one scan.
+const PRICE_LOG_PAGE = 1000;
+const PRICE_LOG_MAX_PAGES = 200;
+const DAILY_LOG_TTL_MS = 10 * 60 * 1000;
+let dailyLog = { at: 0, days: null };
+let dailyLogScan = null;
+
+async function scanDailyPriceLog() {
+  const days = {};
+  let cursor = null;
+  for (let page = 0; page < PRICE_LOG_MAX_PAGES; page++) {
+    let query = supabase
+      .from('price_log')
+      .select('timestamp, gold_price, silver_price, platinum_price, palladium_price');
+    if (cursor) query = query.gt('timestamp', cursor);
+    const { data, error } = await query
+      .order('timestamp', { ascending: true })
+      .limit(PRICE_LOG_PAGE);
+
+    if (error) throw new Error(`price_log page ${page + 1} failed: ${error.message}`);
+    if (!data || data.length === 0) break;
+
+    for (const row of data) {
+      const gold = parseFloat(row.gold_price) || 0;
+      const silver = parseFloat(row.silver_price) || 0;
+      // Skip rows where gold and silver are both 0/null (bad data)
+      if (gold <= 0 && silver <= 0) continue;
+      const date = String(row.timestamp).split('T')[0];
+      if (days[date]) continue; // oldest first, so the first row seen is the day's first
+      days[date] = {
+        gold,
+        silver,
+        platinum: row.platinum_price ? parseFloat(row.platinum_price) : 0,
+        palladium: row.palladium_price ? parseFloat(row.palladium_price) : 0,
+      };
+    }
+
+    const next = data[data.length - 1].timestamp;
+    if (data.length < PRICE_LOG_PAGE || next === cursor) break;
+    cursor = next;
+  }
+  return days;
+}
+
+function refreshDailyPriceLog() {
+  if (!dailyLogScan) {
+    dailyLogScan = scanDailyPriceLog()
+      .then((days) => {
+        dailyLog = { at: Date.now(), days };
+        return days;
+      })
+      .finally(() => {
+        dailyLogScan = null;
+      });
+  }
+  return dailyLogScan;
+}
+
+// First valid price_log row of each UTC day, keyed YYYY-MM-DD. A copy older
+// than the TTL is served while a fresh scan runs; one older than six hours
+// waits for the scan, and falls back to the old copy if the scan fails.
+const DAILY_LOG_MAX_STALE_MS = 6 * 60 * 60 * 1000;
+
+async function getDailyPriceLog() {
+  const age = Date.now() - dailyLog.at;
+  if (!dailyLog.days || age > DAILY_LOG_MAX_STALE_MS) {
+    return refreshDailyPriceLog().catch((err) => {
+      if (dailyLog.days) {
+        console.log('price_log daily refresh failed, serving the last copy:', err.message);
+        return dailyLog.days;
+      }
+      throw err;
+    });
+  }
+  if (age > DAILY_LOG_TTL_MS) {
+    refreshDailyPriceLog().catch((err) => console.log('price_log daily refresh failed:', err.message));
+  }
+  return dailyLog.days;
+}
+
+// ============================================
+// GET /v1/prices/history: historical + recent
+// ============================================
+
+const VALID_HISTORY_METALS = ['gold', 'silver', 'platinum', 'palladium'];
+const VALID_HISTORY_RANGES = ['1M', '3M', '6M', '1Y', '5Y', 'ALL'];
+
+function historyError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+// The history series behind GET /v1/prices/history, also called by the MCP
+// get_price_history tool. Throws an error with .status 400 or 503 for the
+// cases the route answers without a 500.
+async function buildPriceHistory({ metal = 'gold', range = '1Y', maxPoints = '60' } = {}) {
+  const maxPts = Math.min(parseInt(maxPoints) || 60, 1000);
+  const rangeUpper = String(range).toUpperCase();
+
+  if (!VALID_HISTORY_METALS.includes(metal)) {
+    throw historyError(400, `Invalid metal. Use: ${VALID_HISTORY_METALS.join(', ')}`);
+  }
+
+  if (!VALID_HISTORY_RANGES.includes(rangeUpper)) {
+    throw historyError(400, `Invalid range. Use: ${VALID_HISTORY_RANGES.join(', ')}`);
+  }
+
+  const now = new Date();
+  let startDate;
+
+  switch (rangeUpper) {
+    case '1M':
+      startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+      break;
+    case '3M':
+      startDate = new Date(now.getFullYear(), now.getMonth() - 3, now.getDate());
+      break;
+    case '6M':
+      startDate = new Date(now.getFullYear(), now.getMonth() - 6, now.getDate());
+      break;
+    case '1Y':
+      startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
+      break;
+    case '5Y':
+      startDate = new Date(now.getFullYear() - 5, now.getMonth(), now.getDate());
+      break;
+    case 'ALL':
+      startDate = new Date(1915, 0, 1);
+      break;
+    default:
+      startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
+  }
+
+  const startStr = startDate.toISOString().split('T')[0];
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+  let allPoints = [];
+
+  if (!historicalData.loaded) {
+    throw historyError(503, 'Historical data not loaded yet');
+  }
+
+  // For short ranges (1M, 3M, 6M), use daily keys; for long ranges, use first-of-month
+  if (['1M', '3M', '6M'].includes(rangeUpper)) {
+    // Daily resolution from historicalData
+    const dates = Object.keys(historicalData.gold)
+      .filter(d => d >= startStr && d <= todayStr)
+      .sort();
+
+    for (const date of dates) {
+      const g = historicalData.gold[date];
+      const s = historicalData.silver[date];
+      if (g && s) {
+        allPoints.push({ date, gold: g, silver: s });
+      }
+    }
+  } else {
+    // Monthly resolution: use first-of-month keys (1Y, 5Y, ALL)
+    const monthKeys = Object.keys(historicalData.gold)
+      .filter(d => d.endsWith('-01') && d >= startStr && d <= todayStr)
+      .sort();
+
+    for (const date of monthKeys) {
+      const g = historicalData.gold[date];
+      const s = historicalData.silver[date];
+      if (g && s) {
+        allPoints.push({ date, gold: g, silver: s });
+      }
+    }
+  }
+
+  // Overlay price_log for recent accuracy + platinum/palladium data
+  try {
+    const dailyPrices = await getDailyPriceLog();
+
+    // Override matching points with more accurate price_log data
+    for (const pt of allPoints) {
+      if (dailyPrices[pt.date]) {
+        if (dailyPrices[pt.date].gold > 0) pt.gold = dailyPrices[pt.date].gold;
+        if (dailyPrices[pt.date].silver > 0) pt.silver = dailyPrices[pt.date].silver;
+        pt.platinum = dailyPrices[pt.date].platinum || pt.platinum || 0;
+        pt.palladium = dailyPrices[pt.date].palladium || pt.palladium || 0;
+      }
+    }
+
+    // Add any price_log dates not already in allPoints
+    const existingDates = new Set(allPoints.map(p => p.date));
+    for (const [d, prices] of Object.entries(dailyPrices)) {
+      if (d >= startStr && d <= todayStr && !existingDates.has(d)) {
+        allPoints.push({ date: d, gold: prices.gold, silver: prices.silver, platinum: prices.platinum, palladium: prices.palladium });
+      }
+    }
+  } catch (err) {
+    console.log('price_log overlay failed:', err.message);
+  }
+
+  // Append current spot as final point
+  const cached = getCachedPrices();
+  if (cached.gold > 0 && cached.silver > 0) {
+    allPoints.push({
+      date: todayStr,
+      gold: cached.gold,
+      silver: cached.silver,
+      platinum: cached.platinum || 0,
+      palladium: cached.palladium || 0,
+    });
+  }
+
+  // Deduplicate by date (keep last entry per date; price_log overrides historical)
+  const byDate = {};
+  for (const pt of allPoints) {
+    byDate[pt.date] = pt;
+  }
+  allPoints = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+
+  // Forward-fill then backward-fill platinum/palladium gaps
+  // (historical JSON only has gold/silver; price_log covers pt/pd for recent data)
+  let lastPt = 0, lastPd = 0;
+  for (const pt of allPoints) {
+    if (pt.platinum > 0) lastPt = pt.platinum;
+    else pt.platinum = lastPt;
+    if (pt.palladium > 0) lastPd = pt.palladium;
+    else pt.palladium = lastPd;
+  }
+  lastPt = 0; lastPd = 0;
+  for (let i = allPoints.length - 1; i >= 0; i--) {
+    if (allPoints[i].platinum > 0) lastPt = allPoints[i].platinum;
+    else allPoints[i].platinum = lastPt;
+    if (allPoints[i].palladium > 0) lastPd = allPoints[i].palladium;
+    else allPoints[i].palladium = lastPd;
+  }
+
+  // Sample down to maxPoints using evenly-spaced selection
+  let sampled = allPoints;
+  if (allPoints.length > maxPts) {
+    sampled = [];
+    const step = (allPoints.length - 1) / (maxPts - 1);
+    for (let i = 0; i < maxPts - 1; i++) {
+      sampled.push(allPoints[Math.round(i * step)]);
+    }
+    sampled.push(allPoints[allPoints.length - 1]);
+  }
+
+  return {
+    success: true,
+    metal,
+    range: rangeUpper,
+    unit: 'USD/oz',
+    totalPoints: allPoints.length,
+    sampledPoints: sampled.length,
+    data_points: sampled.length,
+    prices: sampled.map(pt => ({ date: pt.date, price: pt[metal] || 0 })),
+    data: sampled,
+  };
+}
 
 router.get('/history', async (req, res) => {
   try {
-    const { metal = 'gold', range = '1Y', maxPoints = '60' } = req.query;
-    const maxPts = Math.min(parseInt(maxPoints) || 60, 1000);
-
-    const validMetals = ['gold', 'silver', 'platinum', 'palladium'];
-    const validRanges = ['1M', '3M', '6M', '1Y', '5Y', 'ALL'];
-    const rangeUpper = range.toUpperCase();
-
-    if (!validMetals.includes(metal)) {
-      return res.status(400).json({ error: `Invalid metal. Use: ${validMetals.join(', ')}` });
-    }
-
-    if (!validRanges.includes(rangeUpper)) {
-      return res.status(400).json({ error: `Invalid range. Use: ${validRanges.join(', ')}` });
-    }
-
-    const now = new Date();
-    let startDate;
-
-    switch (rangeUpper) {
-      case '1M':
-        startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
-        break;
-      case '3M':
-        startDate = new Date(now.getFullYear(), now.getMonth() - 3, now.getDate());
-        break;
-      case '6M':
-        startDate = new Date(now.getFullYear(), now.getMonth() - 6, now.getDate());
-        break;
-      case '1Y':
-        startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
-        break;
-      case '5Y':
-        startDate = new Date(now.getFullYear() - 5, now.getMonth(), now.getDate());
-        break;
-      case 'ALL':
-        startDate = new Date(1915, 0, 1);
-        break;
-      default:
-        startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
-    }
-
-    const startStr = startDate.toISOString().split('T')[0];
-    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-
-    let allPoints = [];
-
-    if (!historicalData.loaded) {
-      return res.status(503).json({ success: false, error: 'Historical data not loaded yet' });
-    }
-
-    // For short ranges (1M, 3M, 6M), use daily keys; for long ranges, use first-of-month
-    if (['1M', '3M', '6M'].includes(rangeUpper)) {
-      // Daily resolution from historicalData
-      const dates = Object.keys(historicalData.gold)
-        .filter(d => d >= startStr && d <= todayStr)
-        .sort();
-
-      for (const date of dates) {
-        const g = historicalData.gold[date];
-        const s = historicalData.silver[date];
-        if (g && s) {
-          allPoints.push({ date, gold: g, silver: s });
-        }
-      }
-    } else {
-      // Monthly resolution: use first-of-month keys (1Y, 5Y, ALL)
-      const monthKeys = Object.keys(historicalData.gold)
-        .filter(d => d.endsWith('-01') && d >= startStr && d <= todayStr)
-        .sort();
-
-      for (const date of monthKeys) {
-        const g = historicalData.gold[date];
-        const s = historicalData.silver[date];
-        if (g && s) {
-          allPoints.push({ date, gold: g, silver: s });
-        }
-      }
-    }
-
-    // Overlay price_log for recent accuracy + platinum/palladium data
-    try {
-      const { data: logData, error: logError } = await supabase
-        .from('price_log')
-        .select('timestamp, gold_price, silver_price, platinum_price, palladium_price')
-        .gte('timestamp', startStr + 'T00:00:00')
-        .order('timestamp', { ascending: true });
-
-      if (!logError && logData && logData.length > 0) {
-        // Group by date, take first valid entry per day — skip rows with 0/null prices
-        const dailyPrices = {};
-        for (const row of logData) {
-          const d = row.timestamp.split('T')[0];
-          const gold = parseFloat(row.gold_price) || 0;
-          const silver = parseFloat(row.silver_price) || 0;
-
-          // Skip rows where gold or silver is 0/null (bad data)
-          if (gold <= 0 && silver <= 0) continue;
-
-          if (!dailyPrices[d]) {
-            dailyPrices[d] = {
-              gold: gold,
-              silver: silver,
-              platinum: row.platinum_price ? parseFloat(row.platinum_price) : 0,
-              palladium: row.palladium_price ? parseFloat(row.palladium_price) : 0,
-            };
-          }
-        }
-
-        // Override matching points with more accurate price_log data
-        for (const pt of allPoints) {
-          if (dailyPrices[pt.date]) {
-            if (dailyPrices[pt.date].gold > 0) pt.gold = dailyPrices[pt.date].gold;
-            if (dailyPrices[pt.date].silver > 0) pt.silver = dailyPrices[pt.date].silver;
-            pt.platinum = dailyPrices[pt.date].platinum || pt.platinum || 0;
-            pt.palladium = dailyPrices[pt.date].palladium || pt.palladium || 0;
-          }
-        }
-
-        // Add any price_log dates not already in allPoints
-        const existingDates = new Set(allPoints.map(p => p.date));
-        for (const [d, prices] of Object.entries(dailyPrices)) {
-          if (d >= startStr && d <= todayStr && !existingDates.has(d)) {
-            allPoints.push({ date: d, gold: prices.gold, silver: prices.silver, platinum: prices.platinum, palladium: prices.palladium });
-          }
-        }
-      }
-    } catch (err) {
-      console.log('price_log overlay failed:', err.message);
-    }
-
-    // Append current spot as final point
-    const cached = getCachedPrices();
-    if (cached.gold > 0 && cached.silver > 0) {
-      allPoints.push({
-        date: todayStr,
-        gold: cached.gold,
-        silver: cached.silver,
-        platinum: cached.platinum || 0,
-        palladium: cached.palladium || 0,
-      });
-    }
-
-    // Deduplicate by date (keep last entry per date — price_log overrides historical)
-    const byDate = {};
-    for (const pt of allPoints) {
-      byDate[pt.date] = pt;
-    }
-    allPoints = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
-
-    // Forward-fill then backward-fill platinum/palladium gaps
-    // (historical JSON only has gold/silver; price_log covers pt/pd for recent data)
-    let lastPt = 0, lastPd = 0;
-    for (const pt of allPoints) {
-      if (pt.platinum > 0) lastPt = pt.platinum;
-      else pt.platinum = lastPt;
-      if (pt.palladium > 0) lastPd = pt.palladium;
-      else pt.palladium = lastPd;
-    }
-    lastPt = 0; lastPd = 0;
-    for (let i = allPoints.length - 1; i >= 0; i--) {
-      if (allPoints[i].platinum > 0) lastPt = allPoints[i].platinum;
-      else allPoints[i].platinum = lastPt;
-      if (allPoints[i].palladium > 0) lastPd = allPoints[i].palladium;
-      else allPoints[i].palladium = lastPd;
-    }
-
-    // Sample down to maxPoints using evenly-spaced selection
-    let sampled = allPoints;
-    if (allPoints.length > maxPts) {
-      sampled = [];
-      const step = (allPoints.length - 1) / (maxPts - 1);
-      for (let i = 0; i < maxPts - 1; i++) {
-        sampled.push(allPoints[Math.round(i * step)]);
-      }
-      sampled.push(allPoints[allPoints.length - 1]);
-    }
-
-    res.json({
-      success: true,
-      metal,
-      range: rangeUpper,
-      unit: 'USD/oz',
-      totalPoints: allPoints.length,
-      sampledPoints: sampled.length,
-      data_points: sampled.length,
-      prices: sampled.map(pt => ({ date: pt.date, price: pt[metal] || 0 })),
-      data: sampled,
-    });
+    res.json(await buildPriceHistory(req.query));
   } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    if (err.status === 503) return res.status(503).json({ success: false, error: err.message });
     console.error('Price history error:', err);
     res.status(500).json({ error: 'Failed to fetch price history' });
   }
@@ -700,3 +780,4 @@ router.get('/composite', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.buildPriceHistory = buildPriceHistory;

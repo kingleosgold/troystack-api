@@ -22,6 +22,7 @@ const { z } = require('zod');
 const axios = require('axios');
 const supabase = require('../lib/supabase');
 const { getSpotPrices, getCachedPrices } = require('../services/price-fetcher');
+const { buildPriceHistory } = require('./prices');
 const { callGemini, MODELS } = require('../services/ai-router');
 const { hashKey } = require('../middleware/api-key-auth');
 const { createDailyBudget } = require('../lib/daily-budget');
@@ -35,29 +36,21 @@ async function tool_getSpotPrices() {
   return await getSpotPrices();
 }
 
+// The same series GET /v1/prices/history serves: monthly history from
+// data/historical-prices.json, the first price_log row of each day on top and
+// today's live spot. The old query asked price_log for gold, silver, platinum
+// and palladium columns, which the price writer doesn't fill (it writes
+// gold_price and the rest), and it stopped at Supabase's 1,000-row cap.
+const MCP_HISTORY_POINTS = 120;
+
 async function tool_getPriceHistory({ metal, range = '1Y' }) {
-  const rangeMap = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365, '5Y': 1825, ALL: 3650 };
-  const days = rangeMap[(range || '1Y').toUpperCase()] || 365;
-  const since = new Date();
-  since.setDate(since.getDate() - days);
-
-  const { data, error } = await supabase
-    .from('price_log')
-    .select('timestamp, gold, silver, platinum, palladium')
-    .gte('timestamp', since.toISOString())
-    .order('timestamp', { ascending: true });
-
-  if (error) throw new Error(`price_log query failed: ${error.message}`);
-
-  const points = (data || [])
-    .map(r => ({ timestamp: r.timestamp, price: r[metal] }))
-    .filter(p => typeof p.price === 'number');
-
+  const history = await buildPriceHistory({ metal, range: range || '1Y', maxPoints: MCP_HISTORY_POINTS });
   return {
-    metal,
-    range: (range || '1Y').toUpperCase(),
-    count: points.length,
-    points,
+    metal: history.metal,
+    range: history.range,
+    unit: history.unit,
+    count: history.prices.length,
+    points: history.prices,
   };
 }
 
@@ -710,7 +703,7 @@ setInterval(() => {
       sessions.delete(id);
     }
   }
-}, 5 * 60 * 1000); // check every 5 minutes
+}, 5 * 60 * 1000).unref(); // check every 5 minutes, without holding the process open
 
 /**
  * Read the raw request body as a string. Resolves even if the body is empty.
