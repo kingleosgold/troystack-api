@@ -1,13 +1,13 @@
 // scripts/backfill-ptpd.js puts frozen platinum and palladium values in
 // price_log back to Yahoo's daily close, and leaves everything else alone.
 //   node --test
-// In-process only: axios and supabase are fakes, no network.
+// In-process only: axios, supabase and fs are fakes, no network.
 
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
 
-const { parseArgs, closeOn, readRows, planBackfill, main } = require(path.join(__dirname, '..', 'scripts', 'backfill-ptpd.js'));
+const { parseArgs, closeOn, readRows, planBackfill, undoRecord, main, MIN_FROZEN_DAYS } = require(path.join(__dirname, '..', 'scripts', 'backfill-ptpd.js'));
 
 const ts = (date, hour) => `${date}T${String(hour).padStart(2, '0')}:00:00+00:00`;
 
@@ -46,6 +46,8 @@ const BARS = {
 test('frozen values get their day\'s Yahoo close, live and null rows stay', () => {
   const plan = planBackfill(frozenRows(), BARS);
 
+  assert.deepStrictEqual(plan.platinum.frozen, [{ value: 2098.09, days: 6 }]);
+  assert.deepStrictEqual(plan.palladium.frozen, [{ value: 1560.02, days: 6 }]);
   assert.deepStrictEqual(plan.platinum.days.map((d) => [d.date, d.close, d.ids.length]), [
     ['2026-06-15', 1770, 3], ['2026-06-16', 1812.1, 3], ['2026-06-17', 1790.7, 3],
     ['2026-06-18', 1705.2, 3], ['2026-06-19', 1731.5, 3], ['2026-09-25', 1774.7, 1],
@@ -59,6 +61,26 @@ test('frozen values get their day\'s Yahoo close, live and null rows stay', () =
   }
 });
 
+test('a real quote that repeats on two days stays, even more than 1% off the close', () => {
+  // From price_log on 10/2: platinum printed 1,827.03 at 22:00 on Sunday 8/30
+  // and again at midnight going into Monday. Friday 8/28 settled at 1,847.60
+  // and Monday 8/31 at 1,788.40, so both rows sit more than 1% off.
+  const rows = [
+    ...frozenRows(),
+    { id: 101, timestamp: ts('2026-08-30', 22), platinum_price: 1827.03, palladium_price: 1422.47 },
+    { id: 102, timestamp: ts('2026-08-31', 0), platinum_price: 1827.03, palladium_price: 1422.47 },
+  ];
+  const bars = {
+    platinum: [...BARS.platinum, { date: '2026-08-28', close: 1847.6 }, { date: '2026-08-31', close: 1788.4 }].sort((a, b) => a.date.localeCompare(b.date)),
+    palladium: [...BARS.palladium, { date: '2026-08-28', close: 1428.6 }, { date: '2026-08-31', close: 1362.9 }].sort((a, b) => a.date.localeCompare(b.date)),
+  };
+  const plan = planBackfill(rows, bars);
+  const touched = new Set([...plan.platinum.days, ...plan.palladium.days].flatMap((d) => d.ids));
+  assert.ok(!touched.has(101) && !touched.has(102), 'the live repeat is left alone');
+  assert.strictEqual(plan.platinum.rowCount, 16, 'the frozen rows still change');
+  assert.ok(MIN_FROZEN_DAYS >= 5);
+});
+
 test('a weekend repeat of Friday\'s price within 1% of the close is left alone', () => {
   const rows = [
     { id: 1, timestamp: ts('2026-07-10', 20), platinum_price: 1801.25, palladium_price: 1190.1 },
@@ -66,7 +88,7 @@ test('a weekend repeat of Friday\'s price within 1% of the close is left alone',
     { id: 3, timestamp: ts('2026-07-12', 12), platinum_price: 1801.25, palladium_price: 1190.1 },
   ];
   const bars = { platinum: [{ date: '2026-07-10', close: 1805 }], palladium: [{ date: '2026-07-10', close: 1192 }] };
-  const plan = planBackfill(rows, bars);
+  const plan = planBackfill(rows, bars, { minDays: 2 });
   assert.strictEqual(plan.platinum.rowCount, 0);
   assert.strictEqual(plan.palladium.rowCount, 0);
 });
@@ -79,8 +101,11 @@ test('weekends and holidays use the last close before them', () => {
 });
 
 test('arguments are checked before anything runs', () => {
-  assert.deepStrictEqual(parseArgs([]), { apply: false, from: '2026-04-01', to: '2026-09-27' });
-  assert.deepStrictEqual(parseArgs(['--apply', '--from', '2026-05-01', '--to', '2026-05-31']), { apply: true, from: '2026-05-01', to: '2026-05-31' });
+  assert.deepStrictEqual(parseArgs([]), { apply: false, undo: null, from: '2026-04-01', to: '2026-09-27' });
+  assert.deepStrictEqual(parseArgs(['--apply', '--from', '2026-05-01', '--to', '2026-05-31']), { apply: true, undo: null, from: '2026-05-01', to: '2026-05-31' });
+  assert.strictEqual(parseArgs(['--undo', 'undo.json']).undo, 'undo.json');
+  assert.throws(() => parseArgs(['--undo']));
+  assert.throws(() => parseArgs(['--undo', 'undo.json', '--apply']));
   assert.throws(() => parseArgs(['--from', '5/1']));
   assert.throws(() => parseArgs(['--from', '2026-06-01', '--to', '2026-05-01']));
   assert.throws(() => parseArgs(['--yes']));
@@ -150,25 +175,67 @@ function fakeAxios() {
   };
 }
 
+function fakeFs() {
+  const files = {};
+  return {
+    files,
+    writeFileSync(p, data) { files[p] = String(data); },
+    readFileSync(p) {
+      if (!(p in files)) throw new Error(`ENOENT ${p}`);
+      return files[p];
+    },
+  };
+}
+
 test('a dry run plans the changes and writes nothing', async () => {
   const supabase = fakeSupabase(frozenRows());
+  const files = fakeFs();
   const lines = [];
-  const { plan, written } = await main(['--from', '2026-06-01', '--to', '2026-09-30'], { supabase, axios: fakeAxios(), log: (l) => lines.push(l) });
+  const { plan, written } = await main(['--from', '2026-06-01', '--to', '2026-09-30'], { supabase, axios: fakeAxios(), fs: files, log: (l) => lines.push(l) });
   assert.strictEqual(written, 0);
   assert.strictEqual(supabase.updates.length, 0);
+  assert.deepStrictEqual(Object.keys(files.files), [], 'no undo file on a dry run');
   assert.strictEqual(plan.platinum.rowCount, 16);
+  assert.ok(lines.some((l) => l.includes('frozen values 2098.09 on 6 days')));
   assert.ok(lines.some((l) => l.includes('Dry run')));
 });
 
-test('--apply writes each day\'s close to only the frozen rows, in small batches', async () => {
+test('--apply writes an undo file first, then each day\'s close to only the frozen rows', async () => {
   const supabase = fakeSupabase(frozenRows());
-  const { written } = await main(['--apply', '--from', '2026-06-01', '--to', '2026-09-30'], { supabase, axios: fakeAxios(), log: () => {} });
+  const files = fakeFs();
+  const { written, undoPath } = await main(['--apply', '--from', '2026-06-01', '--to', '2026-09-30'], { supabase, axios: fakeAxios(), fs: files, undoDir: '/undo', log: () => {} });
   assert.strictEqual(written, 32);
   assert.ok(supabase.updates.every((u) => u.ids.length <= 150));
   const june15 = supabase.updates.find((u) => u.values.platinum_price === 1770);
   assert.deepStrictEqual(june15.ids, [1, 2, 3]);
   const pdSwitchDay = supabase.updates.find((u) => u.values.palladium_price === 1271);
   assert.strictEqual(pdSwitchDay.ids.length, 1, 'only the frozen morning row on the switch day');
+
+  assert.ok(undoPath.startsWith(path.join('/undo', 'backfill-ptpd-undo-')));
+  const record = JSON.parse(files.files[undoPath]);
+  assert.deepStrictEqual(record.entries.map((e) => [e.column, e.value, e.ids.length]), [
+    ['platinum_price', 2098.09, 16], ['palladium_price', 1560.02, 16],
+  ]);
+  assert.deepStrictEqual(record.entries[0].ids, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 19]);
+});
+
+test('--undo puts the recorded rows back to their old values', async () => {
+  const plan = planBackfill(frozenRows(), BARS);
+  const record = undoRecord(plan, { from: '2026-06-01', to: '2026-09-30' });
+  const files = fakeFs();
+  files.writeFileSync('undo.json', JSON.stringify(record));
+  const supabase = fakeSupabase([]);
+
+  const { written } = await main(['--undo', 'undo.json'], { supabase, axios: fakeAxios(), fs: files, log: () => {} });
+  assert.strictEqual(written, 32);
+  assert.deepStrictEqual(supabase.updates.map((u) => [Object.keys(u.values)[0], Object.values(u.values)[0], u.ids.length]), [
+    ['platinum_price', 2098.09, 16], ['palladium_price', 1560.02, 16],
+  ]);
+
+  files.writeFileSync('bad.json', JSON.stringify({ script: 'something-else', entries: [] }));
+  await assert.rejects(main(['--undo', 'bad.json'], { supabase, axios: fakeAxios(), fs: files, log: () => {} }));
+  files.writeFileSync('gold.json', JSON.stringify({ script: 'backfill-ptpd', entries: [{ column: 'gold_price', value: 1, ids: [1] }] }));
+  await assert.rejects(main(['--undo', 'gold.json'], { supabase, axios: fakeAxios(), fs: files, log: () => {} }));
 });
 
 test('the row reader pages past 1,000 rows', async () => {
