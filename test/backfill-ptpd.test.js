@@ -124,21 +124,30 @@ function fakeSupabase(rows) {
     selects,
     from(table) {
       assert.strictEqual(table, 'price_log');
-      const q = { gt: null, gte: null, lt: null, limit: Infinity };
+      // Filters and ordering per column, like PostgREST. Ties keep insertion order.
+      const q = { filters: [], order: null, limit: Infinity };
+      const val = (r, col) => (col === 'timestamp' ? Date.parse(r.timestamp) : r[col]);
+      const arg = (col, v) => (col === 'timestamp' ? Date.parse(v) : v);
       const select = {
         select() { return select; },
-        gt(col, v) { q.gt = v; return select; },
-        gte(col, v) { q.gte = v; return select; },
-        lt(col, v) { q.lt = v; return select; },
-        order() { return select; },
+        gt(col, v) { q.filters.push([col, 'gt', v]); return select; },
+        gte(col, v) { q.filters.push([col, 'gte', v]); return select; },
+        lt(col, v) { q.filters.push([col, 'lt', v]); return select; },
+        order(col, opts) { q.order = [col, opts?.ascending !== false]; return select; },
         limit(n) { q.limit = n; return select; },
         then(resolve, reject) {
-          selects.push({ ...q });
-          const t = (r) => Date.parse(r.timestamp);
-          const data = rows
-            .filter((r) => (q.gt == null || t(r) > Date.parse(q.gt)) && (q.gte == null || t(r) >= Date.parse(q.gte)) && (q.lt == null || t(r) < Date.parse(q.lt)))
-            .sort((a, b) => t(a) - t(b))
-            .slice(0, Math.min(q.limit, 1000));
+          selects.push(JSON.parse(JSON.stringify(q)));
+          const pass = (r) => q.filters.every(([col, op, v]) => {
+            const a = val(r, col);
+            const b = arg(col, v);
+            return op === 'gt' ? a > b : op === 'gte' ? a >= b : a < b;
+          });
+          let data = rows.filter(pass);
+          if (q.order) {
+            const [col, asc] = q.order;
+            data = data.slice().sort((x, y) => (val(x, col) - val(y, col)) * (asc ? 1 : -1));
+          }
+          data = data.slice(0, Math.min(q.limit, 1000));
           return Promise.resolve({ data, error: null }).then(resolve, reject);
         },
       };
@@ -239,6 +248,18 @@ test('--undo puts the recorded rows back to their old values', async () => {
   await assert.rejects(main(['--undo', 'bad.json'], { supabase, axios: fakeAxios(), fs: files, log: () => {} }));
   files.writeFileSync('gold.json', JSON.stringify({ script: 'backfill-ptpd', entries: [{ column: 'gold_price', value: 1, ids: [1] }] }));
   await assert.rejects(main(['--undo', 'gold.json'], { supabase, axios: fakeAxios(), fs: files, log: () => {} }));
+});
+
+test('the row reader keeps rows that share a timestamp across a page boundary', async () => {
+  // Three rows per timestamp, so a 1,000-row page ends inside a tie.
+  const rows = [];
+  for (let i = 0; i < 2400; i++) {
+    const t = new Date(Date.parse('2026-06-01T00:00:00Z') + Math.floor(i / 3) * 60000).toISOString().replace('Z', '+00:00');
+    rows.push({ id: i + 1, timestamp: t, platinum_price: 2098.09, palladium_price: 1560.02 });
+  }
+  const got = await readRows(fakeSupabase(rows), '2026-06-01', '2026-06-30');
+  assert.strictEqual(got.length, 2400);
+  assert.strictEqual(new Set(got.map((r) => r.id)).size, 2400);
 });
 
 test('the row reader pages past 1,000 rows', async () => {
