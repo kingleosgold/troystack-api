@@ -170,6 +170,15 @@ test('Claude path sends Sonnet 5.5 with cached system blocks, low effort and no 
   assert.deepStrictEqual(opts, { timeout: 30000, maxRetries: 0 });
 });
 
+test('TROY_CHAT_MODEL=claude-haiku-5-5 gets effort and no temperature', async () => {
+  const anthropic = fakeAnthropic(() => claudeOk('ok'));
+  const env = { ...ENV_BOTH, TROY_CHAT_PROVIDER: 'claude', TROY_CHAT_MODEL: 'claude-haiku-5-5' };
+  await llm.generateTroyReply({ userId: USER, message: 'Q', prompt: PROMPT, env, deps: { anthropic, http: fakeHttp(() => geminiOk('x')) } });
+  const { params } = anthropic.calls[0];
+  assert.deepStrictEqual(params.output_config, { effort: 'low' });
+  assert.ok(!('temperature' in params));
+});
+
 test('TROY_CHAT_MODEL on an older model sends temperature and no effort', async () => {
   for (const model of ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001']) {
     const anthropic = fakeAnthropic(() => claudeOk('ok'));
@@ -273,7 +282,7 @@ test('editorial runs on Sonnet 5.5 unless CLAUDE_EDITORIAL_MODEL says otherwise'
 
 test('only 5.x models drop temperature and take an effort level', () => {
   const router = require('../src/services/ai-router');
-  for (const m of ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5']) {
+  for (const m of ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-sonnet-5']) {
     assert.strictEqual(router.isClaude5(m), true, m);
     assert.deepStrictEqual(router.claudeTuning(m, { temperature: 0.7, effort: 'medium' }), { output_config: { effort: 'medium' } });
   }
