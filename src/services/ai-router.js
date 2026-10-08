@@ -24,7 +24,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 // models such as claude-sonnet-4-6 keep their temperature and get no effort,
 // the same request shape they got before.
 function isClaude5(model) {
-  return /^claude-(sonnet|opus|fable|mythos)-5/.test(String(model || '').toLowerCase());
+  return /^claude-(sonnet|opus|haiku|fable|mythos)-5/.test(String(model || '').toLowerCase());
 }
 
 function claudeTuning(model, { temperature, effort } = {}) {
