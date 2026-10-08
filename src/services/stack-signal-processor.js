@@ -33,6 +33,20 @@ function cleanJsonResponse(text) {
   return JSON.parse(cleaned);
 }
 
+// For replies that must be one JSON object, like the daily Stack Signal. A
+// model that adds a line before or after the object still gave us the object.
+// Array replies keep their own fallbacks at their call sites.
+function parseJsonObject(text) {
+  try {
+    return cleanJsonResponse(text);
+  } catch (err) {
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) throw err;
+    return JSON.parse(text.slice(start, end + 1));
+  }
+}
+
 const DAILY_CAP = 8;
 const MAX_DAILY_IMAGES = 3;
 
@@ -418,7 +432,10 @@ ${sourceMaterial}
 Write the article. Remember: 6-8 paragraphs, 1500-2500 words total, separated by blank lines.`;
 
   try {
-    return await callClaude(systemPrompt, userMessage, { maxTokens: 4000 });
+    // 1500 to 2500 words. On Sonnet 5.5 max_tokens covers its thinking too,
+    // and its tokenizer counts about 30% more tokens for the same text, so
+    // 4000 would cut articles short. Billing is on tokens used, not the cap.
+    return await callClaude(systemPrompt, userMessage, { maxTokens: 16000 });
   } catch (err) {
     console.error(`[Synthesis] Claude error for "${cluster.theme}": ${err.message}`);
     return null;
@@ -914,8 +931,10 @@ Return ONLY valid JSON.`;
   const userMessage = `${preamble ? preamble + '\n\n' : ''}Write today's Stack Signal for ${today}.\n\nToday's articles (${recentArticles.length}):\n\n${articleSummaries}`;
 
   try {
-    const raw = await callClaude(systemPrompt, userMessage, { maxTokens: 2048 });
-    const parsed = cleanJsonResponse(raw);
+    // Room for thinking plus the longer recap editions. A cut-off reply is
+    // invalid JSON and loses the day's brief.
+    const raw = await callClaude(systemPrompt, userMessage, { maxTokens: 8000 });
+    const parsed = parseJsonObject(raw);
 
     // Generate hero image for the daily signal (subject to daily DALL-E cap)
     let imageUrl = null;
@@ -1379,4 +1398,5 @@ module.exports = {
   runStackSignalPipeline,
   generateTweetText,
   sanitizeTweetText,
+  parseJsonObject,
 };

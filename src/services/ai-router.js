@@ -5,16 +5,32 @@ const Anthropic = require('@anthropic-ai/sdk');
 // MODEL CONSTANTS
 // ============================================
 
+// editorial writes the Stack Signal articles and the daily brief the podcast
+// reads. CLAUDE_EDITORIAL_MODEL overrides it, so going back to
+// claude-sonnet-4-6 is a Railway variable, not a deploy.
 const MODELS = {
   flash: 'gemini-2.5-flash',
   pro: 'gemini-2.5-pro',
-  editorial: 'claude-sonnet-4-6',
+  editorial: (process.env.CLAUDE_EDITORIAL_MODEL || '').trim() || 'claude-sonnet-5-5',
   image: 'dall-e-3',
 };
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// Claude 5.x models return a 400 on a non-default temperature, and they think
+// before answering by default, so they get an effort level instead. Older
+// models such as claude-sonnet-4-6 keep their temperature and get no effort,
+// the same request shape they got before.
+function isClaude5(model) {
+  return /^claude-(sonnet|opus|fable|mythos)-5/.test(String(model || '').toLowerCase());
+}
+
+function claudeTuning(model, { temperature, effort } = {}) {
+  if (isClaude5(model)) return effort ? { output_config: { effort } } : {};
+  return temperature === undefined ? {} : { temperature };
+}
 
 // Lazy-init Anthropic client
 let anthropicClient = null;
@@ -76,24 +92,47 @@ async function callGemini(model, systemPrompt, userMessage, options = {}) {
 // ============================================
 
 /**
- * Call Claude via Anthropic SDK.
- * @param {string} systemPrompt - System prompt
- * @param {string} userMessage - User message
- * @param {object} options - { maxTokens, temperature, timeout }
- * @returns {string} Raw text response
+ * Request body for an editorial Claude call.
+ * @param {string} model
+ * @param {string} systemPrompt
+ * @param {string} userMessage
+ * @param {object} options - { maxTokens, temperature, effort }
  */
-async function callClaude(systemPrompt, userMessage, options = {}) {
-  const { maxTokens = 4096, temperature = 0.7 } = options;
-
-  const client = getAnthropicClient();
-
-  const message = await client.messages.create({
-    model: MODELS.editorial,
+function editorialRequest(model, systemPrompt, userMessage, options = {}) {
+  // On 5.x models max_tokens covers the thinking as well as the answer.
+  const { maxTokens = 4096, temperature = 0.7, effort = 'medium' } = options;
+  return {
+    model,
     max_tokens: maxTokens,
     system: systemPrompt,
     messages: [{ role: 'user', content: userMessage }],
-    temperature,
-  });
+    ...claudeTuning(model, { temperature, effort }),
+  };
+}
+
+/**
+ * Call Claude via Anthropic SDK.
+ * @param {string} systemPrompt - System prompt
+ * @param {string} userMessage - User message
+ * @param {object} options - { maxTokens, temperature, effort, client }
+ * @returns {string} Raw text response
+ */
+async function callClaude(systemPrompt, userMessage, options = {}) {
+  const client = options.client || getAnthropicClient();
+
+  const message = await client.messages.create(
+    editorialRequest(MODELS.editorial, systemPrompt, userMessage, options),
+  );
+
+  // A refusal can carry a partial answer. Callers treat an empty string as
+  // a failed call, which beats publishing half an article.
+  if (message.stop_reason === 'refusal') {
+    console.warn(`[Claude] ${MODELS.editorial} declined: ${message.stop_details?.refusal_reason || 'no reason given'}`);
+    return '';
+  }
+  if (message.stop_reason === 'max_tokens') {
+    console.warn(`[Claude] ${MODELS.editorial} hit the max_tokens cap`);
+  }
 
   const text = message.content
     ?.filter(b => b.type === 'text')
@@ -143,4 +182,7 @@ module.exports = {
   callGemini,
   callClaude,
   generateImage,
+  isClaude5,
+  claudeTuning,
+  editorialRequest,
 };
