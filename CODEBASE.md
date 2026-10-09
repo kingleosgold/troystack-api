@@ -191,11 +191,11 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | /v1/webhooks/stripe | Signature | Stripe webhook (checkout, subscription updates) |
-| POST | /v1/stripe/create-checkout-session | Bearer (Supabase session, must match user_id) | Create Stripe checkout. Redirect URLs must be on a TroyStack site; optional `campaign` is stored on the session and subscription |
+| POST | /v1/stripe/create-checkout-session | Bearer (Supabase session, must match user_id) | Create Stripe checkout. The price must be a Gold price or on the Gold product, or it answers 400. Redirect URLs must be on a TroyStack site; optional `campaign` is stored on the session and subscription |
 | POST | /v1/stripe/verify-session | Public (session id) | Verify checkout completion |
 | POST | /v1/stripe/customer-portal | Bearer (Supabase session, must match user_id) | Stripe billing portal; return_url must be on a TroyStack site |
-| GET | /v1/stripe/my-plan | Bearer (Supabase session) | The web plan Stripe holds for the signed-in account: `{ plan: 'gold' \| 'lifetime' \| null, status, trial_end }`. The iPhone app asks before it treats an account with no App Store plan as free. Never writes |
-| GET | /v1/sync-subscription | Public (UUID) | Plan for a user. A free profile with a live Stripe subscription, or a paid lifetime checkout that wasn't refunded, gets its plan restored, since the iPhone app writes free when RevenueCat has nothing. The answer changes only when the profile update succeeds |
+| GET | /v1/stripe/my-plan | Bearer (Supabase session) | The web plan Stripe holds for the signed-in account: `{ plan: 'gold' \| 'lifetime' \| null, status, trial_end }`. The iPhone app asks before it treats an account with no App Store plan as free. A failed profile lookup answers 503, not `plan: null`. Never writes |
+| GET | /v1/sync-subscription | Public (UUID) | Plan for a user. A free profile with a paid lifetime checkout that wasn't refunded, or a live subscription to a Gold price or product, gets its plan restored, since the iPhone app writes free when RevenueCat has nothing. Lifetime wins over a subscription. The answer changes only when the profile update succeeds |
 | POST | /v1/webhooks/revenuecat | Signature | RevenueCat iOS purchase webhook |
 
 ### src/routes/stack-signal.js
@@ -1193,8 +1193,8 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 - **Last modified:** 2026-03-04
 
 ### src/lib/stripe-checks.js
-- **Purpose:** Checks the Stripe routes run before acting: the signed-in account from the bearer token, redirect URLs limited to TroyStack sites, campaign tokens, which subscription counts as live, and which checkout counts as a paid lifetime purchase
-- **Exports:** `signedInUserId(req, supabase)`, `safeRedirect(url, fallback)`, `cleanCampaign(value)`, `liveSubscription(subs)`, `paidLifetimeSession(sessions)`, `SITE_ORIGINS`
+- **Purpose:** Checks the Stripe routes run before acting: the signed-in account from the bearer token, redirect URLs limited to TroyStack sites, campaign tokens, which subscriptions count as live and Gold, and which checkouts count as paid lifetime purchases
+- **Exports:** `signedInUserId(req, supabase)`, `safeRedirect(url, fallback)`, `cleanCampaign(value)`, `liveSubscriptions(subs)`, `subscriptionTier(price, mapPrice, goldProducts)`, `paidLifetimeSessions(sessions)`, `SITE_ORIGINS`
 - **Dependencies:** none
 - **Last modified:** 2026-10-08
 
