@@ -65,6 +65,9 @@ const MAX_DAILY_IMAGES = 3;
 // a quiet stretch.
 const SLOT_HOURS = 24 / DAILY_CAP;
 const MAX_PER_RUN = 1;
+// Drafts a run may throw away for being short or empty before it gives the
+// slot up until the next run. Each one is a full model call.
+const MAX_DRAFTS_PER_RUN = 2;
 const MIN_GAP_MS = 90 * 60 * 1000;
 
 function slotsOpenAt(now = new Date()) {
@@ -1476,16 +1479,26 @@ async function runPipelineOnce() {
     const inFresh = new Set(fresh.flatMap(c => c.articles.map(a => a.link)));
     await rememberPassedLinks(scoredArticles.map(a => a.link).filter(link => !inFresh.has(link)), now);
 
-    // Phase 3: Write synthesis articles (one per run, while a slot is open)
-    const remainingSlots = Math.min(open - commentaryToday, MAX_PER_RUN);
-    const clustersToWrite = fresh.slice(0, remainingSlots);
+    // Phase 3: Write synthesis articles (one per run, while a slot is open).
+    // A draft that comes back empty or short hands the slot to the next fresh
+    // cluster, up to MAX_DRAFTS_PER_RUN drafts, and its cluster sits out for
+    // an hour. Otherwise the top cluster could take every run's slot and fail
+    // each time while the stories behind it never got a turn.
+    const wanted = Math.min(open - commentaryToday, MAX_PER_RUN);
 
-    console.log(`\n[Pipeline] Phase 3: Writing ${clustersToWrite.length} synthesis articles (${commentaryToday} already today, ${open}/${DAILY_CAP} open)...`);
+    console.log(`\n[Pipeline] Phase 3: Writing ${wanted} synthesis article from ${fresh.length} fresh clusters (${commentaryToday} already today, ${open}/${DAILY_CAP} open)...`);
 
     const prices = getCachedPrices();
     const synthesizedArticles = [];
+    let drafts = 0;
 
-    for (let i = 0; i < clustersToWrite.length; i++) {
+    for (const cluster of fresh) {
+      if (synthesizedArticles.length >= wanted) break;
+      if (drafts >= MAX_DRAFTS_PER_RUN) {
+        console.log(`[Synthesis] ${drafts} drafts thrown away this run, stopping until the next one`);
+        break;
+      }
+
       // Re-check the open slots before each article
       const { count: currentCount } = await getCommentaryCount();
       if (currentCount >= slotsOpenAt(new Date())) {
@@ -1493,16 +1506,14 @@ async function runPipelineOnce() {
         break;
       }
 
-      const cluster = clustersToWrite[i];
-      console.log(`[Synthesis] Writing article ${i + 1}/${clustersToWrite.length}: "${cluster.theme.slice(0, 50)}" (${cluster.articles.length} sources, importance: ${cluster.importance})`);
+      drafts += 1;
+      console.log(`[Synthesis] Draft ${drafts}/${MAX_DRAFTS_PER_RUN}: "${cluster.theme.slice(0, 50)}" (${cluster.articles.length} sources, importance: ${cluster.importance})`);
 
       const articleText = await writeFeedReaction(cluster, prices);
-      if (!articleText) {
-        console.log(`[Synthesis] Skipped: "${cluster.theme.slice(0, 50)}" — no output from Claude`);
-        continue;
-      }
-      if (articleText.length < MIN_ARTICLE_CHARS) {
-        console.log(`[Synthesis] Skipped: "${cluster.theme.slice(0, 50)}" — ${articleText.length} chars, under ${MIN_ARTICLE_CHARS}, slot kept`);
+      if (!articleText || articleText.length < MIN_ARTICLE_CHARS) {
+        const why = articleText ? `${articleText.length} chars, under ${MIN_ARTICLE_CHARS}` : 'no output from the model';
+        console.log(`[Synthesis] Skipped "${cluster.theme.slice(0, 50)}": ${why}. The slot stays open and its articles sit out an hour`);
+        await rememberPassedLinks(cluster.articles.map(a => a.link), now, RETRY_TTL_MS);
         continue;
       }
 
