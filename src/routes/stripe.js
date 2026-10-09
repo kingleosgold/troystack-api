@@ -1,6 +1,6 @@
 const express = require('express');
 const supabase = require('../lib/supabase');
-const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions } = require('../lib/stripe-checks');
+const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions, soldLifetime } = require('../lib/stripe-checks');
 
 const router = express.Router();
 
@@ -87,33 +87,55 @@ async function tierForCheckout(session, price) {
   }
 }
 
-// Every completed checkout for a customer, newest first, a page at a time.
-// Abandoned checkouts aren't complete, so they never crowd out a purchase.
-async function* completedCheckouts(customerId, { pageSize = 100, maxPages = 10 } = {}) {
+// Every record a Stripe list holds, newest first, a page at a time. A history
+// longer than this reads throws, since stopping partway isn't an answer.
+async function* everyRecord(list, params, { pageSize = 100, maxPages = 10 } = {}) {
   let startingAfter;
   for (let page = 0; page < maxPages; page += 1) {
-    const res = await stripe.checkout.sessions.list({
-      customer: customerId,
-      status: 'complete',
-      limit: pageSize,
-      ...(startingAfter ? { starting_after: startingAfter } : {}),
-    });
+    const res = await list({ ...params, limit: pageSize, ...(startingAfter ? { starting_after: startingAfter } : {}) });
     const data = res.data || [];
-    for (const session of data) yield session;
+    for (const record of data) yield record;
     if (!res.has_more || data.length === 0) return;
     startingAfter = data[data.length - 1].id;
   }
+  throw new Error(`More than ${pageSize * maxPages} Stripe records to check`);
+}
+
+// Every completed checkout for a customer. Abandoned checkouts aren't
+// complete, so they never crowd out a purchase.
+function completedCheckouts(customerId) {
+  return everyRecord((p) => stripe.checkout.sessions.list(p), { customer: customerId, status: 'complete' });
+}
+
+// Every subscription a customer has had, whatever its status.
+function customerSubscriptions(customerId) {
+  return everyRecord((p) => stripe.subscriptions.list(p), { customer: customerId, status: 'all' });
+}
+
+// A checkout this API opened records its tier. A one-time checkout without one
+// counts as lifetime only when it sold the lifetime price or a one-time price
+// on the Gold product, so a payment for anything else in the account never
+// becomes a plan.
+async function isLifetimeCheckout(session) {
+  const recorded = session.metadata?.tier;
+  if (recorded) return recorded === 'lifetime';
+  const items = [];
+  for await (const item of everyRecord((p) => stripe.checkout.sessions.listLineItems(session.id, p), {})) items.push(item);
+  if (soldLifetime(items, STRIPE_GOLD_LIFETIME_PRICE_ID, null)) return true;
+  if (!items.some((item) => item?.price?.type === 'one_time')) return false;
+  return soldLifetime(items, STRIPE_GOLD_LIFETIME_PRICE_ID, await goldProductIds());
 }
 
 // What Stripe says a customer paid for, or null. Lifetime comes first, since
 // it outlasts any subscription the customer also has. It's a one-time payment
 // with no subscription, so it counts when any paid lifetime checkout wasn't
 // refunded in full. Otherwise a live subscription to a Gold price or product
-// gives Gold, and a subscription to anything else gives nothing.
+// gives Gold, and a subscription to anything else gives nothing. Both
+// histories are read to the end.
 async function planFromStripe(customerId) {
   for await (const checkout of completedCheckouts(customerId)) {
     const [session] = paidLifetimeSessions([checkout]);
-    if (!session) continue;
+    if (!session || !(await isLifetimeCheckout(session))) continue;
     const intentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
     if (!intentId) return { tier: 'lifetime', status: 'active', trialEnd: null };
     const intent = await stripe.paymentIntents.retrieve(intentId, { expand: ['latest_charge'] });
@@ -121,14 +143,15 @@ async function planFromStripe(customerId) {
     if (!(charge && typeof charge === 'object' && charge.refunded)) return { tier: 'lifetime', status: 'active', trialEnd: null };
   }
 
-  const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 10 });
-  const live = liveSubscriptions(subs.data);
-  if (live.length === 0) return null;
-  const products = await goldProductIds();
-  for (const sub of live) {
-    const tier = subscriptionTier(sub.items?.data?.[0]?.price, mapStripePriceToTier, products);
+  let products = null;
+  for await (const sub of customerSubscriptions(customerId)) {
+    const [live] = liveSubscriptions([sub]);
+    if (!live) continue;
+    const price = live.items?.data?.[0]?.price;
+    if (!products && mapStripePriceToTier(price?.id) === 'free') products = await goldProductIds();
+    const tier = subscriptionTier(price, mapStripePriceToTier, products);
     if (tier) {
-      return { tier, status: sub.status, trialEnd: sub.trial_end ? new Date(sub.trial_end * 1000).toISOString() : null };
+      return { tier, status: live.status, trialEnd: live.trial_end ? new Date(live.trial_end * 1000).toISOString() : null };
     }
   }
   return null;
@@ -190,7 +213,16 @@ async function stripeWebhookHandler(req, res) {
             }
           }
         } else if (session.mode === 'payment') {
-          tier = session.metadata?.tier || 'lifetime';
+          // A one-time checkout without a recorded tier is lifetime only when
+          // it sold a lifetime Gold price. Anything else changes no plan.
+          if (session.metadata?.tier) {
+            tier = session.metadata.tier;
+          } else if (await isLifetimeCheckout(session)) {
+            tier = 'lifetime';
+          } else {
+            console.log(`💳 [Stripe Webhook] One-time checkout ${session.id} sold no Gold plan, profile left alone`);
+            break;
+          }
         }
 
         const { error } = await supabase
@@ -450,7 +482,13 @@ router.post('/verify-session', async (req, res) => {
         trialEnd = new Date(subscription.trial_end * 1000).toISOString();
       }
     } else if (session.mode === 'payment') {
-      tier = session.metadata?.tier || 'lifetime';
+      if (session.metadata?.tier) {
+        tier = session.metadata.tier;
+      } else if (await isLifetimeCheckout(session)) {
+        tier = 'lifetime';
+      } else {
+        return res.json({ success: false, reason: 'That checkout sold no TroyStack plan' });
+      }
     }
 
     const { error } = await supabase
