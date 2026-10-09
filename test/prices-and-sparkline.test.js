@@ -237,3 +237,12 @@ test('price reads that arrive together share one live fetch', async (t) => {
   await fetcher.fetchLiveSpotPrices();
   assert.strictEqual(goldQuotes, 2, 'a later fetch goes out again');
 });
+
+test("built-in prices stay labeled built-in when the next fetch fails too", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T16:00:00Z') }); // Thursday
+  const fetcher = loadWith('services/price-fetcher', { supabase: chainable(null), axios: offline });
+  await fetcher.fetchLiveSpotPrices();
+  assert.strictEqual(fetcher.getPriceSnapshot().source, 'static-fallback');
+  await fetcher.fetchLiveSpotPrices();
+  assert.strictEqual(fetcher.getPriceSnapshot().source, 'static-fallback', 'never relabeled as a cached reading');
+});

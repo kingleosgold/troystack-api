@@ -204,14 +204,21 @@ test('questions that arrive during a refresh share it', async () => {
   assert.equal(b, c);
 });
 
-test('moves are left out when prices come from a fallback, not a live source', () => {
+test('moves are left out when prices come from a fallback, and Troy is told prices are stale', () => {
   for (const source of ['static-fallback', 'cached-fallback', 'static-fallback (friday-close)']) {
-    const block = buildMarketBlock({ spot: { ...SPOT, source }, signal: SIGNAL });
+    const block = buildMarketBlock({ spot: { ...SPOT, source, timestamp: '2026-10-09T13:40:00Z' }, signal: SIGNAL });
     assert.ok(!block.includes("TODAY'S MARKET"), source);
-    assert.match(block, /For where prices are now, use only CURRENT SPOT\./);
+    assert.ok(!block.includes('use only CURRENT SPOT'), 'a stale CURRENT SPOT is never called the price now');
+    assert.match(block, /live prices are unavailable right now/);
     assert.match(block, /YOUR LATEST STACK SIGNAL/, 'the rest still comes through');
   }
-  assert.match(buildMarketBlock({ spot: { ...SPOT, source: 'yahoo_finance' } }), /Gold: up \$17\.20/);
+  const placeholder = buildMarketBlock({ spot: { ...SPOT, source: 'static-fallback' } });
+  assert.match(placeholder, /placeholder numbers, not market prices\. Don't quote them\./);
+  const cached = buildMarketBlock({ spot: { ...SPOT, source: 'cached-fallback', timestamp: '2026-10-09T13:40:00Z' } });
+  assert.match(cached, /CURRENT SPOT is the last price read, Oct 9, 2026, 9:40 AM ET, and may be out of date/);
+  const live = buildMarketBlock({ spot: { ...SPOT, source: 'yahoo_finance' } });
+  assert.match(live, /Gold: up \$17\.20/);
+  assert.ok(!live.includes('PRICES RIGHT NOW'));
 });
 
 test('a stalled read gives way to the last good answer instead of holding the question', async () => {
