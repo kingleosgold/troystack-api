@@ -197,3 +197,23 @@ test("the day's moves and the Signal reach Troy's prompt, and a failure there do
   });
   assert.strictEqual(llm2.calls[0].prompt.stack, visitorBlock(PRICES));
 });
+
+test('CURRENT SPOT and the market block come from one price snapshot', async () => {
+  const llm = fakeLlm();
+  const snapshot = { prices: PRICES, change: { silver: { amount: 0.62, percent: 1.04 } }, source: 'yahoo_finance' };
+  let given;
+  const router = createTroyAskRouter({
+    llm,
+    getPrices: async () => snapshot,
+    getMarket: async (s) => {
+      given = s;
+      return '';
+    },
+    env: {},
+  });
+  await withApp(router, async (base) => {
+    assert.strictEqual((await ask(base, { message: 'What moved silver today?' })).status, 200);
+  });
+  assert.strictEqual(given, snapshot, 'the market block is built from the same reading');
+  assert.ok(llm.calls[0].prompt.stack.startsWith(visitorBlock(PRICES)), 'CURRENT SPOT shows that reading');
+});

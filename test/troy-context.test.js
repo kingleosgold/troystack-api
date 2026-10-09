@@ -239,3 +239,13 @@ test('a stalled read gives way to the last good answer instead of holding the qu
   assert.match(second, /A headline that matters today/);
   assert.ok(!second.includes("TODAY'S MARKET"), 'no moves while spot is stalled');
 });
+
+test("a route's own price reading is used for the moves instead of a second read", async () => {
+  let spotCalls = 0;
+  const db = fakeDb();
+  const get = createMarketContext({ fetchSpot: async () => { spotCalls += 1; return SPOT; }, db, now: () => 0 });
+  const mine = { ...SPOT, change: { ...SPOT.change, gold: { amount: -5, percent: -0.12 } } };
+  const block = await get(mine);
+  assert.equal(spotCalls, 0, 'no second spot read');
+  assert.match(block, /Gold: down \$5\.00 \(0\.12%\) today/);
+});
