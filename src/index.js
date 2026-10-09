@@ -24,6 +24,7 @@ const scanUsageRouter = require('./routes/scan-usage');
 const minVersionRouter = require('./routes/min-version');
 const troyChatRouter = require('./routes/troy-chat');
 const { createTroyAskRouter } = require('./routes/troy-ask');
+const { sharedMarketBlock } = require('./services/troy-context');
 const troyLlm = require('./services/troy-llm');
 const { getTopIntelligence } = require('./services/intelligence-scraper');
 const stackSignalRouter = require('./routes/stack-signal');
@@ -206,6 +207,7 @@ app.use('/v1/troy', publicLimiter, createTroyAskRouter({
     return (await getSpotPrices()).prices;
   },
   getIntel: () => getTopIntelligence(8),
+  getMarket: () => sharedMarketBlock(),
 }));
 
 // Troy Chat — persistent conversations (mobile app sends userId)
