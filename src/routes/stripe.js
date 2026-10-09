@@ -1,6 +1,6 @@
 const express = require('express');
 const supabase = require('../lib/supabase');
-const { safeRedirect, cleanCampaign, signedInUserId, liveSubscription, paidLifetimeSession } = require('../lib/stripe-checks');
+const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions } = require('../lib/stripe-checks');
 
 const router = express.Router();
 
@@ -37,31 +37,53 @@ function isLifetimePrice(priceId) {
   return priceId === STRIPE_GOLD_LIFETIME_PRICE_ID;
 }
 
-// What Stripe says a customer paid for, or null. A live subscription gives
-// Gold. Lifetime is a one-time payment with no subscription, so a paid
-// lifetime checkout counts unless its charge was refunded in full.
-async function planFromStripe(customerId) {
-  const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 10 });
-  const live = liveSubscription(subs.data);
-  if (live) {
-    const mapped = mapStripePriceToTier(live.items?.data?.[0]?.price?.id);
-    return {
-      tier: mapped === 'free' ? 'gold' : mapped,
-      status: live.status,
-      trialEnd: live.trial_end ? new Date(live.trial_end * 1000).toISOString() : null,
-    };
+// The products the Gold prices belong to, read from Stripe and kept for six
+// hours. A subscriber on an older Gold price still counts, and a subscription
+// to anything else in the account never does.
+let goldProductCache = { at: 0, ids: new Set() };
+async function goldProductIds() {
+  if (goldProductCache.ids.size > 0 && Date.now() - goldProductCache.at < 6 * 60 * 60 * 1000) return goldProductCache.ids;
+  const ids = new Set();
+  for (const priceId of [STRIPE_GOLD_MONTHLY_PRICE_ID, STRIPE_GOLD_YEARLY_PRICE_ID, STRIPE_GOLD_LIFETIME_PRICE_ID]) {
+    if (!priceId) continue;
+    try {
+      const price = await stripe.prices.retrieve(priceId);
+      const product = typeof price.product === 'string' ? price.product : price.product?.id;
+      if (product) ids.add(product);
+    } catch (e) {
+      console.warn(`⚠️ [Stripe] Could not read Gold price ${priceId}:`, e.message);
+    }
   }
+  goldProductCache = { at: Date.now(), ids };
+  return ids;
+}
 
+// What Stripe says a customer paid for, or null. Lifetime comes first, since
+// it outlasts any subscription the customer also has. It's a one-time payment
+// with no subscription, so it counts when any paid lifetime checkout wasn't
+// refunded in full. Otherwise a live subscription to a Gold price or product
+// gives Gold, and a subscription to anything else gives nothing.
+async function planFromStripe(customerId) {
   const sessions = await stripe.checkout.sessions.list({ customer: customerId, limit: 20 });
-  const lifetime = paidLifetimeSession(sessions.data);
-  if (!lifetime) return null;
-  const intentId = typeof lifetime.payment_intent === 'string' ? lifetime.payment_intent : lifetime.payment_intent?.id;
-  if (intentId) {
+  for (const session of paidLifetimeSessions(sessions.data)) {
+    const intentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+    if (!intentId) return { tier: 'lifetime', status: 'active', trialEnd: null };
     const intent = await stripe.paymentIntents.retrieve(intentId, { expand: ['latest_charge'] });
     const charge = intent.latest_charge;
-    if (charge && typeof charge === 'object' && charge.refunded) return null;
+    if (!(charge && typeof charge === 'object' && charge.refunded)) return { tier: 'lifetime', status: 'active', trialEnd: null };
   }
-  return { tier: 'lifetime', status: 'active', trialEnd: null };
+
+  const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 10 });
+  const live = liveSubscriptions(subs.data);
+  if (live.length === 0) return null;
+  const products = await goldProductIds();
+  for (const sub of live) {
+    const tier = subscriptionTier(sub.items?.data?.[0]?.price, mapStripePriceToTier, products);
+    if (tier) {
+      return { tier, status: sub.status, trialEnd: sub.trial_end ? new Date(sub.trial_end * 1000).toISOString() : null };
+    }
+  }
+  return null;
 }
 
 // ============================================
@@ -236,6 +258,22 @@ router.post('/create-checkout-session', async (req, res) => {
       return res.status(403).json({ error: 'That account is not the one signed in' });
     }
     const campaign = cleanCampaign(req.body.campaign);
+
+    // Checkout only sells Gold. A price outside the Gold product would start a
+    // subscription the webhooks could mistake for Gold.
+    if (mapStripePriceToTier(price_id) === 'free') {
+      let product = null;
+      try {
+        const price = await stripe.prices.retrieve(price_id);
+        product = typeof price.product === 'string' ? price.product : price.product?.id;
+      } catch {
+        // an unknown price id
+      }
+      const products = await goldProductIds();
+      if (!product || !products.has(product)) {
+        return res.status(400).json({ error: 'That price is not a TroyStack Gold plan' });
+      }
+    }
 
     // Look up user profile
     let { data: profile } = await supabase
@@ -444,7 +482,14 @@ router.get('/my-plan', async (req, res) => {
       .select('stripe_customer_id')
       .eq('id', auth.userId)
       .single();
-    if (error || !profile?.stripe_customer_id) return res.json({ plan: null, status: null, trial_end: null });
+    // No profile row is a confirmed answer of no web plan. Any other failure
+    // isn't, so the app hears that it couldn't be checked and leaves the
+    // account alone.
+    if (error && error.code !== 'PGRST116') {
+      console.error('❌ [Stripe] my-plan profile lookup failed:', error.message);
+      return res.status(503).json({ error: 'Could not check the web plan' });
+    }
+    if (!profile?.stripe_customer_id) return res.json({ plan: null, status: null, trial_end: null });
 
     const found = await planFromStripe(profile.stripe_customer_id);
     if (!found) return res.json({ plan: null, status: null, trial_end: null });
