@@ -1,6 +1,8 @@
+const crypto = require('node:crypto');
 const express = require('express');
 const supabase = require('../lib/supabase');
 const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions, soldLifetime } = require('../lib/stripe-checks');
+const { appStorePlanOnRecord, hadAppStorePlan } = require('./revenuecat-webhook');
 
 const router = express.Router();
 
@@ -128,9 +130,15 @@ async function isLifetimeCheckout(session) {
   return soldLifetime(items, STRIPE_GOLD_LIFETIME_PRICE_ID, await goldProductIds());
 }
 
-// A lifetime payment counts until it's refunded in full or its buyer wins a
-// dispute over it. Stripe leaves a charge marked unrefunded when a dispute is
-// lost, so a disputed charge has its disputes read.
+// A chargeback that's open or lost holds the money back. An inquiry, a
+// dispute status starting warning_, isn't a chargeback yet, and a won dispute
+// gives the money back.
+const CHARGEBACK_HOLDS = ['needs_response', 'under_review', 'lost'];
+
+// A lifetime payment counts until it's refunded in full or a chargeback is
+// opened on it, and counts again if the seller wins. Stripe leaves a charge
+// marked unrefunded when a dispute is lost, so a disputed charge has its
+// disputes read.
 async function lifetimeStillPaid(session) {
   const intentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
   if (!intentId) return true;
@@ -140,7 +148,7 @@ async function lifetimeStillPaid(session) {
   if (charge.refunded) return false;
   if (charge.disputed) {
     const disputes = await stripe.disputes.list({ payment_intent: intentId, limit: 100 });
-    if ((disputes.data || []).some((d) => d.status === 'lost')) return false;
+    if ((disputes.data || []).some((d) => CHARGEBACK_HOLDS.includes(d.status))) return false;
   }
   return true;
 }
@@ -245,6 +253,39 @@ async function planAfterEnding(userId, customerId) {
 // since the account may hold a plan bought on the web.
 if (stripe) require('./revenuecat-webhook').setWebPlanCheck(planAfterEnding);
 
+// What an account holds when a web lifetime payment stops counting, or counts
+// again: any plan Stripe still holds, lifetime first, then a plan the App
+// Store still owes it from the RevenueCat record, or free. A Stripe or record
+// read that fails throws.
+async function planWithoutLostLifetime(userId, customerId) {
+  const web = await planForUser(userId, customerId);
+  if (web) return web;
+  return (await appStorePlanOnRecord(userId)) || { tier: 'free', status: null, trialEnd: null };
+}
+
+// The profile fields for such a plan. An App Store subscription keeps its
+// expiry, so a web subscription ending later can see it still runs.
+function profileFieldsFor(plan) {
+  if (plan.source === 'app_store') {
+    return {
+      subscription_tier: plan.tier,
+      subscription_status: 'active',
+      trial_end: null,
+      ...(plan.expiresAt ? { subscription_expires_at: new Date(plan.expiresAt).toISOString() } : {}),
+    };
+  }
+  return { subscription_tier: plan.tier, subscription_status: plan.status ?? null, trial_end: plan.trialEnd ?? null };
+}
+
+// The completed lifetime checkout a payment was for, or null when it was for
+// anything else, such as a subscription invoice.
+async function lifetimeCheckoutFor(paymentIntentId) {
+  const res = await stripe.checkout.sessions.list({ payment_intent: paymentIntentId, limit: 1 });
+  const session = res.data?.[0];
+  if (!session || session.mode !== 'payment' || !(await isLifetimeCheckout(session))) return null;
+  return session;
+}
+
 // The account behind a Stripe customer: the profile that holds the customer,
 // or, for a customer an earlier checkout made and the profile no longer
 // holds, the account named in the customer's metadata.
@@ -288,15 +329,43 @@ async function keepLifetime(userId, tier) {
   return data?.subscription_tier === 'lifetime' ? 'lifetime' : tier;
 }
 
-// Whether the account has had a Gold subscription before, on any of its
-// customers. The free week is for the first one only, so subscribing and
-// cancelling inside the week can't be repeated. A subscription whose first
-// payment never went through doesn't count.
+// Whether the account has had Gold before: an App Store trial or plan on the
+// RevenueCat record, or a Gold subscription on any of its Stripe customers.
+// The free week is for the first one only, so subscribing and cancelling
+// inside the week can't be repeated, and an App Store trial isn't followed by
+// a web one. A subscription whose first payment never went through doesn't
+// count. With no customer yet, only the App Store record is read.
 async function hadGoldBefore(userId, customerId) {
+  if (await hadAppStorePlan(userId)) return true;
+  if (!customerId) return false;
   let products = null;
   for (const id of await customersFor(userId, customerId, { strict: true })) {
     for await (const sub of customerSubscriptions(id)) {
       if (sub.status === 'incomplete' || sub.status === 'incomplete_expired') continue;
+      const price = sub.items?.data?.[0]?.price;
+      if (!products && mapStripePriceToTier(price?.id) === 'free') products = await goldProductIds();
+      if (subscriptionTier(price, mapStripePriceToTier, products)) return true;
+    }
+  }
+  return false;
+}
+
+// The answer for an account whose Gold renewal payment failed. Its
+// subscription bills again once the card works, so a second checkout could
+// leave it paying twice. The web shows this with a way to the billing page.
+const PAYMENT_ISSUE = {
+  error: "Your last Gold payment didn't go through. Update your card on the billing page in Settings to keep Gold.",
+  reason: 'payment_issue',
+};
+
+// Whether a Gold subscription on any of the account's customers has a failed
+// renewal: past_due while Stripe retries, or unpaid once the retries ran out
+// and the invoice waits for a working card.
+async function goldPaymentIssue(userId, customerId) {
+  let products = null;
+  for (const id of await customersFor(userId, customerId, { strict: true })) {
+    for await (const sub of customerSubscriptions(id)) {
+      if (sub.status !== 'past_due' && sub.status !== 'unpaid') continue;
       const price = sub.items?.data?.[0]?.price;
       if (!products && mapStripePriceToTier(price?.id) === 'free') products = await goldProductIds();
       if (subscriptionTier(price, mapStripePriceToTier, products)) return true;
@@ -320,18 +389,40 @@ async function closeOpenCheckouts(userId, customerId) {
   }
 }
 
-// Checkout requests running, by account: each one's promise, which settles
-// when the request finishes. Two requests at once could otherwise both find
-// no plan and no open checkout before either opens one, and paying both would
-// start two subscriptions. The API runs as a single instance, which the crons
-// scheduled in index.js already count on, so a lock held in this process
-// covers every request. Requests for different accounts don't wait on each
-// other.
+// Two checkout requests for one account at once could both find no plan and
+// no open checkout before either opens one, and paying both would start two
+// subscriptions. So an account's requests take turns, in two layers. In this
+// process they queue, each waiting for the one before it, and requests for
+// different accounts don't wait on each other. Across instances, which
+// Railway runs side by side during a deploy and could run for good, the turn
+// is a row in app_state that only one request can insert. A request that
+// finds another instance holding it is turned away rather than kept waiting.
 const checkoutsRunning = new Map();
+const CHECKOUT_TURN_TTL_MS = 2 * 60 * 1000;
 
-// Waits until no other checkout request for this account is running, then
-// answers a function that ends this one's turn. The account's entry goes once
-// its last request finishes.
+// Takes the account's turn across instances, or answers null when another
+// instance holds it. A turn left by a request that died, say in a deploy, runs
+// out after two minutes and is cleared here. The answer is a function that
+// gives the turn back, and a turn this request no longer owns is left alone.
+// A database read or write that fails throws.
+async function takeSharedCheckoutTurn(userId) {
+  const key = `checkout_turn:${userId}`;
+  const now = Date.now();
+  const { error: clearError } = await supabase.from('app_state').delete().eq('key', key).lt('value->>until', new Date(now).toISOString());
+  if (clearError) throw new Error(`checkout turn clear failed: ${clearError.message}`);
+  const owner = crypto.randomUUID();
+  const { error } = await supabase.from('app_state').insert({ key, value: { until: new Date(now + CHECKOUT_TURN_TTL_MS).toISOString(), owner } });
+  if (error?.code === '23505') return null;
+  if (error) throw new Error(`checkout turn failed: ${error.message}`);
+  return async () => {
+    const { error: releaseError } = await supabase.from('app_state').delete().eq('key', key).eq('value->>owner', owner);
+    if (releaseError) console.warn('⚠️ [Stripe] Could not give back the checkout turn, it runs out on its own:', releaseError.message);
+  };
+}
+
+// Waits for the account's turn in this process, then takes it across
+// instances. Answers a function that ends the turn, or null when another
+// instance holds it. Throws when the database can't take it.
 async function checkoutTurn(userId) {
   const before = checkoutsRunning.get(userId);
   let finish;
@@ -340,9 +431,27 @@ async function checkoutTurn(userId) {
   });
   checkoutsRunning.set(userId, running);
   if (before) await before;
-  return () => {
+  const endHere = () => {
     finish();
     if (checkoutsRunning.get(userId) === running) checkoutsRunning.delete(userId);
+  };
+  let endShared;
+  try {
+    endShared = await takeSharedCheckoutTurn(userId);
+  } catch (e) {
+    endHere();
+    throw e;
+  }
+  if (!endShared) {
+    endHere();
+    return null;
+  }
+  return async () => {
+    try {
+      await endShared();
+    } finally {
+      endHere();
+    }
   };
 }
 
@@ -484,8 +593,11 @@ async function stripeWebhookHandler(req, res) {
 
           // A live subscription gives Gold only when it's to a Gold price or
           // product. A Gold product Stripe can't read throws, and the event
-          // comes again.
-          const live = subscription.status === 'active' || subscription.status === 'trialing';
+          // comes again. A past_due one is live: Gold stays, with status
+          // past_due, while Stripe retries the failed renewal, so the account
+          // isn't sent back to checkout to buy a second subscription. Unpaid,
+          // after the retries run out, ends it.
+          const live = liveSubscriptions([subscription]).length > 0;
           const price = subscription.items?.data?.[0]?.price;
           const goldNow = live && price?.id ? (await tierForSubscriptionPrice(price)) !== 'free' : false;
           let updateData;
@@ -543,6 +655,42 @@ async function stripeWebhookHandler(req, res) {
           }
           console.log(`✅ [Stripe Webhook] subscription.deleted: user=${profile.id}, now ${after.tier}`);
         }
+        break;
+      }
+
+      // A lifetime payment refunded in full, or under a chargeback, no longer
+      // gives lifetime, and one whose chargeback the seller won gives it
+      // back. The account's plan is worked out again from everything it
+      // holds: another plan in Stripe, then what the App Store still owes it,
+      // or free. A partial refund, an inquiry that isn't a chargeback yet, and
+      // a payment for anything but a lifetime checkout change nothing.
+      case 'charge.refunded':
+      case 'charge.dispute.created':
+      case 'charge.dispute.closed': {
+        const object = event.data.object;
+        const intentId = typeof object.payment_intent === 'string' ? object.payment_intent : object.payment_intent?.id;
+        const session = intentId ? await lifetimeCheckoutFor(intentId) : null;
+        if (!session) break;
+        // The checkout names its account. An older one that doesn't is found
+        // through its customer.
+        const named = session.client_reference_id || session.metadata?.user_id;
+        const sessionCustomer = typeof session.customer === 'string' ? session.customer : session.customer?.id;
+        let profile = null;
+        if (named && isUUID(named)) {
+          profile = profileRead(await supabase.from('profiles').select('id, subscription_tier, stripe_customer_id').eq('id', named).single());
+        } else if (sessionCustomer) {
+          profile = await profileForCustomer(sessionCustomer);
+        }
+        if (!profile) break;
+        const userId = profile.id || named;
+        const plan = await planWithoutLostLifetime(userId, profile.stripe_customer_id || sessionCustomer);
+        if ((profile.subscription_tier === 'lifetime') === (plan.tier === 'lifetime')) break;
+        const { error: updateError } = await supabase.from('profiles').update(profileFieldsFor(plan)).eq('id', userId);
+        if (updateError) {
+          console.error('❌ [Stripe Webhook] Failed to update profile:', updateError.message);
+          return res.status(500).send('Profile update failed');
+        }
+        console.log(`✅ [Stripe Webhook] ${event.type}: user=${userId}, lifetime payment ${plan.tier === 'lifetime' ? 'counts again' : 'no longer counts'}, now ${plan.tier}`);
         break;
       }
 
@@ -622,8 +770,17 @@ router.post('/create-checkout-session', async (req, res) => {
 
     // From the profile read to the new session, an account's requests run one
     // at a time, so a second request sees the first one's open checkout and
-    // closes it, or sees its plan and answers 409.
-    endTurn = await checkoutTurn(user_id);
+    // closes it, or sees its plan and answers 409. One that finds another
+    // instance opening a checkout for the account is turned away.
+    try {
+      endTurn = await checkoutTurn(user_id);
+    } catch (e) {
+      console.error('❌ [Stripe] Could not take the checkout turn:', e.message);
+      return res.status(500).json({ error: "Checkout didn't open. Try again in a moment." });
+    }
+    if (!endTurn) {
+      return res.status(409).json({ error: 'A checkout for this account is already opening. Try again in a moment.', reason: 'checkout_in_progress' });
+    }
 
     // The profile has no email column, so asking for one failed every time
     // and each checkout made a new Stripe customer. The profile is read for
@@ -633,7 +790,7 @@ router.post('/create-checkout-session', async (req, res) => {
     // customer id would have nowhere to be saved.
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('stripe_customer_id, subscription_tier')
+      .select('stripe_customer_id, subscription_tier, subscription_status')
       .eq('id', user_id)
       .single();
     if (profileError && profileError.code !== 'PGRST116') {
@@ -648,8 +805,10 @@ router.post('/create-checkout-session', async (req, res) => {
       }
     }
     // An account the profile already shows on Gold or Lifetime, from the App
-    // Store as much as the web, isn't sold a second plan.
+    // Store as much as the web, isn't sold a second plan. Gold kept while
+    // Stripe retries a failed renewal answers with the payment issue.
     if (profile?.subscription_tier === 'gold' || profile?.subscription_tier === 'lifetime') {
+      if (profile.subscription_tier === 'gold' && profile.subscription_status === 'past_due') return res.status(409).json(PAYMENT_ISSUE);
       return res.status(409).json({ error: 'This account already has Gold. You can manage it from Settings.' });
     }
 
@@ -657,15 +816,22 @@ router.post('/create-checkout-session', async (req, res) => {
     // purchases stay together. A new one is made only when there's none.
     let customerId = profile?.stripe_customer_id || (await customersFor(user_id, null))[0] || null;
 
-    // An account that already holds a live web plan isn't sold a second one.
-    // The check covers the customer checkout is about to use and every other
-    // one made for the account. A check that fails doesn't stop checkout.
+    // An account that already holds a live web plan isn't sold a second one,
+    // and neither is one whose Gold renewal failed, since that subscription
+    // bills again once the card works. The check covers the customer checkout
+    // is about to use and every other one made for the account. A check that
+    // fails doesn't stop checkout.
     if (customerId) {
+      let paymentIssue = false;
       let existing = null;
       try {
-        existing = await planForUser(user_id, customerId);
+        paymentIssue = await goldPaymentIssue(user_id, customerId);
+        if (!paymentIssue) existing = await planForUser(user_id, customerId);
       } catch (e) {
         console.warn('⚠️ [Stripe] Could not check for an existing plan:', e.message);
+      }
+      if (paymentIssue) {
+        return res.status(409).json(PAYMENT_ISSUE);
       }
       if (existing) {
         return res.status(409).json({ error: 'This account already has Gold. You can manage it from Settings.' });
@@ -701,18 +867,19 @@ router.post('/create-checkout-session', async (req, res) => {
       }
     }
 
-    // The free week is for an account's first Gold subscription. A check that
-    // fails gives the week, as checkout always did. A customer made just now
-    // has no history and no open checkouts.
+    // The free week is for an account's first Gold, on the web or the App
+    // Store. A check that fails gives the week, as checkout always did. A
+    // customer made just now has no Stripe history and no open checkouts, so
+    // only the App Store record is read for it.
     let firstGold = true;
-    if (hadCustomer) {
-      if (!isLifetime) {
-        try {
-          firstGold = !(await hadGoldBefore(user_id, customerId));
-        } catch (e) {
-          console.warn('⚠️ [Stripe] Could not check for an earlier subscription:', e.message);
-        }
+    if (!isLifetime) {
+      try {
+        firstGold = !(await hadGoldBefore(user_id, hadCustomer ? customerId : null));
+      } catch (e) {
+        console.warn('⚠️ [Stripe] Could not check for an earlier subscription:', e.message);
       }
+    }
+    if (hadCustomer) {
       await closeOpenCheckouts(user_id, customerId);
     }
 
@@ -753,7 +920,7 @@ router.post('/create-checkout-session', async (req, res) => {
     console.error('❌ [Stripe] Create checkout error:', error.message);
     return res.status(500).json({ error: error.message });
   } finally {
-    if (endTurn) endTurn();
+    if (endTurn) await endTurn();
   }
 });
 
