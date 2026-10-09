@@ -84,6 +84,19 @@ async function alreadyProcessed(sourceUrl) {
   return data && data.length > 0;
 }
 
+// Posts Gemini calls not relevant aren't saved, so alreadyProcessed can't see
+// them, and a post that stays on a hot list went back to Gemini every run.
+// Remember them for the life of the process instead. The cap keeps memory flat.
+const SKIPPED_LIMIT = 5000;
+const skippedUrls = new Set();
+
+function rememberSkipped(sourceUrl) {
+  if (skippedUrls.size >= SKIPPED_LIMIT) {
+    skippedUrls.delete(skippedUrls.values().next().value);
+  }
+  skippedUrls.add(sourceUrl);
+}
+
 /**
  * Save extracted intelligence to the troy_intelligence table.
  */
@@ -130,7 +143,7 @@ async function scrapeYouTubeChannels() {
           // Extract via Gemini
           const raw = await callGemini(MODELS.flash, EXTRACTION_PROMPT,
             `Source: ${channel.name} (YouTube)\nTitle: ${item.snippet?.title}\nTranscript:\n${transcript}`,
-            { temperature: 0.2, maxOutputTokens: 1024 });
+            { temperature: 0.2, maxOutputTokens: 1024, thinking: false });
 
           const extracted = parseExtraction(raw);
 
@@ -207,17 +220,20 @@ async function scrapeTwitterAccounts() {
 
       for (const tweet of (timeline.data?.data || [])) {
         const tweetUrl = `https://x.com/${handle}/status/${tweet.id}`;
-        if (await alreadyProcessed(tweetUrl)) continue;
+        if (skippedUrls.has(tweetUrl) || await alreadyProcessed(tweetUrl)) continue;
 
         // Extract via Gemini
         const raw = await callGemini(MODELS.flash, EXTRACTION_PROMPT,
           `Source: @${handle} (X/Twitter)\nTweet: ${tweet.text}`,
-          { temperature: 0.2, maxOutputTokens: 512 });
+          { temperature: 0.2, maxOutputTokens: 512, thinking: false });
 
         const extracted = parseExtraction(raw);
 
-        // Skip if not relevant to precious metals
-        if (extracted.summary?.includes('Not relevant')) continue;
+        // Skip if not relevant to precious metals, and don't ask again
+        if (extracted.summary?.includes('Not relevant')) {
+          rememberSkipped(tweetUrl);
+          continue;
+        }
 
         await saveIntelligence({
           source_type: 'twitter',
@@ -279,7 +295,7 @@ async function scrapeReddit() {
         if (!d || d.stickied) continue; // skip stickied posts
 
         const postUrl = `https://reddit.com${d.permalink}`;
-        if (await alreadyProcessed(postUrl)) continue;
+        if (skippedUrls.has(postUrl) || await alreadyProcessed(postUrl)) continue;
 
         const postContent = `${d.title}\n\n${(d.selftext || '').substring(0, 500)}`;
         if (postContent.length < 20) continue;
@@ -287,12 +303,15 @@ async function scrapeReddit() {
         // Extract via Gemini
         const raw = await callGemini(MODELS.flash, EXTRACTION_PROMPT,
           `Source: r/${sub} (Reddit)\nPost: ${postContent}`,
-          { temperature: 0.2, maxOutputTokens: 512 });
+          { temperature: 0.2, maxOutputTokens: 512, thinking: false });
 
         const extracted = parseExtraction(raw);
 
-        // Skip if not relevant
-        if (extracted.summary?.includes('Not relevant')) continue;
+        // Skip if not relevant, and don't ask Gemini about this post again
+        if (extracted.summary?.includes('Not relevant')) {
+          rememberSkipped(postUrl);
+          continue;
+        }
 
         await saveIntelligence({
           source_type: 'reddit',
@@ -359,6 +378,7 @@ module.exports = {
   scrapeTwitterAccounts,
   scrapeReddit,
   getTopIntelligence,
+  _skippedUrls: skippedUrls, // for tests
   YOUTUBE_CHANNELS,
   TWITTER_ACCOUNTS,
   REDDIT_SUBREDDITS,
