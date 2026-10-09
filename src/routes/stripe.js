@@ -581,7 +581,7 @@ router.post('/create-checkout-session', async (req, res) => {
     // plan, and the email comes from the account.
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('stripe_customer_id')
+      .select('stripe_customer_id, subscription_tier')
       .eq('id', user_id)
       .single();
     if (profileError && profileError.code !== 'PGRST116') {
@@ -590,6 +590,11 @@ router.post('/create-checkout-session', async (req, res) => {
     }
     if (!profile) {
       await supabase.from('profiles').upsert({ id: user_id }, { onConflict: 'id', ignoreDuplicates: true });
+    }
+    // An account the profile already shows on Gold or Lifetime, from the App
+    // Store as much as the web, isn't sold a second plan.
+    if (profile?.subscription_tier === 'gold' || profile?.subscription_tier === 'lifetime') {
+      return res.status(409).json({ error: 'This account already has Gold. You can manage it from Settings.' });
     }
 
     // A customer an earlier checkout made for this account is used again, so
