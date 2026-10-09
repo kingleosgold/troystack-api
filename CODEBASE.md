@@ -1195,11 +1195,11 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 - **Crons:** YouTube every 4h (`0 */4 * * *`), Twitter every 2h (`0 */2 * * *`), Reddit every 3h (`0 */3 * * *`)
 
 ### src/services/troy-context.js
-- **Purpose:** What Troy knows about today before anyone asks. Each metal's move since the last close (from `getSpotPrices().change`), the latest Stack Signal synthesis and the newest Signal headlines from `stack_signal_articles`, as one prompt block. Long dashes become commas and cut-off one-liners fall back to the commentary. Any part that fails is left out
-- **Exports:** `buildMarketBlock({ spot, signal, headlines })` (pure), `createMarketContext({ fetchSpot, db, now })`, `sharedMarketBlock()` (one cached instance for troy-ask and troy-chat), `plain()`, `usableOneLiner()`
-- **Cache:** 5 minutes, or 30 seconds when everything failed and the block is empty
+- **Purpose:** What Troy knows about today before anyone asks. Each metal's move since the last close (from `getSpotPrices().change`), the latest Stack Signal synthesis and the newest Signal headlines from `stack_signal_articles`, as one prompt block. Move lines carry no price, since each route's own part of the prompt already has spot, so the prompt never shows two prices for one metal. Long dashes become commas and cut-off one-liners fall back to the commentary. Any part that fails is left out
+- **Exports:** `buildMarketBlock({ spot, signal, headlines })` (pure), `createMarketContext({ fetchSpot, db, now })`, `sharedMarketBlock()` (one shared instance for troy-ask and troy-chat), `plain()`, `usableOneLiner()`
+- **Cache:** the moves are read with every question from the price cache (refreshed each minute by the price cron). The Signal and headline reads are kept 5 minutes, or 30 seconds when both failed. Questions that arrive during a read share it
 - **Tests:** `test/troy-context.test.js`
-- **Last modified:** 2026-10-08
+- **Last modified:** 2026-10-09
 
 ### src/services/comex-scraper.js
 - **Purpose:** Scrape COMEX warehouse inventory from CME XLS files
