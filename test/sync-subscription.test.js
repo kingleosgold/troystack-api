@@ -76,9 +76,13 @@ const fakeStripe = {
   },
   checkout: {
     sessions: {
-      list: async () => {
+      // Newest first, filtered by status and paged by starting_after, like Stripe.
+      list: async (params = {}) => {
         state.stripeCalls.push('checkout.sessions.list');
-        return { data: state.sessions };
+        let rows = state.sessions.filter((x) => !params.status || x.status === params.status);
+        if (params.starting_after) rows = rows.slice(rows.findIndex((x) => x.id === params.starting_after) + 1);
+        const page = rows.slice(0, params.limit || 10);
+        return { data: page, has_more: rows.length > page.length };
       },
     },
   },
@@ -385,4 +389,75 @@ test('verify-session records a Gold-product price as Gold and anything else as f
   res = fakeRes();
   await verifySession({ body: { session_id: 'cs_2' } }, res);
   assert.equal(res.body.tier, 'free');
+});
+
+test('a lifetime purchase behind a hundred newer checkouts is still found', async () => {
+  const newer = Array.from({ length: 150 }, (_, i) => ({ id: `cs_sub_${i}`, mode: 'subscription', status: 'complete', payment_status: 'paid' }));
+  reset({
+    sessions: [
+      ...newer,
+      { id: 'cs_abandoned', mode: 'payment', status: 'expired', payment_status: 'unpaid' },
+      { id: 'cs_life', mode: 'payment', status: 'complete', payment_status: 'paid', metadata: { tier: 'lifetime' }, payment_intent: 'pi_life' },
+    ],
+    charges: { pi_life: { refunded: false } },
+  });
+  const res = await sync();
+  assert.equal(res.body.subscription_tier, 'lifetime');
+  assert.equal(state.stripeCalls.filter((c) => c === 'checkout.sessions.list').length, 2, 'two pages of a hundred');
+});
+
+function webhookRes() {
+  const res = fakeRes();
+  res.send = function send(body) {
+    this.body = body;
+    return this;
+  };
+  return res;
+}
+
+function checkoutEvent(metadata) {
+  return {
+    type: 'checkout.session.completed',
+    data: { object: { client_reference_id: USER, subscription: 'sub_1', customer: 'cus_1', metadata } },
+  };
+}
+
+test("when the Gold product can't be read, a completed checkout keeps the tier this API gave it", async () => {
+  reset({
+    priceFails: true,
+    subscriptionById: { sub_1: { status: 'trialing', trial_end: 1760000000, items: { data: [{ price: { id: 'price_gold_promo', product: 'prod_gold' } }] } } },
+  });
+  const res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(checkoutEvent({ user_id: USER, tier: 'gold' }))) }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.updates[0].subscription_tier, 'gold');
+  assert.equal(state.updates[0].subscription_status, 'trialing');
+});
+
+test("without a recorded tier, an unreadable Gold product fails the webhook so Stripe sends it again", async () => {
+  reset({
+    priceFails: true,
+    subscriptionById: { sub_1: { status: 'active', items: { data: [{ price: { id: 'price_gold_promo', product: 'prod_gold' } }] } } },
+  });
+  const res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(checkoutEvent({ user_id: USER }))) }, res);
+  assert.equal(res.statusCode, 500);
+  assert.equal(state.updates.length, 0, 'free is never saved for it');
+});
+
+test("verify-session keeps the session's tier when the Gold product can't be read", async () => {
+  reset({
+    priceFails: true,
+    sessionToVerify: {
+      client_reference_id: USER,
+      customer: 'cus_1',
+      payment_status: 'no_payment_required',
+      metadata: { user_id: USER, tier: 'gold' },
+      subscription: { status: 'trialing', trial_end: 1760000000, items: { data: [{ price: { id: 'price_gold_promo', product: 'prod_gold' } }] } },
+    },
+  });
+  const res = fakeRes();
+  await verifySession({ body: { session_id: 'cs_1' } }, res);
+  assert.equal(res.body.tier, 'gold');
+  assert.equal(state.updates[0].subscription_tier, 'gold');
 });
