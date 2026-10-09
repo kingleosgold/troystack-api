@@ -416,6 +416,26 @@ test('a draft under 2,500 characters keeps the slot and publishes nothing', asyn
   assert.strictEqual(db.dailyCount, 4);
 });
 
+test('a tick that starts while the last run is still going writes nothing', async () => {
+  db.dailyCount = 4; // one slot open
+  clusterReply = JSON.stringify([
+    { theme: 'Perth Mint backlog tightens silver', importance: 80, article_indices: [2], suggested_angle: 'Mint backlog', category: 'silver', already_covered: false },
+  ]);
+  // The first run is still on its way when the next tick starts.
+  const first = ssp.runStackSignalPipeline();
+  const second = await ssp.runStackSignalPipeline();
+  const firstResult = await first;
+  assert.strictEqual(second.skipped, true);
+  assert.strictEqual(firstResult.synthesized, 1);
+  assert.strictEqual(savedFeedRows().length, 1);
+
+  // Once it's done, the next tick with a slot open runs as usual.
+  db.dailyCount = 4;
+  const fetchesBefore = calls.rss;
+  await ssp.runStackSignalPipeline();
+  assert.strictEqual(calls.rss, fetchesBefore + 1);
+});
+
 test('with nothing published yet, the prompt has no covered list or rule', async () => {
   db.dailyCount = 4;
   clusterReply = JSON.stringify([
