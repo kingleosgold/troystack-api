@@ -189,7 +189,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 - **Last modified:** 2026-10-09
 - **Checks:** `lib/stripe-checks.js` holds the sign-in, redirect, campaign and plan checks the routes use. The checkout webhook and verify-session leave a profile alone for a one-time checkout with no recorded tier that sold no lifetime Gold price.
 - **App Store plans that end:** `planAfterEnding` is handed to the RevenueCat webhook with `setWebPlanCheck`, so an App Store expiry or refund leaves a plan bought on the web in place.
-- **Sync:** GET /v1/sync-subscription answers the plan for a user. A free profile with a paid lifetime checkout that wasn't refunded in full or lost in a dispute, or a live subscription to a Gold price or product, gets its plan restored, since the iPhone app writes free when RevenueCat has nothing. Every completed checkout and every subscription is paged through, across every Stripe customer made for the account. A one-time checkout with no recorded tier counts only when its line items show the lifetime price or a one-time Gold price. Lifetime wins over a subscription. The answer changes only when the profile update succeeds.
+- **Sync:** GET /v1/sync-subscription answers the plan for a user. A free profile with a paid lifetime checkout that wasn't refunded in full or lost in a dispute, or a live subscription to a Gold price or product, gets its plan restored, since the iPhone app writes free when RevenueCat has nothing. Every completed checkout and every subscription is paged through, across every Stripe customer made for the account, found by search even when the profile has no customer id, which the profile then gets back. A one-time checkout with no recorded tier counts only when its line items show the lifetime price or a one-time Gold price. Lifetime wins over a subscription. The answer changes only when the profile update succeeds.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -197,7 +197,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | POST | /v1/stripe/create-checkout-session | Bearer (Supabase session, must match user_id) | Create Stripe checkout. The price must be a configured Gold price or another recurring price on the Gold product (sold as Gold), or it answers 400. Lifetime sells only at its configured price. An account that already holds a live web plan gets 409, checked on the customer checkout is about to use and every other one made for the account. A customer an earlier checkout made for the account (found by `metadata.supabase_user_id`) is used again, a new one carries the account's email, and checkout doesn't open if the customer id can't be saved. The 7-day trial is for the account's first Gold subscription only (one whose first payment never went through doesn't count), and the answer's `trial` says whether this checkout has it. Open checkouts on the account's customers are expired before a new one opens. The profile is read for `stripe_customer_id` only (it has no email column); a missing row gets a bare `{ id }` row. Redirect URLs must be on a TroyStack site; optional `campaign` is stored on the session and subscription |
 | POST | /v1/stripe/verify-session | Public (session id) | Verify checkout completion. Answers `{ success, tier, status }`, where `status` is `trialing` during a free week. A subscription that has ended or a lifetime payment that was refunded or lost in a dispute answers `success: false` and writes nothing |
 | POST | /v1/stripe/customer-portal | Bearer (Supabase session, must match user_id) | Stripe billing portal, opened on a customer with a subscription still billing (active, trialing, past_due or unpaid) so it can be cancelled even when lifetime sits on another customer, then on the customer that holds the account's plan; return_url must be on a TroyStack site |
-| GET | /v1/stripe/my-plan | Bearer (Supabase session) | The web plan Stripe holds for the signed-in account: `{ plan: 'gold' \| 'lifetime' \| null, status, trial_end }`. The iPhone app asks before it treats an account with no App Store plan as free. A failed profile lookup, Stripe not configured, a Gold price Stripe can't read, or a Stripe history longer than the 1,000 records it reads answers non-2xx, never `plan: null`. Never writes |
+| GET | /v1/stripe/my-plan | Bearer (Supabase session) | The web plan Stripe holds for the signed-in account: `{ plan: 'gold' \| 'lifetime' \| null, status, trial_end }`. The iPhone app asks before it treats an account with no App Store plan as free. A profile with no `stripe_customer_id` has the account's customers searched by `metadata.supabase_user_id`, and a search that finds none is kept ten minutes. A failed profile lookup, Stripe not configured, a failed search, a Gold price Stripe can't read, or a Stripe history longer than the 1,000 records it reads answers non-2xx, never `plan: null`. Never writes |
 | GET | /v1/sync-subscription | Public (UUID) | Sync subscription status |
 
 ### src/routes/revenuecat-webhook.js
@@ -211,7 +211,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | POST | /v1/webhooks/revenuecat | `Authorization` matching `REVENUECAT_WEBHOOK_SECRET` | RevenueCat purchase webhook |
 
 - Refuses every call with 503 when `REVENUECAT_WEBHOOK_SECRET` isn't set, and 401 when the header doesn't match. The header may carry the secret with or without `Bearer `.
-- INITIAL_PURCHASE, RENEWAL, PRODUCT_CHANGE (by `new_product_id`), UNCANCELLATION, NON_RENEWING_PURCHASE (the one-time lifetime) and SUBSCRIPTION_EXTENDED set the tier from the product, gold or lifetime. A subscription never replaces lifetime.
+- INITIAL_PURCHASE, RENEWAL, PRODUCT_CHANGE (by `new_product_id`), UNCANCELLATION, NON_RENEWING_PURCHASE (the one-time lifetime), SUBSCRIPTION_EXTENDED and REFUND_REVERSED set the tier from the product, gold or lifetime. A subscription never replaces lifetime, and a reversed refund for a subscription whose period has run out gives nothing back.
 - TEMPORARY_ENTITLEMENT_GRANT, sent when RevenueCat can't validate a purchase with the store, names no product. A profile without a plan gets gold with `subscription_status` `temporary_grant`, expiring a day after the event. The INITIAL_PURCHASE that follows a validation sets the real tier and status `active`, and an EXPIRATION ends a temporary grant whatever product it names.
 - CANCELLATION with `cancel_reason` CUSTOMER_SUPPORT is a refund and ends what was refunded now. Any other CANCELLATION only records the expiry date.
 - EXPIRATION leaves a lifetime profile alone and otherwise ends the App Store plan.
@@ -680,7 +680,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | **Yahoo Finance** | Primary spot prices (GC=F, SI=F futures) + ETF historical data | None (public) | price-fetcher.js, price-consensus.js, etf-prices.js |
 | **MetalPriceAPI** | Fallback spot prices (all 4 metals) + Pt/Pd supplement | `METAL_PRICE_API_KEY` | price-fetcher.js |
 | **Stripe** | Billing, subscriptions | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_GOLD_MONTHLY_PRICE_ID`, `STRIPE_GOLD_YEARLY_PRICE_ID`, `STRIPE_GOLD_LIFETIME_PRICE_ID` | stripe.js |
-| **RevenueCat** | iOS in-app purchase webhooks | `REVENUECAT_WEBHOOK_SECRET` | stripe.js |
+| **RevenueCat** | iOS in-app purchase webhooks | `REVENUECAT_WEBHOOK_SECRET` | revenuecat-webhook.js |
 | **Expo Push** | Mobile push notifications | None (expo-server-sdk) | push.js, index.js, stack-signal-push.js, comex-scraper.js, price-alert-checker.js |
 | **X (Twitter)** | Auto-tweet Stack Signal articles (@troystack_) | `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | auto-tweet.js |
 | **CME Group** | COMEX warehouse XLS reports | None (public URLs) | comex-scraper.js |
@@ -707,7 +707,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `STRIPE_GOLD_MONTHLY_PRICE_ID` | Yes | stripe.js | Stripe price ID for Gold monthly |
 | `STRIPE_GOLD_YEARLY_PRICE_ID` | Yes | stripe.js | Stripe price ID for Gold yearly |
 | `STRIPE_GOLD_LIFETIME_PRICE_ID` | Yes | stripe.js | Stripe price ID for Lifetime |
-| `REVENUECAT_WEBHOOK_SECRET` | No | stripe.js | RevenueCat webhook secret |
+| `REVENUECAT_WEBHOOK_SECRET` | Yes | revenuecat-webhook.js | RevenueCat webhook secret. Without it every RevenueCat event is refused. |
 | `INTELLIGENCE_API_KEY` | Yes | intelligence.js, push.js, vault-watch.js | Admin API key for cron triggers |
 | `APMEX_AFFILIATE_ID` | No | dealerScraper.js | APMEX affiliate partner ID (direct, `custid=` param) |
 | `JMB_AFFILIATE_ID` | No | dealerScraper.js | JM Bullion affiliate ID (direct, `ref=` param) |
