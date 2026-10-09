@@ -39,23 +39,39 @@ function isLifetimePrice(priceId) {
 
 // The products the Gold prices belong to, read from Stripe and kept for six
 // hours. A subscriber on an older Gold price still counts, and a subscription
-// to anything else in the account never does.
+// to anything else in the account never does. A failed read throws rather
+// than caching half the list, so nobody gets a confident answer from it.
+const GOLD_PRODUCT_TTL_MS = 6 * 60 * 60 * 1000;
 let goldProductCache = { at: 0, ids: new Set() };
 async function goldProductIds() {
-  if (goldProductCache.ids.size > 0 && Date.now() - goldProductCache.at < 6 * 60 * 60 * 1000) return goldProductCache.ids;
+  if (goldProductCache.ids.size > 0 && Date.now() - goldProductCache.at < GOLD_PRODUCT_TTL_MS) return goldProductCache.ids;
+  const configured = [STRIPE_GOLD_MONTHLY_PRICE_ID, STRIPE_GOLD_YEARLY_PRICE_ID, STRIPE_GOLD_LIFETIME_PRICE_ID].filter(Boolean);
+  if (configured.length === 0) throw new Error('No Gold prices are configured');
   const ids = new Set();
-  for (const priceId of [STRIPE_GOLD_MONTHLY_PRICE_ID, STRIPE_GOLD_YEARLY_PRICE_ID, STRIPE_GOLD_LIFETIME_PRICE_ID]) {
-    if (!priceId) continue;
-    try {
-      const price = await stripe.prices.retrieve(priceId);
-      const product = typeof price.product === 'string' ? price.product : price.product?.id;
-      if (product) ids.add(product);
-    } catch (e) {
-      console.warn(`⚠️ [Stripe] Could not read Gold price ${priceId}:`, e.message);
-    }
+  for (const priceId of configured) {
+    const price = await stripe.prices.retrieve(priceId);
+    const product = typeof price.product === 'string' ? price.product : price.product?.id;
+    if (product) ids.add(product);
   }
   goldProductCache = { at: Date.now(), ids };
   return ids;
+}
+
+function resetGoldProductCache() {
+  goldProductCache = { at: 0, ids: new Set() };
+}
+
+// The plan a subscription's price gives: a configured Gold price, or another
+// price on the Gold product. Anything else gives free.
+async function tierForSubscriptionPrice(price) {
+  const mapped = price?.id ? mapStripePriceToTier(price.id) : 'free';
+  if (mapped !== 'free') return mapped;
+  try {
+    return subscriptionTier(price, mapStripePriceToTier, await goldProductIds()) || 'free';
+  } catch (e) {
+    console.warn('⚠️ [Stripe] Could not read the Gold product:', e.message);
+    return 'free';
+  }
 }
 
 // What Stripe says a customer paid for, or null. Lifetime comes first, since
@@ -125,9 +141,9 @@ async function stripeWebhookHandler(req, res) {
         if (session.subscription) {
           try {
             const subscription = await stripe.subscriptions.retrieve(session.subscription);
-            const priceId = subscription.items?.data?.[0]?.price?.id;
-            if (priceId) {
-              tier = mapStripePriceToTier(priceId);
+            const price = subscription.items?.data?.[0]?.price;
+            if (price?.id) {
+              tier = await tierForSubscriptionPrice(price);
             }
             subscriptionStatus = subscription.status || 'active';
             if (subscription.trial_end) {
@@ -259,20 +275,26 @@ router.post('/create-checkout-session', async (req, res) => {
     }
     const campaign = cleanCampaign(req.body.campaign);
 
-    // Checkout only sells Gold. A price outside the Gold product would start a
-    // subscription the webhooks could mistake for Gold.
-    if (mapStripePriceToTier(price_id) === 'free') {
-      let product = null;
+    // Checkout only sells Gold, a configured Gold price or another price on the
+    // Gold product. Anything else is turned away, since a subscription to it
+    // could later be mistaken for Gold. Another Gold-product price is sold as
+    // lifetime when it's one-time and as Gold when it recurs.
+    let tier = mapStripePriceToTier(price_id);
+    let isLifetime = isLifetimePrice(price_id);
+    if (tier === 'free') {
+      let price = null;
       try {
-        const price = await stripe.prices.retrieve(price_id);
-        product = typeof price.product === 'string' ? price.product : price.product?.id;
+        price = await stripe.prices.retrieve(price_id);
       } catch {
         // an unknown price id
       }
+      const product = typeof price?.product === 'string' ? price.product : price?.product?.id;
       const products = await goldProductIds();
       if (!product || !products.has(product)) {
         return res.status(400).json({ error: 'That price is not a TroyStack Gold plan' });
       }
+      isLifetime = price.type === 'one_time';
+      tier = isLifetime ? 'lifetime' : 'gold';
     }
 
     // Look up user profile
@@ -310,9 +332,6 @@ router.post('/create-checkout-session', async (req, res) => {
         .update({ stripe_customer_id: customerId })
         .eq('id', user_id);
     }
-
-    const tier = mapStripePriceToTier(price_id);
-    const isLifetime = isLifetimePrice(price_id);
 
     const sessionParams = {
       mode: isLifetime ? 'payment' : 'subscription',
@@ -385,9 +404,9 @@ router.post('/verify-session', async (req, res) => {
     let trialEnd = null;
 
     if (subscription) {
-      const priceId = subscription.items?.data?.[0]?.price?.id;
-      if (priceId) {
-        tier = mapStripePriceToTier(priceId);
+      const price = subscription.items?.data?.[0]?.price;
+      if (price?.id) {
+        tier = await tierForSubscriptionPrice(price);
       }
       subscriptionStatus = subscription.status || 'active';
       if (subscription.trial_end) {
@@ -475,7 +494,8 @@ router.get('/my-plan', async (req, res) => {
   try {
     const auth = await signedInUserId(req, supabase);
     if (auth.error) return res.status(auth.status).json({ error: auth.error });
-    if (!stripe) return res.json({ plan: null, status: null, trial_end: null });
+    // Without Stripe the plan can't be checked, which is not the same as none.
+    if (!stripe) return res.status(503).json({ error: 'Could not check the web plan' });
 
     const { data: profile, error } = await supabase
       .from('profiles')
@@ -672,3 +692,4 @@ async function revenueCatWebhookHandler(req, res) {
 module.exports = router;
 module.exports.stripeWebhookHandler = stripeWebhookHandler;
 module.exports.revenueCatWebhookHandler = revenueCatWebhookHandler;
+module.exports.resetGoldProductCache = resetGoldProductCache;
