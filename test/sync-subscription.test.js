@@ -18,6 +18,7 @@ const state = {
   charges: {},
   profileError: null,
   stripeCalls: [],
+  appState: {},
 };
 
 function reset(over = {}) {
@@ -42,10 +43,31 @@ function reset(over = {}) {
     searchFails: false,
     upserts: [],
     expired: [],
+    createdCustomer: undefined,
+    // The profile upsert fails with this error.
+    upsertError: null,
+    // A profile update matches no row, as when the row is gone.
+    updateNoRow: false,
+    // app_state values by key, where the RevenueCat webhook keeps its purchase record.
+    appState: {},
   }, over);
   router.resetGoldProductCache();
   router.resetCustomerSearchCache();
 }
+
+const appStateTable = {
+  select() {
+    return {
+      eq: (_col, key) => ({
+        maybeSingle: async () => ({ data: Object.hasOwn(state.appState, key) ? { value: state.appState[key] } : null, error: null }),
+      }),
+    };
+  },
+  upsert: async (row) => {
+    state.appState[row.key] = row.value;
+    return { error: null };
+  },
+};
 
 const fakeSupabase = {
   auth: {
@@ -54,7 +76,8 @@ const fakeSupabase = {
       getUserById: async (id) => ({ data: { user: { id, email: 'a@example.com' } }, error: null }),
     },
   },
-  from() {
+  from(table) {
+    if (table === 'app_state') return appStateTable;
     return {
       select() {
         return {
@@ -78,14 +101,25 @@ const fakeSupabase = {
       },
       update(values) {
         return {
-          eq: async () => {
+          // Awaited on its own it answers { error }. With .select() it also
+          // answers the rows it changed: the one profile unless it holds a
+          // different value, and none when updateNoRow is set.
+          eq: (col, val) => {
             state.updates.push(values);
-            return { error: state.updateError };
+            const p = state.profile;
+            const rows = !state.updateNoRow && p && (p[col] === undefined || p[col] === val) ? [{ ...p, ...values }] : [];
+            return {
+              then: (resolve, reject) => Promise.resolve({ error: state.updateError }).then(resolve, reject),
+              select: async () => (state.updateError ? { data: null, error: state.updateError } : { data: rows, error: null }),
+            };
           },
         };
       },
       upsert: async (values) => {
         state.upserts.push(values);
+        if (state.upsertError) return { error: state.upsertError };
+        // A missing row is made, as the database would make it.
+        if (!state.profile) state.profile = { ...values };
         return { error: null };
       },
     };
@@ -716,6 +750,27 @@ test("checkout doesn't open when the new customer id can't be saved", async () =
   assert.equal(state.created, undefined);
 });
 
+test("checkout doesn't open, and makes nothing in Stripe, when a missing profile row can't be made", async () => {
+  reset({ profile: null, upsertError: { message: 'connection reset' } });
+  const res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 500);
+  assert.deepEqual(res.body, { error: "Checkout didn't open. Try again in a moment." });
+  assert.deepEqual(state.upserts, [{ id: USER }]);
+  assert.deepEqual(state.stripeCalls, [], 'no search, no customer and no session');
+  assert.equal(state.createdCustomer, undefined);
+  assert.equal(state.created, undefined);
+});
+
+test("checkout doesn't open when the customer id saves to no row", async () => {
+  reset({ profile: { stripe_customer_id: null }, updateNoRow: true });
+  const res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 500);
+  assert.deepEqual(res.body, { error: "Checkout didn't open. Try again in a moment." });
+  assert.deepEqual(state.updates, [{ stripe_customer_id: 'cus_new' }]);
+  assert.ok(!state.stripeCalls.includes('checkout.sessions.create'));
+  assert.equal(state.created, undefined);
+});
+
 test('an App Store expiry keeps a web plan Stripe still holds', async () => {
   const before = process.env.REVENUECAT_WEBHOOK_SECRET;
   process.env.REVENUECAT_WEBHOOK_SECRET = 'rc-test-secret';
@@ -740,6 +795,28 @@ test('an App Store expiry keeps a web plan Stripe still holds', async () => {
     await router.revenueCatWebhookHandler(expiry, failed);
     assert.equal(failed.statusCode, 500);
     assert.equal(state.updates.length, 0);
+  } finally {
+    if (before == null) delete process.env.REVENUECAT_WEBHOOK_SECRET;
+    else process.env.REVENUECAT_WEBHOOK_SECRET = before;
+  }
+});
+
+test('an App Store expiry for a profile with no customer id finds a web plan by search and keeps Gold', async () => {
+  const before = process.env.REVENUECAT_WEBHOOK_SECRET;
+  process.env.REVENUECAT_WEBHOOK_SECRET = 'rc-test-secret';
+  try {
+    reset({
+      profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: null },
+      customers: [{ id: 'cus_old', metadata: { supabase_user_id: USER } }],
+      subscriptions: [{ id: 'sub_web', customer: 'cus_old', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+    });
+    const res = fakeRes();
+    await router.revenueCatWebhookHandler({ headers: { authorization: 'Bearer rc-test-secret' }, body: { event: { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly' } } }, res);
+    assert.equal(res.statusCode, 200);
+    assert.ok(state.stripeCalls.includes('customers.search'));
+    assert.equal(state.updates.length, 1);
+    assert.equal(state.updates[0].subscription_tier, 'gold');
+    assert.equal(state.updates[0].subscription_status, 'active');
   } finally {
     if (before == null) delete process.env.REVENUECAT_WEBHOOK_SECRET;
     else process.env.REVENUECAT_WEBHOOK_SECRET = before;
