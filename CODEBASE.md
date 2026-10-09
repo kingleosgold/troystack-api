@@ -451,7 +451,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `0 23 * * *` | 6:00 PM | COMEX vault data scrape | comex-scraper.js `scrapeComexVaultData()` |
 | `* * * * *` | Every 60s | Price fetch + cache update + price_log write (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 60s (decimated later) |
 | `*/5 * * * *` | Every 5 min | Price alert checker | price-alert-checker.js `checkPriceAlerts()` |
-| `*/15 * * * *` | Every 15 min | Stack Signal article pipeline (~41 feeds, signal scoring, max 5/run) | stack-signal-processor.js `runStackSignalPipeline()` |
+| `*/15 * * * *` | Every 15 min | Stack Signal article pipeline (~41 feeds, signal scoring, max 5 scored per run, one article per open slot, 8 slots a day every 3 hours from 00:00 UTC) | stack-signal-processor.js `runStackSignalPipeline()` |
 | `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis → podcast episode hook (TTS flagship → troy-podcast bucket → podcast_episodes) → catch-up sweep healing the last 3 days' missed/failed episodes; each in its own try/catch, never breaks the article publish | stack-signal-processor.js `generateStackSignal()` + podcast.js `generateEpisode()` / `sweepRecentEpisodes()` |
 | `30 21 * * 1-5` | 4:30 PM (weekdays) | Stack Signal evening digest | `generateStackSignal('evening')` |
 | `0 22 * * 5` | 5:00 PM (Fri) | Weekly recap | `generateStackSignal('weekly_recap')` |
@@ -762,21 +762,18 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 
 ## 8. Stack Signal
 
-### Article Pipeline (every 2 hours)
-1. `rss-fetcher.js` fetches from 8 RSS feeds (Kitco, Seeking Alpha, Mining.com, Reuters, Zero Hedge, Yahoo Finance, Google News)
-2. Deduplicates against existing articles in DB (by URL)
-3. Clusters related articles via Gemini
+### Article Pipeline (cron every 15 min, one article per open slot)
+0. **Slots:** the day's 8 feed articles (`DAILY_CAP`, counted in app_state `commentary_daily_count` by UTC date) open one at a time, every 3 hours from 00:00 UTC (`slotsOpenAt()`). A slot nobody used stays open, a run writes at most one article (`MAX_PER_RUN`), and articles go out at least 90 minutes apart (`MIN_GAP_MS`, from the newest feed article). A run with no open slot, or inside the gap, stops before fetching or any model call. A failed read of the count or of recent feed articles stops the run, and a failed save of the count publishes nothing.
+1. `rss-fetcher.js` fetches from the RSS feeds (Kitco, Seeking Alpha, Mining.com, Reuters, Zero Hedge, Yahoo Finance, Google News), keeping items dated in the last 24 hours. Items with no date or a date that doesn't parse are left out
+2. Deduplicates against articles from the last 7 days by source URL and exact title (the whole-table read hit the API's 1,000-row cap), then drops links in app_state `stack_signal_passed`. The top 5 by `signal_score` go on to scoring
+3. Clusters related articles via Gemini, given the titles of feed articles from the last 24 hours. Articles on the same story share a cluster, and a story only one article covers can stand alone. A cluster that only repeats one of the recent stories comes back with `already_covered: true` and isn't written. A `[]` reply means nothing new. If clustering fails while there are recent titles, the run writes nothing rather than fall back to the top article
+   - **Set aside:** `stack_signal_passed` holds links with the time each can come back (newest 400). Every scored article that isn't in a fresh cluster (covered, scored under 50, or used by no cluster) waits 24 hours, so the same five headlines can't hold the pool every run. After a failed clustering call the run's articles wait an hour. Fresh clusters that missed the run's one slot stay in play. A failed read of that list skips the write so it isn't wiped
 4. **Feed articles:** `writeFeedReaction()` (Gemini Flash) writes 400-800 word feed articles with depth requirements (historical context, physical market connection, purchasing power framing, forward-looking close)
-   - Save guard filters articles with `troy_commentary.length < 2500` chars
+   - A draft under 2,500 chars (`MIN_ARTICLE_CHARS`) is skipped before it's counted, so it doesn't use the slot, and the save guard drops anything shorter as before
 5. Generates/assigns image (DALL-E gated by `USE_DALLE = false` flag; pool fallback)
-6. Saves feed articles to `stack_signal_articles` table (`is_stack_signal=false`) including pre-generated `tweet_text`. After each successful save, `enqueueTweet()` inserts into `tweet_queue` with scheduled_for time (urgent = now, normal = 20-90 min delay, batch-spaced 15 min apart). Tweets drip out via the `processTweetQueue()` cron every 5 min.
-7. Sends push notification if score ≥85 (via stack-signal-push.js)
-8. **Claude daily synthesis editorial** — `generateClaudeDailySynthesis()` runs opportunistically at the end of every pipeline cycle:
-   - Deduped by date (EST): only one synthesis per day (`is_stack_signal=true AND category='synthesis'`)
-   - Requires ≥ 3 feed articles saved for today; otherwise skips
-   - Gathers today's feed articles and builds a pseudo-cluster passed to `writeSynthesisArticle()` (Claude Sonnet, 1500-2500 words, 6-8 paragraphs)
-   - Saves with distinct title `The Stack Signal: <Month Day, Year>`, `is_stack_signal=true`, `category='synthesis'`, `relevance_score=95`
-   - After save, `enqueueTweet()` inserts into tweet_queue (scheduled as urgent, signal_score 95)
+6. Saves feed articles to `stack_signal_articles` table (`is_stack_signal=false`). Tweet text and the `tweet_queue` entry happen only while `X_DISTRIBUTION_ENABLED` is true, and it's false, so neither runs today
+7. Calls `maybePushStackSignalAlert()` for the top article scored 85+, which returns at once while pushes are disabled in stack-signal-push.js
+8. **Claude daily synthesis editorial, off.** `generateClaudeDailySynthesis()` no longer runs from the pipeline. It couldn't save, because `stack_signal_articles_category_check` doesn't allow `category='synthesis'`, so each night paid for up to three Sonnet drafts that were thrown away. The 6:15 AM flagship and the weekday evening edition cover the day. The function stays exported for a manual run, and turning it back on needs `synthesis` added to that check first.
 
 ### Synthesis Types
 - **daily** (6:15 AM EST): Morning market digest
