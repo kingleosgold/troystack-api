@@ -125,6 +125,22 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | POST | /v1/troy/transcribe | Public (UUID) | STT via OpenAI Whisper — multipart audio upload, voice cap |
 | GET | /v1/podcast/feed.xml | Public | Podcast RSS feed for "The Stack Signal: Daily Gold & Silver Brief" — RSS 2.0 + iTunes tags from `podcast_episodes`, 10-min in-memory cache. Lives in `src/routes/podcast.js` |
 
+Troy's fixed persona and knowledge prompt sections live in `src/services/troy-prompt.js` (`TROY_PERSONA`, `TROY_KNOWLEDGE`), shared with the visitor chat below. They were moved there byte for byte.
+
+### src/routes/troy-ask.js
+- **Purpose:** Troy for visitors on troystack.ai who haven't signed in. Single answers, no saved history; the page sends back the last few turns for context
+- **Exports:** `createTroyAskRouter({ llm, getPrices, getIntel, now, env })`, `cleanHistory()`, `visitorBlock()`
+- **Dependencies:** troy-llm, troy-prompt, daily-budget, price-fetcher, intelligence-scraper (wired in index.js)
+- **Last modified:** 2026-10-08
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | /v1/troy/ask | Public (per-visitor cap) | `{ message (max 500), history? [{role, content}] }` returns `{ reply, questionsUsed, questionsLimit, resetsAt }`. 429 past the cap, 503 when the daily budget is spent or no model is set, 502 when the model fails |
+| GET | /v1/troy/ask/status | Public | `{ questionsUsed, questionsLimit, resetsAt }` for the calling visitor |
+
+- Visitors are keyed by IP the way the public limiter keys them, `TROY_ASK_LIMIT` answers (default 3) per rolling 24 hours. A failed or empty answer hands the question back.
+- `TROY_ASK_DAILY_BUDGET` (default 200) caps answers across all visitors per UTC day. Both counters are in memory and reset on restart.
+
 **Key functions:**
 - `detectPreviewContent(response, contextData)` — returns preview type: portfolio, purchasing_power, cost_basis, chart (ratio/spot_price), dealer_link
 - `sanitizeTTSText(text)` — preprocesses text for natural TTS: markdown removal, abbreviation expansion, number-to-words conversion, slash patterns, acronyms, URL removal
@@ -164,7 +180,8 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 
 ### src/routes/push.js
 - **Purpose:** Push notification management, price alerts, notification preferences, audit
-- **Exports:** Router + `sendPush()`, `sendBatchPush()`, `isValidExpoPushToken()`
+- **Exports:** Router + `sendPush()`, `sendBatchPush()`, `isValidExpoPushToken()`, `isDeviceId()`
+- **Id checks:** price alert routes refuse a `device_id` outside `[A-Za-z0-9_-]{1,100}` and an alert `id` that isn't a UUID, since the values go into PostgREST `or()` filters. `price-alert-checker.js` applies the same checks before it looks up a push token.
 - **Dependencies:** expo-server-sdk, supabase
 - **Last modified:** 2026-04-07
 
@@ -413,6 +430,7 @@ Auth model: shared secret via `ADMIN_AUTH_KEY` env var (compared verbatim agains
 
 ### CORS (in index.js)
 - Allowed origins: `troystack.ai` (root, www), `stacktrackergold.com` (root, www, app — legacy), `localhost:5173`, `localhost:3000`
+- Vercel previews of troystack-webapp (`https://troystack-webapp-*-jon-5842s-projects.vercel.app`) so a pull request's preview can read the API
 - LLM discovery endpoints use open CORS
 - Mobile apps, curl, server-to-server allowed (no origin)
 
@@ -699,6 +717,8 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `X_CONSUMER_SECRET` | No | auto-tweet.js | X (Twitter) API consumer secret |
 | `X_ACCESS_TOKEN` | No | auto-tweet.js | X (Twitter) API access token |
 | `X_ACCESS_SECRET` | No | auto-tweet.js | X (Twitter) API access secret |
+| `TROY_ASK_LIMIT` | No (default 3) | routes/troy-ask.js | Visitor answers per rolling 24 hours |
+| `TROY_ASK_DAILY_BUDGET` | No (default 200) | routes/troy-ask.js | Visitor answers across everyone per UTC day |
 
 ---
 

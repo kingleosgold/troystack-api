@@ -23,6 +23,9 @@ const snapshotsRouter = require('./routes/snapshots');
 const scanUsageRouter = require('./routes/scan-usage');
 const minVersionRouter = require('./routes/min-version');
 const troyChatRouter = require('./routes/troy-chat');
+const { createTroyAskRouter } = require('./routes/troy-ask');
+const troyLlm = require('./services/troy-llm');
+const { getTopIntelligence } = require('./services/intelligence-scraper');
 const stackSignalRouter = require('./routes/stack-signal');
 const socialRouter = require('./routes/social');
 const dealerPricesRouter = require('./routes/dealerPrices');
@@ -33,7 +36,7 @@ const adminEngagementRouter = require('./routes/admin-engagement');
 const { apiKeyAuth } = require('./middleware/api-key-auth');
 const { handleMcp } = require('./routes/mcp');
 
-const { initPriceFetcher, fetchLiveSpotPrices, areMarketsClosed } = require('./services/price-fetcher');
+const { initPriceFetcher, fetchLiveSpotPrices, areMarketsClosed, getCachedPrices, getSpotPrices } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
 
 const app = express();
@@ -62,11 +65,15 @@ const ALLOWED_ORIGINS = [
   'http://localhost:3000',
 ];
 
+// Vercel previews of the web app, so a pull request's preview reads the API
+// the way troystack.ai does. Scoped to the troystack-webapp project.
+const PREVIEW_ORIGIN = /^https:\/\/troystack-webapp-[a-z0-9-]+-jon-5842s-projects\.vercel\.app$/;
+
 const corsOptions = {
   origin: (origin, callback) => {
     // Allow requests with no origin (mobile apps, curl, server-to-server)
     if (!origin) return callback(null, true);
-    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    if (ALLOWED_ORIGINS.includes(origin) || PREVIEW_ORIGIN.test(origin)) return callback(null, true);
     callback(new Error('Not allowed by CORS'));
   },
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -188,6 +195,18 @@ app.use('/', openCors, legalRouter);
 
 // Minimum app version check — no auth, no rate limit
 app.use('/v1/min-version', minVersionRouter);
+
+// Troy for visitors on troystack.ai who haven't signed in: capped per
+// visitor and by a daily budget (see routes/troy-ask.js)
+app.use('/v1/troy', publicLimiter, createTroyAskRouter({
+  llm: troyLlm,
+  getPrices: async () => {
+    const cached = getCachedPrices() || {};
+    if (cached.gold && cached.silver) return cached;
+    return (await getSpotPrices()).prices;
+  },
+  getIntel: () => getTopIntelligence(8),
+}));
 
 // Troy Chat — persistent conversations (mobile app sends userId)
 app.use('/v1/troy', publicLimiter, troyChatRouter);
