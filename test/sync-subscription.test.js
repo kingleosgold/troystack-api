@@ -952,3 +952,12 @@ test('a one-time checkout gives nothing until its payment has gone through', asy
   assert.equal(res.statusCode, 200);
   assert.equal(state.updates[0].subscription_tier, 'lifetime');
 });
+
+test('an account whose profile already shows Gold from the App Store is not sold another plan', async () => {
+  for (const tier of ['gold', 'lifetime']) {
+    reset({ profile: { stripe_customer_id: null, subscription_tier: tier } });
+    const res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 409, tier);
+    assert.equal(state.created, undefined);
+  }
+});
