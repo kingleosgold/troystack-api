@@ -753,7 +753,9 @@ router.post('/verify-session', async (req, res) => {
     }
 
     console.log(`✅ [Stripe Verify] Session verified: user=${userId}, tier=${tier}, status=${subscriptionStatus}`);
-    return res.json({ success: true, tier });
+    // The status tells the page whether a free week started, since only an
+    // account's first Gold subscription gets one.
+    return res.json({ success: true, tier, status: subscriptionStatus });
 
   } catch (error) {
     console.error('❌ [Stripe Verify] Error:', error.message);
