@@ -13,6 +13,13 @@ function isUUID(str) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 }
 
+// Device ids are Expo install ids (UUIDs) or the app's own anon-<ms> fallback.
+// The value goes into a PostgREST or() filter, where a comma, a dot or a
+// parenthesis would change the query itself, so anything else is refused.
+function isDeviceId(str) {
+  return typeof str === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(str);
+}
+
 function isValidExpoPushToken(token) {
   return typeof token === 'string' && (token.startsWith('ExponentPushToken[') || token.startsWith('ExpoPushToken['));
 }
@@ -232,6 +239,12 @@ router.post('/price-alerts', async (req, res) => {
     if (!userId && !device_id) {
       return res.status(400).json({ success: false, error: 'Either userId or device_id is required' });
     }
+    if (device_id && !isDeviceId(device_id)) {
+      return res.status(400).json({ success: false, error: 'Invalid device_id' });
+    }
+    if (id !== undefined && id !== null && !isUUID(String(id))) {
+      return res.status(400).json({ success: false, error: 'id must be a valid UUID' });
+    }
 
     const row = {
       metal,
@@ -275,6 +288,9 @@ router.get('/price-alerts', async (req, res) => {
     if (user_id && !isUUID(user_id)) {
       return res.status(400).json({ success: false, error: 'user_id must be a valid UUID' });
     }
+    if (device_id && !isDeviceId(device_id)) {
+      return res.status(400).json({ success: false, error: 'Invalid device_id' });
+    }
 
     let query = supabase.from('price_alerts').select('*');
     const orConditions = [];
@@ -300,6 +316,9 @@ router.get('/price-alerts', async (req, res) => {
 router.patch('/price-alerts/:id', async (req, res) => {
   try {
     const alertId = req.params.id;
+    if (!isUUID(alertId)) {
+      return res.status(400).json({ success: false, error: 'id must be a valid UUID' });
+    }
     const { enabled, metal, targetPrice, direction } = req.body;
 
     const updates = { updated_at: new Date().toISOString() };
@@ -336,6 +355,9 @@ router.patch('/price-alerts/:id', async (req, res) => {
 router.delete('/price-alerts/:id', async (req, res) => {
   try {
     const alertId = req.params.id;
+    if (!isUUID(alertId)) {
+      return res.status(400).json({ success: false, error: 'id must be a valid UUID' });
+    }
 
     const { error } = await supabase
       .from('price_alerts')
@@ -364,6 +386,9 @@ router.delete('/price-alerts', async (req, res) => {
     }
     if (user_id && !isUUID(user_id)) {
       return res.status(400).json({ success: false, error: 'user_id must be a valid UUID' });
+    }
+    if (device_id && !isDeviceId(device_id)) {
+      return res.status(400).json({ success: false, error: 'Invalid device_id' });
     }
 
     let query = supabase.from('price_alerts').delete();
@@ -599,3 +624,4 @@ module.exports = router;
 module.exports.sendPush = sendPush;
 module.exports.sendBatchPush = sendBatchPush;
 module.exports.isValidExpoPushToken = isValidExpoPushToken;
+module.exports.isDeviceId = isDeviceId;
