@@ -200,8 +200,8 @@ Troy's fixed persona and knowledge prompt sections live in `src/services/troy-pr
 | GET | /v1/push/audit-user-ids | Admin (INTELLIGENCE_API_KEY) | Scan tables for non-UUID user_id contamination |
 
 ### src/routes/stripe.js
-- **Purpose:** Stripe billing + RevenueCat iOS subscription webhooks
-- **Exports:** Router + `stripeWebhookHandler`, `revenueCatWebhookHandler`
+- **Purpose:** Stripe billing
+- **Exports:** Router + `stripeWebhookHandler`, and `revenueCatWebhookHandler` passed through from revenuecat-webhook.js for index.js
 - **Dependencies:** stripe SDK, supabase
 - **Last modified:** 2026-02-23
 
@@ -211,7 +211,24 @@ Troy's fixed persona and knowledge prompt sections live in `src/services/troy-pr
 | POST | /v1/stripe/create-checkout-session | Public (UUID) | Create Stripe checkout |
 | POST | /v1/stripe/verify-session | Public (UUID) | Verify checkout completion |
 | GET | /v1/sync-subscription | Public (UUID) | Sync subscription status |
-| POST | /v1/webhooks/revenuecat | Signature | RevenueCat iOS purchase webhook |
+
+### src/routes/revenuecat-webhook.js
+- **Purpose:** App Store purchases from RevenueCat land on profiles. Once migration 006 is on, this is the only way an App Store plan reaches profiles.
+- **Exports:** `revenueCatWebhookHandler`, plus `applyEvent`, `mapProductToTier` and `authorized` for tests
+- **Dependencies:** supabase
+- **Last modified:** 2026-10-09
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | /v1/webhooks/revenuecat | `Authorization` matching `REVENUECAT_WEBHOOK_SECRET` | RevenueCat purchase webhook |
+
+- Refuses every call with 503 when `REVENUECAT_WEBHOOK_SECRET` isn't set, and 401 when the header doesn't match. The header may carry the secret with or without `Bearer `.
+- INITIAL_PURCHASE, RENEWAL, PRODUCT_CHANGE (by `new_product_id`), UNCANCELLATION, NON_RENEWING_PURCHASE (the one-time lifetime), SUBSCRIPTION_EXTENDED and TEMPORARY_ENTITLEMENT_GRANT set the tier from the product, gold or lifetime. A subscription never replaces lifetime.
+- CANCELLATION with `cancel_reason` CUSTOMER_SUPPORT is a refund and ends what was refunded now. Any other CANCELLATION only records the expiry date.
+- EXPIRATION writes free unless the profile is lifetime.
+- BILLING_ISSUE changes nothing during Apple's grace period. TRANSFER is logged and not applied, since settling it needs RevenueCat's REST API and a secret key the API doesn't hold.
+- Unknown products, anonymous and non-UUID ids, and accounts with no profile are skipped with 200. A failed profile read or write answers 500 so RevenueCat retries.
+- Sandbox events are applied, because App Review buys in the sandbox.
 
 ### src/routes/stack-signal.js
 - **Purpose:** Stack Signal curated news articles
@@ -477,7 +494,10 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `id` (UUID, PK) — Supabase auth user ID
 - `subscription_tier` (text) — free, gold, lifetime
 - `stripe_customer_id` (text)
+- Also `display_name`, `revenucat_user_id`, `subscription_status`, `subscription_expires_at`, `trial_end`, `created_at`, `updated_at`. There is no email column; email lives in `auth.users`.
 - Used by: stripe.js, intelligence.js, troy-chat.js, stack-signal-push.js
+- RLS has one policy, "Users can view own profile", FOR ALL to public USING (auth.uid() = id). A signed-in user can read and write their own row with the public key.
+- Plan guard, `migrations/006_profiles_billing_guard.sql`. A BEFORE INSERT OR UPDATE trigger, `profiles_keep_plan`, keeps `subscription_tier`, `subscription_status`, `subscription_expires_at`, `trial_end` and `stripe_customer_id` as they were on any write from an `anon` or `authenticated` session, and sets them to free and empty on such an insert. The service role, which the API and the RevenueCat and Stripe webhooks use, and the SQL editor are unaffected. The iPhone app's own plan sync writes with the user's session, so once the guard is on those writes leave the plan alone and App Store plans arrive only through the RevenueCat webhook. That webhook has to handle lifetime purchases and retry on failure before the guard goes on, which revenuecat-webhook.js does. Rollback is `drop trigger profiles_keep_plan on public.profiles;`. It runs in the Supabase SQL editor on Jon's sentence.
 
 ### holdings
 - `id` (UUID, PK), `user_id` (UUID, FK→profiles)
@@ -674,7 +694,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | **Yahoo Finance** | Primary spot prices (GC=F, SI=F futures) + ETF historical data | None (public) | price-fetcher.js, price-consensus.js, etf-prices.js |
 | **MetalPriceAPI** | Fallback spot prices (all 4 metals) + Pt/Pd supplement | `METAL_PRICE_API_KEY` | price-fetcher.js |
 | **Stripe** | Billing, subscriptions | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_GOLD_MONTHLY_PRICE_ID`, `STRIPE_GOLD_YEARLY_PRICE_ID`, `STRIPE_GOLD_LIFETIME_PRICE_ID` | stripe.js |
-| **RevenueCat** | iOS in-app purchase webhooks | `REVENUECAT_WEBHOOK_SECRET` | stripe.js |
+| **RevenueCat** | iOS in-app purchase webhooks | `REVENUECAT_WEBHOOK_SECRET` | revenuecat-webhook.js |
 | **Expo Push** | Mobile push notifications | None (expo-server-sdk) | push.js, index.js, stack-signal-push.js, comex-scraper.js, price-alert-checker.js |
 | **X (Twitter)** | Auto-tweet Stack Signal articles (@troystack_) | `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | auto-tweet.js |
 | **CME Group** | COMEX warehouse XLS reports | None (public URLs) | comex-scraper.js |
@@ -701,7 +721,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `STRIPE_GOLD_MONTHLY_PRICE_ID` | Yes | stripe.js | Stripe price ID for Gold monthly |
 | `STRIPE_GOLD_YEARLY_PRICE_ID` | Yes | stripe.js | Stripe price ID for Gold yearly |
 | `STRIPE_GOLD_LIFETIME_PRICE_ID` | Yes | stripe.js | Stripe price ID for Lifetime |
-| `REVENUECAT_WEBHOOK_SECRET` | No | stripe.js | RevenueCat webhook secret |
+| `REVENUECAT_WEBHOOK_SECRET` | Yes | revenuecat-webhook.js | RevenueCat webhook secret. Without it every RevenueCat event is refused. |
 | `INTELLIGENCE_API_KEY` | Yes | intelligence.js, push.js, vault-watch.js | Admin API key for cron triggers |
 | `APMEX_AFFILIATE_ID` | No | dealerScraper.js | APMEX affiliate partner ID (direct, `custid=` param) |
 | `JMB_AFFILIATE_ID` | No | dealerScraper.js | JM Bullion affiliate ID (direct, `ref=` param) |
