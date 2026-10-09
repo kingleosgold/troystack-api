@@ -47,8 +47,15 @@ const GRANTS = new Set([
   'UNCANCELLATION',
   'NON_RENEWING_PURCHASE',
   'SUBSCRIPTION_EXTENDED',
-  'TEMPORARY_ENTITLEMENT_GRANT',
 ]);
+
+// RevenueCat grants up to a day of access when it can't validate a purchase
+// with the store. That event names no product, so the profile gets Gold for
+// the day, marked with this status. INITIAL_PURCHASE replaces it once the
+// purchase validates, and the EXPIRATION that follows a failed validation
+// ends it whatever product that event names.
+const TEMPORARY = 'temporary_grant';
+const TEMPORARY_MS = 24 * 60 * 60 * 1000;
 
 function sameSecret(given, secret) {
   const a = Buffer.from(String(given));
@@ -93,7 +100,7 @@ function fieldsFor(plan) {
 async function readProfile(id) {
   const { data, error } = await supabase
     .from('profiles')
-    .select('subscription_tier, subscription_expires_at, stripe_customer_id')
+    .select('subscription_tier, subscription_status, subscription_expires_at, stripe_customer_id')
     .eq('id', id)
     .maybeSingle();
   if (error) throw new Error(`profile read failed: ${error.message}`);
@@ -123,8 +130,27 @@ async function applyEvent(event) {
     if (!profile) return { skipped: 'no_profile' };
     // A subscription bought after lifetime doesn't replace it.
     if (profile.subscription_tier === 'lifetime' && tier !== 'lifetime') return { kept: 'lifetime' };
-    await writeProfile(id, { subscription_tier: tier, subscription_expires_at: tier === 'lifetime' ? null : expires });
+    await writeProfile(id, {
+      subscription_tier: tier,
+      subscription_expires_at: tier === 'lifetime' ? null : expires,
+      // A purchase that validated after a temporary grant isn't temporary now.
+      ...(profile.subscription_status === TEMPORARY ? { subscription_status: 'active' } : {}),
+    });
     return { tier };
+  }
+
+  if (type === 'TEMPORARY_ENTITLEMENT_GRANT') {
+    const profile = await readProfile(id);
+    if (!profile) return { skipped: 'no_profile' };
+    // An account that already has a plan keeps it as it is.
+    if (profile.subscription_tier === 'gold' || profile.subscription_tier === 'lifetime') return { kept: profile.subscription_tier };
+    const from = Number(event.event_timestamp_ms) || Date.now();
+    await writeProfile(id, {
+      subscription_tier: 'gold',
+      subscription_status: TEMPORARY,
+      subscription_expires_at: new Date(from + TEMPORARY_MS).toISOString(),
+    });
+    return { tier: 'gold', temporary: true };
   }
 
   if (type === 'CANCELLATION') {
@@ -147,10 +173,17 @@ async function applyEvent(event) {
   }
 
   if (type === 'EXPIRATION') {
-    if (tier === 'free') return { skipped: 'unknown_product' };
-    if (tier === 'lifetime') return { skipped: 'lifetime_does_not_expire' };
     const profile = await readProfile(id);
     if (!profile) return { skipped: 'no_profile' };
+    // A temporary grant whose purchase never validated ends, whatever
+    // product the event names, and its status goes with it.
+    if (profile.subscription_status === TEMPORARY) {
+      const left = await planLeft(id, profile);
+      await writeProfile(id, left.tier === 'free' ? { ...fieldsFor(left), subscription_status: null } : fieldsFor(left));
+      return { tier: left.tier, temporary: true };
+    }
+    if (tier === 'free') return { skipped: 'unknown_product' };
+    if (tier === 'lifetime') return { skipped: 'lifetime_does_not_expire' };
     if (profile.subscription_tier === 'lifetime') return { kept: 'lifetime' };
     const left = await planLeft(id, profile);
     await writeProfile(id, fieldsFor(left));
