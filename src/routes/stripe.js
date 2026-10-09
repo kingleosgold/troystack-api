@@ -60,6 +60,8 @@ async function goldProductIds() {
 function resetGoldProductCache() {
   goldProductCache = { at: 0, ids: new Set() };
 }
+// For tests. Set on the router, which is what this module exports.
+router.resetGoldProductCache = resetGoldProductCache;
 
 // The plan a subscription's price gives: a configured Gold price, or another
 // price on the Gold product. Anything else gives free. Throws when the Gold
@@ -219,33 +221,88 @@ async function planAfterEnding(userId, customerId) {
   return (await planForUser(userId, customerId)) || { tier: 'free', status: null, trialEnd: null };
 }
 
+// The RevenueCat webhook asks the same question when an App Store plan ends,
+// since the account may hold a plan bought on the web.
+if (stripe) require('./revenuecat-webhook').setWebPlanCheck(planAfterEnding);
+
 // The account behind a Stripe customer: the profile that holds the customer,
 // or, for a customer an earlier checkout made and the profile no longer
 // holds, the account named in the customer's metadata.
+// A profile read that failed throws, so the webhook answers 500 and Stripe
+// sends the event again. No matching row (PGRST116) is an answer, not a failure.
+function profileRead({ data, error }) {
+  if (error && error.code !== 'PGRST116') throw new Error(`Profile read failed: ${error.message}`);
+  return data || null;
+}
+
 async function profileForCustomer(customerId) {
-  const { data: byCustomer } = await supabase
+  const byCustomer = profileRead(await supabase
     .from('profiles')
     .select('id, subscription_tier, stripe_customer_id')
     .eq('stripe_customer_id', customerId)
-    .single();
+    .single());
   if (byCustomer) return byCustomer;
   const customer = await stripe.customers.retrieve(customerId);
   const userId = customer?.metadata?.supabase_user_id;
   if (!userId || !isUUID(userId)) return null;
-  const { data: byId } = await supabase
+  return profileRead(await supabase
     .from('profiles')
     .select('id, subscription_tier, stripe_customer_id')
     .eq('id', userId)
-    .single();
-  return byId || null;
+    .single());
 }
 
 // Lifetime outlasts anything a later checkout adds, so a profile that reads
 // lifetime keeps it.
 async function keepLifetime(userId, tier) {
   if (tier === 'lifetime') return tier;
-  const { data } = await supabase.from('profiles').select('subscription_tier').eq('id', userId).single();
+  const data = profileRead(await supabase.from('profiles').select('subscription_tier').eq('id', userId).single());
   return data?.subscription_tier === 'lifetime' ? 'lifetime' : tier;
+}
+
+// Whether the account has had a Gold subscription before, on any of its
+// customers. The free week is for the first one only, so subscribing and
+// cancelling inside the week can't be repeated. A subscription whose first
+// payment never went through doesn't count.
+async function hadGoldBefore(userId, customerId) {
+  let products = null;
+  for (const id of await customersFor(userId, customerId, { strict: true })) {
+    for await (const sub of customerSubscriptions(id)) {
+      if (sub.status === 'incomplete' || sub.status === 'incomplete_expired') continue;
+      const price = sub.items?.data?.[0]?.price;
+      if (!products && mapStripePriceToTier(price?.id) === 'free') products = await goldProductIds();
+      if (subscriptionTier(price, mapStripePriceToTier, products)) return true;
+    }
+  }
+  return false;
+}
+
+// A checkout left open in another tab could still be paid and start a second
+// plan, so the account's open checkouts are closed before a new one opens. One
+// that can't be closed is logged and doesn't stop the new checkout.
+async function closeOpenCheckouts(userId, customerId) {
+  for (const id of await customersFor(userId, customerId)) {
+    try {
+      const open = [];
+      for await (const session of everyRecord((p) => stripe.checkout.sessions.list(p), { customer: id, status: 'open' })) open.push(session);
+      for (const session of open) await stripe.checkout.sessions.expire(session.id);
+    } catch (e) {
+      console.warn('⚠️ [Stripe] Could not close an open checkout:', e.message);
+    }
+  }
+}
+
+// The customer the billing page opens on: one with a subscription that's
+// still billing, so it can be cancelled, then the one holding the plan, then
+// the profile's own.
+async function portalCustomerFor(userId, profileCustomerId) {
+  for (const id of await customersFor(userId, profileCustomerId, { strict: true })) {
+    for await (const sub of customerSubscriptions(id)) {
+      if (['active', 'trialing', 'past_due', 'unpaid'].includes(sub.status)) return id;
+    }
+  }
+  const plan = await planForUser(userId, profileCustomerId);
+  return plan?.customerId || profileCustomerId;
 }
 
 // ============================================
@@ -272,7 +329,10 @@ async function stripeWebhookHandler(req, res) {
     console.log(`💳 [Stripe Webhook] Event: ${event.type}`);
 
     switch (event.type) {
-      case 'checkout.session.completed': {
+      // A delayed payment method completes the checkout first and is paid
+      // later, so async_payment_succeeded is handled the same way.
+      case 'checkout.session.completed':
+      case 'checkout.session.async_payment_succeeded': {
         const session = event.data.object;
         const userId = session.client_reference_id || session.metadata?.user_id;
         if (!userId || !isUUID(userId)) {
@@ -308,6 +368,11 @@ async function stripeWebhookHandler(req, res) {
             trialEnd = new Date(subscription.trial_end * 1000).toISOString();
           }
         } else if (session.mode === 'payment') {
+          // Nothing is given until the payment has gone through.
+          if (session.payment_status !== 'paid') {
+            console.log(`💳 [Stripe Webhook] Checkout ${session.id} isn't paid yet (${session.payment_status}), waiting for the payment`);
+            break;
+          }
           // A one-time checkout without a recorded tier is lifetime only when
           // it sold a lifetime Gold price. Anything else changes no plan, and
           // neither does a lifetime payment that has since been refunded.
@@ -351,8 +416,10 @@ async function stripeWebhookHandler(req, res) {
       }
 
       case 'customer.subscription.updated': {
-        const subscription = event.data.object;
-        const customerId = subscription.customer;
+        // Events can arrive late, and a retry repeats an older one, so the
+        // subscription is read again and the plan follows where it stands now.
+        const subscription = await stripe.subscriptions.retrieve(event.data.object.id);
+        const customerId = typeof subscription.customer === 'string' ? subscription.customer : subscription.customer?.id;
         const profile = await profileForCustomer(customerId);
 
         if (profile) {
@@ -412,6 +479,12 @@ async function stripeWebhookHandler(req, res) {
           }
           console.log(`✅ [Stripe Webhook] subscription.deleted: user=${profile.id}, now ${after.tier}`);
         }
+        break;
+      }
+
+      case 'checkout.session.async_payment_failed': {
+        const session = event.data.object;
+        console.warn(`⚠️ [Stripe Webhook] The delayed payment for checkout ${session.id} failed, no plan given`);
         break;
       }
 
@@ -499,21 +572,26 @@ router.post('/create-checkout-session', async (req, res) => {
       await supabase.from('profiles').upsert({ id: user_id }, { onConflict: 'id', ignoreDuplicates: true });
     }
 
-    // An account that already holds a live web plan isn't sold a second one.
-    // A check that fails doesn't stop checkout.
-    let existing = null;
-    try {
-      existing = await planForUser(user_id, profile?.stripe_customer_id);
-    } catch (e) {
-      console.warn('⚠️ [Stripe] Could not check for an existing plan:', e.message);
-    }
-    if (existing) {
-      return res.status(409).json({ error: 'This account already has Gold. You can manage it from Settings.' });
-    }
-
     // A customer an earlier checkout made for this account is used again, so
     // purchases stay together. A new one is made only when there's none.
     let customerId = profile?.stripe_customer_id || (await customersFor(user_id, null))[0] || null;
+
+    // An account that already holds a live web plan isn't sold a second one.
+    // The check covers the customer checkout is about to use and every other
+    // one made for the account. A check that fails doesn't stop checkout.
+    if (customerId) {
+      let existing = null;
+      try {
+        existing = await planForUser(user_id, customerId);
+      } catch (e) {
+        console.warn('⚠️ [Stripe] Could not check for an existing plan:', e.message);
+      }
+      if (existing) {
+        return res.status(409).json({ error: 'This account already has Gold. You can manage it from Settings.' });
+      }
+    }
+
+    const hadCustomer = Boolean(customerId);
     if (!customerId) {
       const { data: authUser, error: authError } = await supabase.auth.admin.getUserById(user_id);
       if (authError || !authUser?.user) {
@@ -538,6 +616,21 @@ router.post('/create-checkout-session', async (req, res) => {
       }
     }
 
+    // The free week is for an account's first Gold subscription. A check that
+    // fails gives the week, as checkout always did. A customer made just now
+    // has no history and no open checkouts.
+    let firstGold = true;
+    if (hadCustomer) {
+      if (!isLifetime) {
+        try {
+          firstGold = !(await hadGoldBefore(user_id, customerId));
+        } catch (e) {
+          console.warn('⚠️ [Stripe] Could not check for an earlier subscription:', e.message);
+        }
+      }
+      await closeOpenCheckouts(user_id, customerId);
+    }
+
     const sessionParams = {
       mode: isLifetime ? 'payment' : 'subscription',
       customer: customerId,
@@ -552,20 +645,24 @@ router.post('/create-checkout-session', async (req, res) => {
       sessionParams.invoice_creation = { enabled: true };
     }
 
-    if (!isLifetime) {
+    if (!isLifetime && (firstGold || campaign)) {
       sessionParams.subscription_data = {
-        trial_period_days: 7,
-        trial_settings: {
-          end_behavior: { missing_payment_method: 'cancel' },
-        },
+        ...(firstGold
+          ? {
+              trial_period_days: 7,
+              trial_settings: {
+                end_behavior: { missing_payment_method: 'cancel' },
+              },
+            }
+          : {}),
         ...(campaign ? { metadata: { campaign } } : {}),
       };
     }
 
     const session = await stripe.checkout.sessions.create(sessionParams);
 
-    console.log(`💳 [Stripe] Checkout session created for user ${user_id}, tier=${tier}`);
-    return res.json({ url: session.url });
+    console.log(`💳 [Stripe] Checkout session created for user ${user_id}, tier=${tier}${!isLifetime && !firstGold ? ', no trial (had Gold before)' : ''}`);
+    return res.json({ url: session.url, trial: !isLifetime && firstGold });
 
   } catch (error) {
     console.error('❌ [Stripe] Create checkout error:', error.message);
@@ -695,12 +792,13 @@ router.post('/customer-portal', async (req, res) => {
       return res.status(404).json({ error: 'No Stripe customer found for this user' });
     }
 
-    // The billing page opens on the customer that holds the account's plan,
-    // which after older checkouts may not be the one on the profile.
+    // After older checkouts an account can have several customers. The
+    // billing page opens on one with a subscription still billing, so it can
+    // be cancelled even when lifetime sits on another, then on the one that
+    // holds the plan.
     let portalCustomer = profile.stripe_customer_id;
     try {
-      const plan = await planForUser(user_id, profile.stripe_customer_id);
-      if (plan?.customerId) portalCustomer = plan.customerId;
+      portalCustomer = await portalCustomerFor(user_id, profile.stripe_customer_id);
     } catch (e) {
       console.warn('⚠️ [Stripe] Could not find the customer holding the plan:', e.message);
     }
@@ -814,129 +912,7 @@ router.get('/sync-subscription', async (req, res) => {
   }
 });
 
-// ============================================
-// REVENUECAT WEBHOOK — iOS subscription events
-// Always returns 200 to prevent RevenueCat retries
-// ============================================
-
-const REVENUECAT_WEBHOOK_SECRET = process.env.REVENUECAT_WEBHOOK_SECRET;
-
-function mapProductToTier(productId) {
-  if (!productId) return 'free';
-  const pid = productId.toLowerCase();
-  if (pid.includes('lifetime')) return 'lifetime';
-  if (pid.includes('gold') || pid.includes('premium') || pid.includes('yearly') || pid.includes('monthly')) return 'gold';
-  return 'free';
-}
-
-async function revenueCatWebhookHandler(req, res) {
-  try {
-    // Verify webhook secret
-    if (REVENUECAT_WEBHOOK_SECRET) {
-      const authHeader = req.headers['authorization'] || '';
-      const token = authHeader.replace(/^Bearer\s+/i, '');
-      if (token !== REVENUECAT_WEBHOOK_SECRET) {
-        console.warn('[RevenueCat Webhook] Invalid authorization token');
-        return res.status(401).json({ error: 'Unauthorized' });
-      }
-    }
-
-    const event = req.body?.event || req.body;
-    const eventType = event?.type;
-    const appUserId = event?.app_user_id;
-    const productId = event?.product_id;
-    const expirationMs = event?.expiration_at_ms;
-
-    console.log(`[RevenueCat Webhook] Event: ${eventType}, user: ${appUserId}, product: ${productId}`);
-
-    // Skip anonymous users
-    if (!appUserId || appUserId.startsWith('$RCAnonymousID:')) {
-      return res.status(200).json({ success: true, skipped: true, reason: 'anonymous_user' });
-    }
-
-    // Validate UUID
-    if (!isUUID(appUserId)) {
-      return res.status(200).json({ success: true, skipped: true, reason: 'non_uuid_user' });
-    }
-
-    const tier = mapProductToTier(productId);
-    const expirationDate = expirationMs ? new Date(expirationMs).toISOString() : null;
-
-    switch (eventType) {
-      case 'INITIAL_PURCHASE':
-      case 'RENEWAL':
-      case 'PRODUCT_CHANGE': {
-        console.log(`  Setting tier=${tier}, expires=${expirationDate}`);
-        const { error } = await supabase
-          .from('profiles')
-          .update({
-            subscription_tier: tier,
-            subscription_expires_at: expirationDate,
-          })
-          .eq('id', appUserId);
-
-        if (error) console.error('  Supabase update failed:', error.message);
-        break;
-      }
-
-      case 'CANCELLATION': {
-        // Keep access until expiration — only update expiry date
-        console.log(`  Cancellation — keeping tier, setting expiry=${expirationDate}`);
-        const { error } = await supabase
-          .from('profiles')
-          .update({ subscription_expires_at: expirationDate })
-          .eq('id', appUserId);
-
-        if (error) console.error('  Supabase update failed:', error.message);
-        break;
-      }
-
-      case 'EXPIRATION': {
-        // The App Store plan ended, but a plan bought on the web may still be
-        // paid, so the profile gets what Stripe holds before it gets free. If
-        // Stripe can't be read, free is saved as before and the web's sign-in
-        // repair puts the web plan back.
-        let after = { tier: 'free', status: null, trialEnd: null };
-        if (stripe) {
-          try {
-            const { data: profile } = await supabase.from('profiles').select('stripe_customer_id').eq('id', appUserId).single();
-            if (profile?.stripe_customer_id) after = await planAfterEnding(appUserId, profile.stripe_customer_id);
-          } catch (stripeErr) {
-            console.error('  Stripe check before downgrading failed:', stripeErr.message);
-          }
-        }
-        console.log(`  App Store plan expired, profile now ${after.tier}`);
-        const update = after.tier === 'free'
-          ? { subscription_tier: 'free', subscription_expires_at: null }
-          : { subscription_tier: after.tier, subscription_status: after.status, trial_end: after.trialEnd, subscription_expires_at: null };
-        const { error } = await supabase
-          .from('profiles')
-          .update(update)
-          .eq('id', appUserId);
-
-        if (error) console.error('  Supabase update failed:', error.message);
-        break;
-      }
-
-      case 'BILLING_ISSUE_DETECTED': {
-        console.log('  Billing issue detected — no tier change (grace period)');
-        break;
-      }
-
-      default:
-        console.log(`  Unhandled event type: ${eventType}`);
-    }
-
-    return res.status(200).json({ success: true, processed: true });
-
-  } catch (error) {
-    console.error('[RevenueCat Webhook] Error:', error.message);
-    // Still return 200 to prevent retries
-    return res.status(200).json({ success: false, error: error.message });
-  }
-}
-
 module.exports = router;
 module.exports.stripeWebhookHandler = stripeWebhookHandler;
-module.exports.revenueCatWebhookHandler = revenueCatWebhookHandler;
-module.exports.resetGoldProductCache = resetGoldProductCache;
+// The RevenueCat webhook lives in its own module. index.js still imports it from here.
+module.exports.revenueCatWebhookHandler = require('./revenuecat-webhook').revenueCatWebhookHandler;
