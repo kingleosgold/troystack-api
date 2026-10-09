@@ -19,6 +19,10 @@
 // event doesn't say what moved, and reading it needs RevenueCat's REST API
 // and a secret key the API doesn't hold yet. It's logged so it can be settled
 // by hand.
+//
+// When an App Store plan ends, by expiry or refund, the account may still
+// hold a plan bought on troystack.ai. stripe.js hands this module a check of
+// what Stripe holds, and the profile gets that plan before it gets free.
 
 const crypto = require('node:crypto');
 const supabase = require('../lib/supabase');
@@ -62,10 +66,34 @@ function authorized(header, secret) {
   return sameSecret(raw, secret) || sameSecret(raw.replace(/^Bearer\s+/i, ''), secret);
 }
 
+// What Stripe still holds for an account, set by stripe.js when Stripe is
+// configured. Called as check(userId, stripeCustomerId), it answers
+// { tier, status, trialEnd } with tier 'free' when there's nothing, and throws
+// when Stripe can't be read.
+let webPlanCheck = null;
+function setWebPlanCheck(check) {
+  webPlanCheck = typeof check === 'function' ? check : null;
+}
+
+// The plan an account is left with once an App Store plan ends: what Stripe
+// still holds for it, or free. A Stripe read that fails throws, so the event
+// is answered 500 and RevenueCat sends it again, rather than free being saved
+// over a web plan that's still paid.
+async function planLeft(id, profile) {
+  if (!webPlanCheck || !profile.stripe_customer_id) return { tier: 'free' };
+  const plan = await webPlanCheck(id, profile.stripe_customer_id);
+  return plan && (plan.tier === 'gold' || plan.tier === 'lifetime') ? plan : { tier: 'free' };
+}
+
+function fieldsFor(plan) {
+  if (plan.tier === 'free') return { subscription_tier: 'free', subscription_expires_at: null };
+  return { subscription_tier: plan.tier, subscription_status: plan.status ?? null, trial_end: plan.trialEnd ?? null, subscription_expires_at: null };
+}
+
 async function readProfile(id) {
   const { data, error } = await supabase
     .from('profiles')
-    .select('subscription_tier, subscription_expires_at')
+    .select('subscription_tier, subscription_expires_at, stripe_customer_id')
     .eq('id', id)
     .maybeSingle();
   if (error) throw new Error(`profile read failed: ${error.message}`);
@@ -103,11 +131,12 @@ async function applyEvent(event) {
     if (tier === 'free') return { skipped: 'unknown_product' };
     const profile = await readProfile(id);
     if (!profile) return { skipped: 'no_profile' };
-    // A refund ends what was refunded right away.
+    // A refund ends what was refunded right away. A web plan still stands.
     if (event.cancel_reason === 'CUSTOMER_SUPPORT') {
       if (tier === 'lifetime' || profile.subscription_tier !== 'lifetime') {
-        await writeProfile(id, { subscription_tier: 'free', subscription_expires_at: null });
-        return { tier: 'free', refunded: true };
+        const left = await planLeft(id, profile);
+        await writeProfile(id, fieldsFor(left));
+        return { tier: left.tier, refunded: true };
       }
       return { kept: 'lifetime' };
     }
@@ -123,8 +152,9 @@ async function applyEvent(event) {
     const profile = await readProfile(id);
     if (!profile) return { skipped: 'no_profile' };
     if (profile.subscription_tier === 'lifetime') return { kept: 'lifetime' };
-    await writeProfile(id, { subscription_tier: 'free', subscription_expires_at: null });
-    return { tier: 'free' };
+    const left = await planLeft(id, profile);
+    await writeProfile(id, fieldsFor(left));
+    return { tier: left.tier };
   }
 
   if (type === 'BILLING_ISSUE' || type === 'BILLING_ISSUE_DETECTED') {
@@ -173,4 +203,4 @@ async function revenueCatWebhookHandler(req, res) {
   }
 }
 
-module.exports = { revenueCatWebhookHandler, applyEvent, mapProductToTier, authorized };
+module.exports = { revenueCatWebhookHandler, applyEvent, mapProductToTier, authorized, setWebPlanCheck };
