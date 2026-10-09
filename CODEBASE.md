@@ -127,10 +127,12 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 
 Troy's fixed persona and knowledge prompt sections live in `src/services/troy-prompt.js` (`TROY_PERSONA`, `TROY_KNOWLEDGE`), shared with the visitor chat below. They were moved there byte for byte.
 
+Both the signed-in chat and the visitor chat add the day's market context from `src/services/troy-context.js` to the dynamic part of the prompt: each metal's move since the last close, Troy's latest Stack Signal and the newest Signal headlines, so Troy can say what moved metals.
+
 ### src/routes/troy-ask.js
 - **Purpose:** Troy for visitors on troystack.ai who haven't signed in. Single answers, no saved history; the page sends back the last few turns for context
-- **Exports:** `createTroyAskRouter({ llm, getPrices, getIntel, now, env })`, `cleanHistory()`, `visitorBlock()`
-- **Dependencies:** troy-llm, troy-prompt, daily-budget, price-fetcher, intelligence-scraper (wired in index.js)
+- **Exports:** `createTroyAskRouter({ llm, getPrices, getIntel, getMarket, now, env })`, `cleanHistory()`, `visitorBlock()`
+- **Dependencies:** troy-llm, troy-prompt, daily-budget, price-fetcher, intelligence-scraper, troy-context (wired in index.js)
 - **Last modified:** 2026-10-08
 
 | Method | Path | Auth | Description |
@@ -1191,6 +1193,13 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 - **Dedup:** by `source_url` in `troy_intelligence` table
 - **`getTopIntelligence(limit)`:** queries last 24h items ordered by relevance_score DESC, returns formatted string for prompt injection
 - **Crons:** YouTube every 4h (`0 */4 * * *`), Twitter every 2h (`0 */2 * * *`), Reddit every 3h (`0 */3 * * *`)
+
+### src/services/troy-context.js
+- **Purpose:** What Troy knows about today before anyone asks. Each metal's move since the last close (from `getSpotPrices().change`), the latest Stack Signal synthesis and the newest Signal headlines from `stack_signal_articles`, as one prompt block. Long dashes become commas and cut-off one-liners fall back to the commentary. Any part that fails is left out
+- **Exports:** `buildMarketBlock({ spot, signal, headlines })` (pure), `createMarketContext({ fetchSpot, db, now })`, `sharedMarketBlock()` (one cached instance for troy-ask and troy-chat), `plain()`, `usableOneLiner()`
+- **Cache:** 5 minutes, or 30 seconds when everything failed and the block is empty
+- **Tests:** `test/troy-context.test.js`
+- **Last modified:** 2026-10-08
 
 ### src/services/comex-scraper.js
 - **Purpose:** Scrape COMEX warehouse inventory from CME XLS files
