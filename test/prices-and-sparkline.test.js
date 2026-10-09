@@ -249,9 +249,10 @@ test("built-in prices stay labeled built-in when the next fetch fails too", asyn
   assert.strictEqual(fetcher.getPriceSnapshot().source, 'static-fallback', 'never relabeled as a cached reading');
 });
 
-// A database whose first read of yesterday's prices hangs until the test lets
-// it go. Rows written to price_log are kept so the test can check them.
-function stallingDb() {
+// A database whose read of yesterday's prices hangs until the test lets it go,
+// the first read unless the test names another. Rows written to price_log are
+// kept so the test can check them.
+function stallingDb(hangOnRead = 1) {
   let reached;
   let release;
   const stalled = new Promise((resolve) => { reached = resolve; });
@@ -262,7 +263,7 @@ function stallingDb() {
     select: () => query, gte: () => query, lte: () => query, order: () => query, limit: () => query,
     single: () => {
       reads += 1;
-      if (reads > 1) return Promise.resolve({ data: null, error: null });
+      if (reads !== hangOnRead) return Promise.resolve({ data: null, error: null });
       reached();
       return gate.then(() => ({ data: null, error: null }));
     },
@@ -293,6 +294,81 @@ test('a replaced fetch that finishes late leaves the newer prices alone', async 
   assert.strictEqual(fetcher.getCachedPrices().gold, 5160.25, 'the cache keeps the newer price');
   assert.strictEqual(fetcher.getPriceSnapshot().prices.gold, 5160.25, 'so does the Friday close');
   assert.deepStrictEqual(db.logged.map((row) => row.gold_price), [5160.25], 'only the newer price went to price_log');
+});
+
+// Lets waiting promise callbacks run without moving the mocked clock.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test('a fetch that hangs on a database read releases its callers with the cached prices at 30 seconds', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-08T16:00:00Z') }); // Thursday, noon in New York
+  const quotes = { 'GC=F': 4320.9, 'SI=F': 64.69, 'PL=F': 1797.7, 'PA=F': 1276 };
+  const db = stallingDb(2); // the second fetch hangs on its read of yesterday's prices
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios(quotes) });
+
+  // A good fetch puts gold at $4,320.90 in the cache.
+  await fetcher.fetchLiveSpotPrices();
+
+  // Two minutes on, the cache is stale, so a price read and the cron share the
+  // next fetch. It reads gold at $4,400, then hangs on the database.
+  t.mock.timers.tick(2 * 60 * 1000);
+  quotes['GC=F'] = 4400;
+  const released = {};
+  fetcher.getSpotPrices().then((reading) => { released.read = reading; });
+  fetcher.fetchLiveSpotPrices().then((cache) => { released.cron = cache; });
+  await db.stalled;
+
+  t.mock.timers.tick(29 * 1000);
+  await settle();
+  assert.deepStrictEqual(released, {}, 'both still wait at 29 seconds');
+
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.strictEqual(released.read?.prices.gold, 4320.9, 'the price read gets the cached price');
+  assert.strictEqual(released.cron?.prices.gold, 4320.9, 'and so does the cron');
+
+  // The next caller starts a fresh fetch, and the hung one writes nothing once it's let go.
+  quotes['GC=F'] = 4450;
+  await fetcher.fetchLiveSpotPrices();
+  assert.strictEqual(fetcher.getCachedPrices().gold, 4450);
+  db.release();
+  await settle();
+  assert.strictEqual(fetcher.getCachedPrices().gold, 4450, "the replaced fetch didn't put back $4,400");
+});
+
+test('a caller who joins a hung fetch at 20 seconds is released at 30, not 50', async (t) => {
+  const start = Date.parse('2026-10-08T16:00:00Z'); // Thursday, noon in New York
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: start });
+  let goldQuotes = 0;
+  const yahoo = fakeAxios({ 'GC=F': 4320.9, 'SI=F': 64.69, 'PL=F': 1797.7, 'PA=F': 1276 });
+  const counting = {
+    get: async (url) => {
+      if (url.endsWith('GC=F')) goldQuotes += 1;
+      return yahoo.get(url);
+    },
+  };
+  const db = stallingDb();
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: counting });
+
+  let firstAt = null;
+  let lateAt = null;
+  fetcher.fetchLiveSpotPrices().then(() => { firstAt = Date.now() - start; });
+  await db.stalled;
+
+  t.mock.timers.tick(20 * 1000);
+  fetcher.fetchLiveSpotPrices().then(() => { lateAt = Date.now() - start; });
+  assert.strictEqual(goldQuotes, 1, 'the late caller joins the fetch already running');
+
+  t.mock.timers.tick(9999);
+  await settle();
+  assert.strictEqual(lateAt, null, 'still waiting just before 30 seconds');
+
+  t.mock.timers.tick(1);
+  await settle();
+  assert.strictEqual(firstAt, 30 * 1000);
+  assert.strictEqual(lateAt, 30 * 1000, 'released 30 seconds after the fetch started, not 30 after it joined');
+
+  db.release();
+  await settle();
 });
 
 test('failed fetches keep the time of the last live price, and the reading reports it', async (t) => {
