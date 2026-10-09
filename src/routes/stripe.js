@@ -126,21 +126,34 @@ async function isLifetimeCheckout(session) {
   return soldLifetime(items, STRIPE_GOLD_LIFETIME_PRICE_ID, await goldProductIds());
 }
 
+// A lifetime payment counts until it's refunded in full or its buyer wins a
+// dispute over it. Stripe leaves a charge marked unrefunded when a dispute is
+// lost, so a disputed charge has its disputes read.
+async function lifetimeStillPaid(session) {
+  const intentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+  if (!intentId) return true;
+  const intent = await stripe.paymentIntents.retrieve(intentId, { expand: ['latest_charge'] });
+  const charge = intent.latest_charge;
+  if (!charge || typeof charge !== 'object') return true;
+  if (charge.refunded) return false;
+  if (charge.disputed) {
+    const disputes = await stripe.disputes.list({ payment_intent: intentId, limit: 100 });
+    if ((disputes.data || []).some((d) => d.status === 'lost')) return false;
+  }
+  return true;
+}
+
 // What Stripe says a customer paid for, or null. Lifetime comes first, since
 // it outlasts any subscription the customer also has. It's a one-time payment
-// with no subscription, so it counts when any paid lifetime checkout wasn't
-// refunded in full. Otherwise a live subscription to a Gold price or product
-// gives Gold, and a subscription to anything else gives nothing. Both
-// histories are read to the end.
+// with no subscription, so it counts when any paid lifetime checkout is still
+// paid. Otherwise a live subscription to a Gold price or product gives Gold,
+// and a subscription to anything else gives nothing. Both histories are read
+// to the end.
 async function planFromStripe(customerId) {
   for await (const checkout of completedCheckouts(customerId)) {
     const [session] = paidLifetimeSessions([checkout]);
     if (!session || !(await isLifetimeCheckout(session))) continue;
-    const intentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
-    if (!intentId) return { tier: 'lifetime', status: 'active', trialEnd: null };
-    const intent = await stripe.paymentIntents.retrieve(intentId, { expand: ['latest_charge'] });
-    const charge = intent.latest_charge;
-    if (!(charge && typeof charge === 'object' && charge.refunded)) return { tier: 'lifetime', status: 'active', trialEnd: null };
+    if (await lifetimeStillPaid(session)) return { tier: 'lifetime', status: 'active', trialEnd: null };
   }
 
   let products = null;
@@ -155,6 +168,22 @@ async function planFromStripe(customerId) {
     }
   }
   return null;
+}
+
+// What a profile should read once a plan it had ends: the plan Stripe still
+// holds for the customer, or free. A failed Stripe read throws, so the caller
+// tries again rather than saving free over a plan that's still paid.
+async function planAfterEnding(customerId) {
+  if (!customerId) return { tier: 'free', status: null, trialEnd: null };
+  return (await planFromStripe(customerId)) || { tier: 'free', status: null, trialEnd: null };
+}
+
+// Lifetime outlasts anything a later checkout adds, so a profile that reads
+// lifetime keeps it.
+async function keepLifetime(userId, tier) {
+  if (tier === 'lifetime') return tier;
+  const { data } = await supabase.from('profiles').select('subscription_tier').eq('id', userId).single();
+  return data?.subscription_tier === 'lifetime' ? 'lifetime' : tier;
 }
 
 // ============================================
@@ -193,28 +222,33 @@ async function stripeWebhookHandler(req, res) {
         let subscriptionStatus = 'active';
         let trialEnd = null;
 
+        // Anything that can't be read throws, the handler answers 500 and
+        // Stripe sends the event again, rather than a wrong plan being saved.
         if (session.subscription) {
-          let subscription = null;
-          try {
-            subscription = await stripe.subscriptions.retrieve(session.subscription);
-          } catch (e) {
-            console.warn('⚠️ [Stripe Webhook] Could not retrieve subscription:', e.message);
+          const subscription = await stripe.subscriptions.retrieve(session.subscription);
+          if (subscription.status !== 'active' && subscription.status !== 'trialing') {
+            // A late event for a subscription that has already ended gives no
+            // plan. Only the customer is recorded.
+            const { error: idError } = await supabase.from('profiles').update({ stripe_customer_id: session.customer }).eq('id', userId);
+            if (idError) {
+              console.error('❌ [Stripe Webhook] Failed to record the customer:', idError.message);
+              return res.status(500).send('Profile update failed');
+            }
+            console.log(`💳 [Stripe Webhook] Checkout ${session.id} completed for a subscription that is ${subscription.status}, plan left alone`);
+            break;
           }
-          if (subscription) {
-            const price = subscription.items?.data?.[0]?.price;
-            // A Gold product Stripe can't read throws here, the handler answers
-            // 500 and Stripe sends the event again, rather than free being saved.
-            if (price?.id) {
-              tier = await tierForCheckout(session, price);
-            }
-            subscriptionStatus = subscription.status || 'active';
-            if (subscription.trial_end) {
-              trialEnd = new Date(subscription.trial_end * 1000).toISOString();
-            }
+          const price = subscription.items?.data?.[0]?.price;
+          if (price?.id) {
+            tier = await tierForCheckout(session, price);
+          }
+          subscriptionStatus = subscription.status;
+          if (subscription.trial_end) {
+            trialEnd = new Date(subscription.trial_end * 1000).toISOString();
           }
         } else if (session.mode === 'payment') {
           // A one-time checkout without a recorded tier is lifetime only when
-          // it sold a lifetime Gold price. Anything else changes no plan.
+          // it sold a lifetime Gold price. Anything else changes no plan, and
+          // neither does a lifetime payment that has since been refunded.
           if (session.metadata?.tier) {
             tier = session.metadata.tier;
           } else if (await isLifetimeCheckout(session)) {
@@ -223,6 +257,15 @@ async function stripeWebhookHandler(req, res) {
             console.log(`💳 [Stripe Webhook] One-time checkout ${session.id} sold no Gold plan, profile left alone`);
             break;
           }
+          if (tier === 'lifetime' && !(await lifetimeStillPaid(session))) {
+            console.log(`💳 [Stripe Webhook] Lifetime checkout ${session.id} is no longer paid, profile left alone`);
+            break;
+          }
+        }
+        tier = await keepLifetime(userId, tier);
+        if (tier === 'lifetime') {
+          subscriptionStatus = 'active';
+          trialEnd = null;
         }
 
         const { error } = await supabase
@@ -235,8 +278,10 @@ async function stripeWebhookHandler(req, res) {
           })
           .eq('id', userId);
 
+        // A failed write is answered 500 so Stripe sends the event again.
         if (error) {
           console.error('❌ [Stripe Webhook] Failed to update profile:', error.message);
+          return res.status(500).send('Profile update failed');
         } else {
           console.log(`✅ [Stripe Webhook] checkout.session.completed: user=${userId}, tier=${tier}`);
         }
@@ -257,21 +302,29 @@ async function stripeWebhookHandler(req, res) {
           // Don't downgrade lifetime users via subscription events
           if (profile.subscription_tier === 'lifetime') break;
 
-          const newTier = (subscription.status === 'active' || subscription.status === 'trialing') ? 'gold' : 'free';
-          const updateData = {
-            subscription_tier: newTier,
-            subscription_status: subscription.status,
-          };
-          if (subscription.trial_end) {
-            updateData.trial_end = new Date(subscription.trial_end * 1000).toISOString();
+          const live = subscription.status === 'active' || subscription.status === 'trialing';
+          let updateData;
+          if (live) {
+            updateData = {
+              subscription_tier: 'gold',
+              subscription_status: subscription.status,
+              trial_end: subscription.trial_end ? new Date(subscription.trial_end * 1000).toISOString() : null,
+            };
           } else {
-            updateData.trial_end = null;
+            // This subscription ended, but the customer may hold another plan
+            // in Stripe, so the profile gets what Stripe still holds.
+            const after = await planAfterEnding(customerId);
+            updateData = { subscription_tier: after.tier, subscription_status: after.status || subscription.status, trial_end: after.trialEnd };
           }
-          await supabase
+          const { error: updateError } = await supabase
             .from('profiles')
             .update(updateData)
             .eq('id', profile.id);
-          console.log(`✅ [Stripe Webhook] subscription.updated: user=${profile.id}, tier=${newTier}, status=${subscription.status}`);
+          if (updateError) {
+            console.error('❌ [Stripe Webhook] Failed to update profile:', updateError.message);
+            return res.status(500).send('Profile update failed');
+          }
+          console.log(`✅ [Stripe Webhook] subscription.updated: user=${profile.id}, tier=${updateData.subscription_tier}, status=${subscription.status}`);
         }
         break;
       }
@@ -289,11 +342,18 @@ async function stripeWebhookHandler(req, res) {
         if (profile) {
           if (profile.subscription_tier === 'lifetime') break;
 
-          await supabase
+          // The customer may hold another plan in Stripe, a second Gold
+          // subscription or lifetime, so the profile gets what Stripe still holds.
+          const after = await planAfterEnding(customerId);
+          const { error: updateError } = await supabase
             .from('profiles')
-            .update({ subscription_tier: 'free' })
+            .update({ subscription_tier: after.tier, subscription_status: after.status, trial_end: after.trialEnd })
             .eq('id', profile.id);
-          console.log(`✅ [Stripe Webhook] subscription.deleted: user=${profile.id}, downgraded to free`);
+          if (updateError) {
+            console.error('❌ [Stripe Webhook] Failed to update profile:', updateError.message);
+            return res.status(500).send('Profile update failed');
+          }
+          console.log(`✅ [Stripe Webhook] subscription.deleted: user=${profile.id}, now ${after.tier}`);
         }
         break;
       }
@@ -344,12 +404,12 @@ router.post('/create-checkout-session', async (req, res) => {
     }
     const campaign = cleanCampaign(req.body.campaign);
 
-    // Checkout only sells Gold, a configured Gold price or another price on the
-    // Gold product. Anything else is turned away, since a subscription to it
-    // could later be mistaken for Gold. Another Gold-product price is sold as
-    // lifetime when it's one-time and as Gold when it recurs.
+    // Checkout only sells Gold: a configured Gold price, or another recurring
+    // price on the Gold product, sold as Gold. Lifetime sells only at its
+    // configured price. Anything else is turned away, since a subscription to
+    // it could later be mistaken for Gold.
     let tier = mapStripePriceToTier(price_id);
-    let isLifetime = isLifetimePrice(price_id);
+    const isLifetime = isLifetimePrice(price_id);
     if (tier === 'free') {
       let price = null;
       try {
@@ -359,11 +419,10 @@ router.post('/create-checkout-session', async (req, res) => {
       }
       const product = typeof price?.product === 'string' ? price.product : price?.product?.id;
       const products = await goldProductIds();
-      if (!product || !products.has(product)) {
+      if (!product || !products.has(product) || price.type !== 'recurring') {
         return res.status(400).json({ error: 'That price is not a TroyStack Gold plan' });
       }
-      isLifetime = price.type === 'one_time';
-      tier = isLifetime ? 'lifetime' : 'gold';
+      tier = 'gold';
     }
 
     // Look up user profile
@@ -396,10 +455,16 @@ router.post('/create-checkout-session', async (req, res) => {
         metadata: { supabase_user_id: user_id },
       });
       customerId = customer.id;
-      await supabase
+      // The customer id is how a purchase is found again later, so checkout
+      // doesn't open without it saved.
+      const { error: saveError } = await supabase
         .from('profiles')
         .update({ stripe_customer_id: customerId })
         .eq('id', user_id);
+      if (saveError) {
+        console.error('❌ [Stripe] Could not save the customer id:', saveError.message);
+        return res.status(500).json({ error: "Checkout didn't open. Try again in a moment." });
+      }
     }
 
     const sessionParams = {
@@ -472,12 +537,17 @@ router.post('/verify-session', async (req, res) => {
     let subscriptionStatus = 'active';
     let trialEnd = null;
 
+    // This route needs no sign-in, so an old session id opened again must not
+    // bring back a plan that has since ended or been refunded.
     if (subscription) {
+      if (!isTrialing && !isActive) {
+        return res.json({ success: false, reason: 'That subscription has ended' });
+      }
       const price = subscription.items?.data?.[0]?.price;
       if (price?.id) {
         tier = await tierForCheckout(session, price);
       }
-      subscriptionStatus = subscription.status || 'active';
+      subscriptionStatus = subscription.status;
       if (subscription.trial_end) {
         trialEnd = new Date(subscription.trial_end * 1000).toISOString();
       }
@@ -489,6 +559,14 @@ router.post('/verify-session', async (req, res) => {
       } else {
         return res.json({ success: false, reason: 'That checkout sold no TroyStack plan' });
       }
+      if (tier === 'lifetime' && !(await lifetimeStillPaid(session))) {
+        return res.json({ success: false, reason: 'That purchase was refunded' });
+      }
+    }
+    tier = await keepLifetime(userId, tier);
+    if (tier === 'lifetime') {
+      subscriptionStatus = 'active';
+      trialEnd = null;
     }
 
     const { error } = await supabase
@@ -733,13 +811,26 @@ async function revenueCatWebhookHandler(req, res) {
       }
 
       case 'EXPIRATION': {
-        console.log('  Subscription expired — downgrading to free');
+        // The App Store plan ended, but a plan bought on the web may still be
+        // paid, so the profile gets what Stripe holds before it gets free. If
+        // Stripe can't be read, free is saved as before and the web's sign-in
+        // repair puts the web plan back.
+        let after = { tier: 'free', status: null, trialEnd: null };
+        if (stripe) {
+          try {
+            const { data: profile } = await supabase.from('profiles').select('stripe_customer_id').eq('id', appUserId).single();
+            if (profile?.stripe_customer_id) after = await planAfterEnding(profile.stripe_customer_id);
+          } catch (stripeErr) {
+            console.error('  Stripe check before downgrading failed:', stripeErr.message);
+          }
+        }
+        console.log(`  App Store plan expired, profile now ${after.tier}`);
+        const update = after.tier === 'free'
+          ? { subscription_tier: 'free', subscription_expires_at: null }
+          : { subscription_tier: after.tier, subscription_status: after.status, trial_end: after.trialEnd, subscription_expires_at: null };
         const { error } = await supabase
           .from('profiles')
-          .update({
-            subscription_tier: 'free',
-            subscription_expires_at: null,
-          })
+          .update(update)
           .eq('id', appUserId);
 
         if (error) console.error('  Supabase update failed:', error.message);
