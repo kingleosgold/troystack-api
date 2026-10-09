@@ -3,8 +3,11 @@
 // the newest Signal headlines. Without it Troy can name spot but not say what
 // moved it, while the home page shows the day's take right beside him.
 //
-// Built once and kept for five minutes, so a question costs no extra reads.
-// Every part is optional: a missing piece is left out, never guessed.
+// The moves are read with every question from the price cache, which the
+// price cron refreshes each minute, and they carry no price of their own, so
+// the prompt never shows two prices for one metal. The Signal and headlines
+// come from the database and are kept for five minutes. Every part is
+// optional: a missing piece is left out, never guessed.
 
 const TTL_MS = 5 * 60 * 1000;
 const EMPTY_TTL_MS = 30 * 1000;
@@ -31,15 +34,17 @@ function usd(n) {
   return `$${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+// The price itself is in the route's own part of the prompt, so a move line
+// says only how far it went.
 function moveLine(metal, price, change) {
   const name = metal.charAt(0).toUpperCase() + metal.slice(1);
   if (!(price > 0)) return null;
   const pct = Number(change?.percent);
   const amt = Number(change?.amount);
-  if (!Number.isFinite(pct) || !Number.isFinite(amt)) return `${name}: ${usd(price)}, change since the last close unavailable`;
+  if (!Number.isFinite(pct) || !Number.isFinite(amt)) return `${name}: change since the last close unavailable`;
   const dir = amt > 0 ? 'up' : amt < 0 ? 'down' : 'flat';
-  if (dir === 'flat') return `${name}: ${usd(price)}, flat since the last close`;
-  return `${name}: ${usd(price)}, ${dir} ${usd(Math.abs(amt))} (${Math.abs(pct).toFixed(2)}%) since the last close`;
+  if (dir === 'flat') return `${name}: flat since the last close`;
+  return `${name}: ${dir} ${usd(Math.abs(amt))} (${Math.abs(pct).toFixed(2)}%) since the last close`;
 }
 
 function day(iso) {
@@ -59,7 +64,7 @@ function buildMarketBlock({ spot, signal, headlines } = {}) {
   const prices = spot?.prices || {};
   const moves = METALS.map((m) => moveLine(m, Number(prices[m]), spot?.change?.[m])).filter(Boolean);
   if (moves.length) {
-    sections.push(`TODAY'S MARKET:\n${moves.join('\n')}${spot?.marketsClosed ? '\nMarkets are closed right now, so these are the last prices.' : ''}`);
+    sections.push(`TODAY'S MARKET:\n${moves.join('\n')}${spot?.marketsClosed ? "\nMarkets are closed right now, so these are the last session's moves." : ''}`);
   }
 
   if (signal && signal.title) {
@@ -84,11 +89,12 @@ function buildMarketBlock({ spot, signal, headlines } = {}) {
 }
 
 /**
- * The block, cached for five minutes.
+ * The block for one question: the moves read now, the Signal and headlines
+ * from a read kept for five minutes.
  * @param {{ fetchSpot: () => Promise<object>, db: object, now?: () => number }} deps
  */
 function createMarketContext({ fetchSpot, db, now = () => Date.now() }) {
-  let cache = { at: 0, block: null };
+  let cache = { at: 0, parts: null };
 
   async function latestSignal() {
     const { data, error } = await db
@@ -114,16 +120,13 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now() }) {
     return data || [];
   }
 
-  // Questions that arrive while a refresh is running share it, so a burst at
-  // the five-minute mark makes one set of reads, not one per question.
-  let inFlight = null;
+  // Questions that arrive while a read is running share it, so a burst at the
+  // five-minute mark makes one set of database reads, not one per question.
+  let partsInFlight = null;
+  let spotInFlight = null;
 
-  async function refresh() {
-    const [spot, signal, headlines] = await Promise.all([
-      fetchSpot().catch((e) => {
-        console.log(`[Troy Context] Spot unavailable: ${e.message}`);
-        return null;
-      }),
+  async function readParts() {
+    const [signal, headlines] = await Promise.all([
       latestSignal().catch((e) => {
         console.log(`[Troy Context] Signal unavailable: ${e.message}`);
         return null;
@@ -133,21 +136,43 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now() }) {
         return [];
       }),
     ]);
-    const block = buildMarketBlock({ spot, signal, headlines });
-    cache = { at: now(), block };
-    return block;
+    const parts = { signal, headlines };
+    cache = { at: now(), parts };
+    return parts;
+  }
+
+  function signalParts() {
+    // A read that found nothing, when the database failed, is only kept for
+    // half a minute.
+    const found = cache.parts && (cache.parts.signal || cache.parts.headlines.length);
+    const ttl = found ? TTL_MS : EMPTY_TTL_MS;
+    if (cache.parts && now() - cache.at < ttl) return Promise.resolve(cache.parts);
+    if (!partsInFlight) {
+      partsInFlight = readParts().finally(() => {
+        partsInFlight = null;
+      });
+    }
+    return partsInFlight;
+  }
+
+  function currentSpot() {
+    if (!spotInFlight) {
+      spotInFlight = Promise.resolve()
+        .then(fetchSpot)
+        .catch((e) => {
+          console.log(`[Troy Context] Spot unavailable: ${e.message}`);
+          return null;
+        })
+        .finally(() => {
+          spotInFlight = null;
+        });
+    }
+    return spotInFlight;
   }
 
   return async function getMarketBlock() {
-    // An empty block, when everything failed, is only kept for half a minute.
-    const ttl = cache.block ? TTL_MS : EMPTY_TTL_MS;
-    if (cache.block !== null && now() - cache.at < ttl) return cache.block;
-    if (!inFlight) {
-      inFlight = refresh().finally(() => {
-        inFlight = null;
-      });
-    }
-    return inFlight;
+    const [spot, parts] = await Promise.all([currentSpot(), signalParts()]);
+    return buildMarketBlock({ spot, signal: parts.signal, headlines: parts.headlines });
   };
 }
 
