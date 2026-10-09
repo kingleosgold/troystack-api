@@ -225,11 +225,11 @@ Troy's fixed persona and knowledge prompt sections live in `src/services/troy-pr
 - Refuses every call with 503 when `REVENUECAT_WEBHOOK_SECRET` isn't set, and 401 when the header doesn't match. The header may carry the secret with or without `Bearer `.
 - INITIAL_PURCHASE, RENEWAL, PRODUCT_CHANGE (by `new_product_id`), UNCANCELLATION, NON_RENEWING_PURCHASE (the one-time lifetime), SUBSCRIPTION_EXTENDED and REFUND_REVERSED set the tier from the product, gold or lifetime. A subscription never replaces lifetime, and a reversed refund for a subscription whose period has run out gives nothing back.
 - TEMPORARY_ENTITLEMENT_GRANT, sent when RevenueCat can't validate a purchase with the store, names no product. A profile without a plan gets gold with `subscription_status` `temporary_grant`, expiring a day after the event. The INITIAL_PURCHASE that follows a validation sets the real tier and status `active`, and an EXPIRATION ends a temporary grant whatever product it names.
-- CANCELLATION with `cancel_reason` CUSTOMER_SUPPORT is a refund and ends what was refunded now. Any other CANCELLATION only records the expiry date.
+- CANCELLATION with `cancel_reason` CUSTOMER_SUPPORT is a refund and ends what was refunded now. Any other CANCELLATION only records the expiry date. Each purchase the webhook applies keeps its `purchased_at_ms` in `app_state` under `revenuecat_grant:{userId}` when it's the newest, and a subscription refund for an older purchase arrived late, after a newer period began, so it ends nothing. The refund's own `expiration_at_ms` can't tell, since RevenueCat sets it to the time of the refund.
 - EXPIRATION leaves a lifetime profile alone and otherwise ends the App Store plan. A retried expiry for a period the stored `subscription_expires_at` has already moved past, after a renewal or a new purchase, ends nothing.
-- When an App Store plan ends, by expiry or refund, the account may still hold a plan bought on the web. Once stripe.js has handed in a check with `setWebPlanCheck`, the profile gets the plan Stripe still holds (a web subscription or lifetime, with its status and trial end) before it gets free. Stripe is asked only when the profile has a `stripe_customer_id`, and a Stripe read that fails answers 500 so RevenueCat sends the event again. With no check handed in, an ended plan writes free.
+- When an App Store plan ends, by expiry or refund, the account may still hold a plan bought on the web. Once stripe.js has handed in a check with `setWebPlanCheck`, the profile gets the plan Stripe still holds (a web subscription or lifetime, with its status and trial end) before it gets free. A profile with no `stripe_customer_id` is checked with a null customer, so the account's customers are searched by `metadata.supabase_user_id`, and a Stripe read that fails answers 500 so RevenueCat sends the event again. With no check handed in, an ended plan writes free.
 - BILLING_ISSUE changes nothing during Apple's grace period. TRANSFER is logged and not applied, since settling it needs RevenueCat's REST API and a secret key the API doesn't hold.
-- A purchase or grant for an account with no profile row makes a bare row first, as checkout does. Other events for such an account, unknown products, and anonymous and non-UUID ids are skipped with 200. A failed profile read or write answers 500 so RevenueCat retries.
+- A purchase or grant for an account with no profile row makes a bare row first, as checkout does. Other events for such an account, unknown products, and anonymous and non-UUID ids are skipped with 200. A failed read or write of the profile or the purchase record answers 500 so RevenueCat retries.
 - Sandbox events are applied, because App Review buys in the sandbox.
 
 ### src/routes/stack-signal.js
@@ -665,8 +665,8 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 ### app_state
 - `key` (text, PK), `value` (text/JSONB)
 - General-purpose key-value store for: cron locks, daily caps, voice usage counters, DALL-E usage, push dedup
-- Key patterns: `daily_brief_lock_{userId}_{date}`, `voice_usage_{userId}_{date}`, `dalle_daily_count_{date}`, `breaking_push_count_{date}`
-- Used by: index.js, troy-chat.js, stack-signal-processor.js, stack-signal-push.js
+- Key patterns: `daily_brief_lock_{userId}_{date}`, `voice_usage_{userId}_{date}`, `dalle_daily_count_{date}`, `breaking_push_count_{date}`, `revenuecat_grant:{userId}` (the newest App Store purchase time, `{ purchasedAt }`)
+- Used by: index.js, troy-chat.js, stack-signal-processor.js, stack-signal-push.js, revenuecat-webhook.js
 
 ### api_keys
 - `id` (UUID, PK), `user_id` (UUID, FK→profiles)
