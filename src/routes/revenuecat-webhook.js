@@ -114,6 +114,17 @@ async function writeProfile(id, fields) {
   if (error) throw new Error(`profile update failed: ${error.message}`);
 }
 
+// A purchase for an account with no profile row yet makes a bare one first,
+// as checkout does, so the purchase isn't dropped. A row that can't be made
+// throws, and RevenueCat sends the event again.
+async function profileForPurchase(id) {
+  const profile = await readProfile(id);
+  if (profile) return profile;
+  const { error } = await supabase.from('profiles').upsert({ id }, { onConflict: 'id', ignoreDuplicates: true });
+  if (error) throw new Error(`profile create failed: ${error.message}`);
+  return (await readProfile(id)) || { subscription_tier: null, subscription_status: null, subscription_expires_at: null, stripe_customer_id: null };
+}
+
 /**
  * Applies one event to the account's profile and says what it did. Throws
  * when the database can't be read or written, so the caller answers 500.
@@ -132,8 +143,7 @@ async function applyEvent(event) {
     if (type === 'REFUND_REVERSED' && tier !== 'lifetime' && expires && Date.parse(expires) <= Date.now()) {
       return { skipped: 'already_expired' };
     }
-    const profile = await readProfile(id);
-    if (!profile) return { skipped: 'no_profile' };
+    const profile = await profileForPurchase(id);
     // A subscription bought after lifetime doesn't replace it.
     if (profile.subscription_tier === 'lifetime' && tier !== 'lifetime') return { kept: 'lifetime' };
     await writeProfile(id, {
@@ -146,8 +156,7 @@ async function applyEvent(event) {
   }
 
   if (type === 'TEMPORARY_ENTITLEMENT_GRANT') {
-    const profile = await readProfile(id);
-    if (!profile) return { skipped: 'no_profile' };
+    const profile = await profileForPurchase(id);
     // An account that already has a plan keeps it as it is.
     if (profile.subscription_tier === 'gold' || profile.subscription_tier === 'lifetime') return { kept: profile.subscription_tier };
     const from = Number(event.event_timestamp_ms) || Date.now();
@@ -191,6 +200,10 @@ async function applyEvent(event) {
     if (tier === 'free') return { skipped: 'unknown_product' };
     if (tier === 'lifetime') return { skipped: 'lifetime_does_not_expire' };
     if (profile.subscription_tier === 'lifetime') return { kept: 'lifetime' };
+    // A retried expiry that lands after a renewal or a new purchase is for a
+    // period that's already been replaced, so it ends nothing.
+    const stored = Date.parse(profile.subscription_expires_at || '');
+    if (expires && Number.isFinite(stored) && stored > Date.parse(expires)) return { skipped: 'superseded' };
     const left = await planLeft(id, profile);
     await writeProfile(id, fieldsFor(left));
     return { tier: left.tier };

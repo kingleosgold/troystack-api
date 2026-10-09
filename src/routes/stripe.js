@@ -258,7 +258,7 @@ function profileRead({ data, error }) {
 async function profileForCustomer(customerId) {
   const byCustomer = profileRead(await supabase
     .from('profiles')
-    .select('id, subscription_tier, stripe_customer_id')
+    .select('id, subscription_tier, stripe_customer_id, subscription_expires_at')
     .eq('stripe_customer_id', customerId)
     .single());
   if (byCustomer) return byCustomer;
@@ -267,9 +267,17 @@ async function profileForCustomer(customerId) {
   if (!userId || !isUUID(userId)) return null;
   return profileRead(await supabase
     .from('profiles')
-    .select('id, subscription_tier, stripe_customer_id')
+    .select('id, subscription_tier, stripe_customer_id, subscription_expires_at')
     .eq('id', userId)
     .single());
+}
+
+// An App Store plan RevenueCat says still runs. Only the RevenueCat webhook
+// writes subscription_expires_at, so a future one means Apple is still
+// billing, and a web subscription that ends doesn't end that.
+function appStorePlanRunning(profile) {
+  const until = Date.parse(profile?.subscription_expires_at || '');
+  return Number.isFinite(until) && until > Date.now() && profile.subscription_tier === 'gold';
 }
 
 // Lifetime outlasts anything a later checkout adds, so a profile that reads
@@ -463,6 +471,10 @@ async function stripeWebhookHandler(req, res) {
             // This subscription isn't Gold now, but the account may hold
             // another plan in Stripe, so the profile gets what Stripe still holds.
             const after = await planAfterEnding(profile.id, profile.stripe_customer_id || customerId);
+            if (after.tier === 'free' && appStorePlanRunning(profile)) {
+              console.log(`💳 [Stripe Webhook] subscription.updated: user=${profile.id} keeps the App Store plan running to ${profile.subscription_expires_at}`);
+              break;
+            }
             updateData = { subscription_tier: after.tier, subscription_status: after.status || subscription.status, trial_end: after.trialEnd };
           }
           const { error: updateError } = await supabase
@@ -489,6 +501,10 @@ async function stripeWebhookHandler(req, res) {
           // The account may hold another plan in Stripe, a second Gold
           // subscription or lifetime, so the profile gets what Stripe still holds.
           const after = await planAfterEnding(profile.id, profile.stripe_customer_id || customerId);
+          if (after.tier === 'free' && appStorePlanRunning(profile)) {
+            console.log(`💳 [Stripe Webhook] subscription.deleted: user=${profile.id} keeps the App Store plan running to ${profile.subscription_expires_at}`);
+            break;
+          }
           const { error: updateError } = await supabase
             .from('profiles')
             .update({ subscription_tier: after.tier, subscription_status: after.status, trial_end: after.trialEnd })
