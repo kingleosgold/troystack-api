@@ -194,6 +194,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | POST | /v1/stripe/create-checkout-session | Bearer (Supabase session, must match user_id) | Create Stripe checkout. Redirect URLs must be on a TroyStack site; optional `campaign` is stored on the session and subscription |
 | POST | /v1/stripe/verify-session | Public (session id) | Verify checkout completion |
 | POST | /v1/stripe/customer-portal | Bearer (Supabase session, must match user_id) | Stripe billing portal; return_url must be on a TroyStack site |
+| GET | /v1/stripe/my-plan | Bearer (Supabase session) | The web plan Stripe holds for the signed-in account: `{ plan: 'gold' \| 'lifetime' \| null, status, trial_end }`. The iPhone app asks before it treats an account with no App Store plan as free. Never writes |
 | GET | /v1/sync-subscription | Public (UUID) | Plan for a user. A free profile with a live Stripe subscription, or a paid lifetime checkout that wasn't refunded, gets its plan restored, since the iPhone app writes free when RevenueCat has nothing. The answer changes only when the profile update succeeds |
 | POST | /v1/webhooks/revenuecat | Signature | RevenueCat iOS purchase webhook |
 
