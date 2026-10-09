@@ -31,6 +31,9 @@ function reset(over = {}) {
 }
 
 const fakeSupabase = {
+  auth: {
+    getUser: async (token) => (token === 'good-token' ? { data: { user: { id: USER } }, error: null } : { data: { user: null }, error: { message: 'invalid JWT' } }),
+  },
   from() {
     return {
       select() {
@@ -76,10 +79,12 @@ process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'test-placehold
 require.cache[require.resolve(path.join(__dirname, '../src/lib/supabase'))] = { exports: fakeSupabase };
 require.cache[require.resolve('stripe')] = { exports: () => fakeStripe };
 const router = require('../src/routes/stripe');
-const handler = router.stack.find((l) => l.route && l.route.path === '/sync-subscription').route.stack[0].handle;
+const routeHandler = (p) => router.stack.find((l) => l.route && l.route.path === p).route.stack[0].handle;
+const handler = routeHandler('/sync-subscription');
+const myPlan = routeHandler('/my-plan');
 
-async function sync() {
-  const res = {
+function fakeRes() {
+  return {
     statusCode: 200,
     body: null,
     status(code) {
@@ -91,7 +96,17 @@ async function sync() {
       return this;
     },
   };
+}
+
+async function sync() {
+  const res = fakeRes();
   await handler({ query: { user_id: USER } }, res);
+  return res;
+}
+
+async function askMyPlan(token) {
+  const res = fakeRes();
+  await myPlan({ headers: token ? { authorization: `Bearer ${token}` } : {} }, res);
   return res;
 }
 
@@ -145,4 +160,35 @@ test('nothing paid in Stripe leaves a free profile alone', async () => {
   const res = await sync();
   assert.equal(res.body.subscription_tier, 'free');
   assert.equal(state.updates.length, 0);
+});
+
+test('the app learns a web trial from Stripe, whatever the profile says', async () => {
+  reset({
+    profile: { subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' },
+    subscriptions: [{ status: 'trialing', trial_end: 1760000000, items: { data: [] } }],
+  });
+  const res = await askMyPlan('good-token');
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, { plan: 'gold', status: 'trialing', trial_end: new Date(1760000000 * 1000).toISOString() });
+  assert.equal(state.updates.length, 0, 'asking never writes');
+});
+
+test('a gold profile with nothing in Stripe has no web plan', async () => {
+  reset({ profile: { subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' } });
+  const res = await askMyPlan('good-token');
+  assert.deepEqual(res.body, { plan: null, status: null, trial_end: null });
+});
+
+test('an account that never went to web checkout has no web plan and Stripe is not asked', async () => {
+  reset({ profile: { subscription_tier: 'free', subscription_status: null, stripe_customer_id: null } });
+  const res = await askMyPlan('good-token');
+  assert.deepEqual(res.body, { plan: null, status: null, trial_end: null });
+  assert.deepEqual(state.stripeCalls, []);
+});
+
+test('my-plan needs the account to be signed in', async () => {
+  reset();
+  assert.equal((await askMyPlan(null)).statusCode, 401);
+  assert.equal((await askMyPlan('bad-token')).statusCode, 401);
+  assert.deepEqual(state.stripeCalls, []);
 });
