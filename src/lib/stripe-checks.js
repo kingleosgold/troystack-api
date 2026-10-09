@@ -8,6 +8,8 @@
 // cleanCampaign: the web page passes which surface the checkout started from,
 //   stored on the Stripe session and subscription for attribution.
 // liveSubscription: the subscription that should give an account Gold.
+// paidLifetimeSession: a completed, paid lifetime checkout. Lifetime is a
+//   one-time payment, so Stripe keeps no subscription for it.
 
 const SITE_ORIGINS = [
   'https://troystack.ai',
@@ -54,4 +56,18 @@ function liveSubscription(subscriptions) {
   return list.find((s) => s && (s.status === 'active' || s.status === 'trialing')) || null;
 }
 
-module.exports = { safeRedirect, cleanCampaign, signedInUserId, liveSubscription, SITE_ORIGINS };
+function paidLifetimeSession(sessions) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  return (
+    list.find(
+      (s) =>
+        s &&
+        s.mode === 'payment' &&
+        s.status === 'complete' &&
+        s.payment_status === 'paid' &&
+        (s.metadata?.tier || 'lifetime') === 'lifetime',
+    ) || null
+  );
+}
+
+module.exports = { safeRedirect, cleanCampaign, signedInUserId, liveSubscription, paidLifetimeSession, SITE_ORIGINS };
