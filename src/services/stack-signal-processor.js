@@ -50,6 +50,102 @@ function parseJsonObject(text) {
 const DAILY_CAP = 8;
 const MAX_DAILY_IMAGES = 3;
 
+// The day's articles open one at a time, every three hours from midnight UTC.
+// The count resets at midnight UTC, and the 15-minute run used to fill all
+// eight before 1 AM, so the feed went quiet for the other 23 hours. A slot
+// nobody used stays open for later in the day, a run writes at most one, and
+// articles go out at least 90 minutes apart so open slots don't bunch up after
+// a quiet stretch.
+const SLOT_HOURS = 24 / DAILY_CAP;
+const MAX_PER_RUN = 1;
+const MIN_GAP_MS = 90 * 60 * 1000;
+
+function slotsOpenAt(now = new Date()) {
+  const hours = now.getUTCHours() + now.getUTCMinutes() / 60;
+  return Math.min(DAILY_CAP, Math.floor(hours / SLOT_HOURS) + 1);
+}
+
+// Links from articles a run looked at and passed on, each with the time it
+// can come back, so they stop filling the top five every run and newer stories
+// get a look. Passed-on articles wait a day. Articles a failed clustering call
+// was holding wait an hour, so a reply that fails every time can't hold the
+// pool either.
+const PASSED_KEY = 'stack_signal_passed';
+const PASSED_TTL_MS = 24 * 60 * 60 * 1000;
+const RETRY_TTL_MS = 60 * 60 * 1000;
+const PASSED_MAX = 400;
+
+// Feed articles shorter than this are dropped at save. Checking before the
+// count means a short draft doesn't use up a slot.
+const MIN_ARTICLE_CHARS = 2500;
+
+async function readPassedLinks(now = Date.now()) {
+  try {
+    const { data, error } = await supabase
+      .from('app_state')
+      .select('value')
+      .eq('key', PASSED_KEY)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw new Error(error.message);
+
+    const links = {};
+    for (const [url, until] of Object.entries(data?.value?.links || {})) {
+      if (Date.parse(until) > now) links[url] = until;
+    }
+    return { links, ok: true };
+  } catch (err) {
+    console.log(`[Pipeline] Could not read passed links: ${err.message}`);
+    return { links: {}, ok: false };
+  }
+}
+
+async function rememberPassedLinks(urls, now = new Date(), ttlMs = PASSED_TTL_MS) {
+  const fresh = [...new Set(urls.filter(Boolean))];
+  if (!fresh.length) return;
+
+  try {
+    // Writing after a failed read would drop every link already kept.
+    const { links: kept, ok } = await readPassedLinks(now.getTime());
+    if (!ok) return;
+    const until = new Date(now.getTime() + ttlMs).toISOString();
+    for (const url of fresh) {
+      if (!kept[url] || Date.parse(kept[url]) < Date.parse(until)) kept[url] = until;
+    }
+
+    const newestFirst = Object.entries(kept)
+      .sort((a, b) => Date.parse(b[1]) - Date.parse(a[1]))
+      .slice(0, PASSED_MAX);
+
+    const { error } = await supabase
+      .from('app_state')
+      .upsert({ key: PASSED_KEY, value: { links: Object.fromEntries(newestFirst) } }, { onConflict: 'key' });
+    if (error) throw error;
+  } catch (err) {
+    console.log(`[Pipeline] Could not save passed links: ${err.message}`);
+  }
+}
+
+/**
+ * Feed articles from the last day, newest first. Their titles let clustering
+ * leave out a story Troy already wrote about, and the newest one sets the gap
+ * before the next article. A failed read throws, since writing blind could
+ * repeat a story.
+ */
+async function getRecentFeed(hours = 24) {
+  const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from('stack_signal_articles')
+    .select('title, published_at')
+    .eq('is_stack_signal', false)
+    .gte('published_at', since)
+    .order('published_at', { ascending: false })
+    .limit(24);
+
+  if (error) throw new Error(`Could not read recent feed articles: ${error.message}`);
+  return (data || []).filter(r => r.title);
+}
+
 /**
  * Check if we can generate another DALL-E image today (hard cap via app_state).
  * The value column is JSONB — access as object, not string.
@@ -99,20 +195,26 @@ async function incrementImageCount() {
 async function getCommentaryCount() {
   const today = new Date().toISOString().split('T')[0];
 
-  try {
-    const { data } = await supabase
-      .from('app_state')
-      .select('value')
-      .eq('key', 'commentary_daily_count')
-      .single();
+  const { data, error } = await supabase
+    .from('app_state')
+    .select('value')
+    .eq('key', 'commentary_daily_count')
+    .single();
 
+  // No row yet means nothing written today. Any other failed read stops the
+  // run, since reading it as zero would hand out the day's slots again.
+  if (error && error.code !== 'PGRST116') {
+    throw new Error(`Could not read the daily count: ${error.message}`);
+  }
+
+  try {
     if (data?.value) {
       const val = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
       if (val.date === today) {
         return { count: val.count, allowed: val.count < DAILY_CAP };
       }
     }
-  } catch (_) { /* no row yet — allow */ }
+  } catch (_) { /* unreadable legacy value, start the day over */ }
 
   return { count: 0, allowed: true };
 }
@@ -125,12 +227,15 @@ async function incrementCommentaryCount() {
   const today = new Date().toISOString().split('T')[0];
   const { count: current } = await getCommentaryCount();
 
-  await supabase
+  const { error } = await supabase
     .from('app_state')
     .upsert({
       key: 'commentary_daily_count',
       value: { date: today, count: current + 1 },
     }, { onConflict: 'key' });
+
+  // An article the count doesn't know about would let the same slot fill twice.
+  if (error) throw new Error(`Could not save the daily count: ${error.message}`);
 
   return current + 1;
 }
@@ -229,12 +334,17 @@ Return ONLY the JSON array, no other text.`;
 /**
  * Group scored articles into thematic clusters using Gemini Flash.
  * Each cluster becomes one original synthesis article.
- * Returns 2-5 clusters sorted by importance.
+ * Returns up to 5 clusters sorted by importance. Given recentTitles, a cluster
+ * that only repeats one of those stories comes back with already_covered set,
+ * so the pipeline can skip it, [] means nothing new, and null means clustering
+ * failed and nothing should be written this run.
  */
-async function clusterArticles(scoredArticles) {
+async function clusterArticles(scoredArticles, { recentTitles = [] } = {}) {
   const worthy = scoredArticles.filter(a => a.relevance_score >= 50);
+  if (!worthy.length) return [];
 
-  if (worthy.length < 3) {
+  // A few articles with nothing published to check them against don't need a model call.
+  if (worthy.length < 3 && !recentTitles.length) {
     console.log(`[Clustering] Only ${worthy.length} articles scored 50+ — using as individual clusters`);
     return worthy.slice(0, 3).map(a => ({
       theme: a.title,
@@ -251,8 +361,16 @@ async function clusterArticles(scoredArticles) {
 
   const systemPrompt = `You are an editor at a precious metals intelligence publication. Group these articles by THEME into clusters. Each cluster represents ONE original article that a metals journalist would write today, synthesizing all sources in that cluster.`;
 
+  const published = recentTitles.length
+    ? `\n\nALREADY PUBLISHED IN THE LAST 24 HOURS:\n${recentTitles.map(t => `- ${t}`).join('\n')}`
+    : '';
+
+  const coveredRule = recentTitles.length
+    ? `\n- Set "already_covered" to true on a cluster whose story is already in ALREADY PUBLISHED, unless its sources report something materially new, like a new number, decision or event. When they do, set it to false and make the theme name what's new.`
+    : '';
+
   const userMessage = `ARTICLES:
-${articleSummaries}
+${articleSummaries}${published}
 
 Return ONLY valid JSON — no markdown, no backticks, no preamble:
 [
@@ -261,13 +379,14 @@ Return ONLY valid JSON — no markdown, no backticks, no preamble:
     "importance": 95,
     "article_indices": [0, 3, 7],
     "suggested_angle": "One sentence describing the unique angle Troy should take",
-    "category": "gold"
+    "category": "gold",
+    "already_covered": false
   }
 ]
 
 RULES:
-- Maximum 5 clusters. Minimum 2.
-- Each cluster must reference at least 2 source articles (by index number).
+- Maximum 5 clusters.
+- Put articles on the same story in one cluster. A distinct story that only one article covers can be its own cluster.${coveredRule}
 - Rank clusters by importance to precious metals stackers (0-100).
 - KILL duplicate narratives — if 8 articles say "gold hits record", that's ONE cluster, not eight.
 - Prioritize: physical market stories > COMEX/vault data > geopolitical impact > equities/mining stocks
@@ -316,9 +435,16 @@ CRITICAL: Return ONLY the JSON array. No markdown, no code fences, no explanatio
 
     if (!Array.isArray(clusters)) throw new Error('Non-array response');
 
+    // Nothing new against what's already published is an answer, not a failure.
+    if (clusters.length === 0 && recentTitles.length) {
+      console.log('[Clustering] No new story against the last 24 hours');
+      return [];
+    }
+
     const mapped = clusters
       .map(c => ({
         ...c,
+        already_covered: c.already_covered === true,
         articles: (c.article_indices || []).map(i => worthy[i]).filter(Boolean),
       }))
       .filter(c => c.articles.length > 0)
@@ -327,9 +453,16 @@ CRITICAL: Return ONLY the JSON array. No markdown, no code fences, no explanatio
 
     if (mapped.length === 0) throw new Error('No valid clusters after mapping');
 
-    console.log(`[Clustering] ${mapped.length} clusters: ${mapped.map(c => `"${c.theme.slice(0, 40)}..." (${c.articles.length} sources, importance ${c.importance})`).join(', ')}`);
+    console.log(`[Clustering] ${mapped.length} clusters: ${mapped.map(c => `"${c.theme.slice(0, 40)}..." (${c.articles.length} sources, importance ${c.importance}${c.already_covered ? ', covered' : ''})`).join(', ')}`);
     return mapped;
   } catch (err) {
+    // With stories already out today, the fallback below could repeat one.
+    // Write nothing this run instead. The pipeline sets these articles aside
+    // for an hour, so the next runs look at others.
+    if (recentTitles.length) {
+      console.error(`[Clustering] Failed: ${err.message} — writing nothing this run`);
+      return null;
+    }
     console.error(`[Clustering] Failed: ${err.message} — falling back to top articles`);
     return worthy
       .sort((a, b) => b.relevance_score - a.relevance_score)
@@ -771,7 +904,7 @@ async function saveArticles(articles) {
   }
 
   const validArticles = articles.filter(a => {
-    if (!a.troy_commentary || a.troy_commentary.length < 2500) {
+    if (!a.troy_commentary || a.troy_commentary.length < MIN_ARTICLE_CHARS) {
       console.log(`[Save] Filtered out short article: "${a.title?.substring(0, 50)}" (${a.troy_commentary?.length || 0} chars)`);
       return false;
     }
@@ -779,7 +912,7 @@ async function saveArticles(articles) {
   });
 
   if (!validArticles.length) {
-    console.log(`[Save] All ${articles.length} articles filtered out (< 2500 chars)`);
+    console.log(`[Save] All ${articles.length} articles filtered out (< ${MIN_ARTICLE_CHARS} chars)`);
     return 0;
   }
 
@@ -1224,14 +1357,14 @@ async function generateClaudeDailySynthesis() {
 /**
  * Run the full Stack Signal v2 pipeline.
  *
- * Phase 0: Fetch RSS feeds
+ * Runs only when one of the day's slots is open (see slotsOpenAt).
+ * Phase 0: Fetch RSS feeds, setting aside stories already covered
  * Phase 1: Score articles individually (Gemini Flash)
- * Phase 2: Cluster scored articles by theme (Gemini Flash)
- * Phase 3: Write feed articles per cluster (Gemini Flash — writeFeedReaction)
+ * Phase 2: Cluster scored articles by theme against the last 24 hours (Gemini Flash)
+ * Phase 3: Write one feed article for the top new cluster (Gemini Flash — writeFeedReaction)
  * Phase 4: Generate images (DALL-E 3 / pool)
  * Phase 5: Save feed articles to database
  * Phase 6: Push notification for top article
- * Phase 7: Claude daily synthesis editorial (once per day, if ≥ 3 feed articles)
  */
 async function runStackSignalPipeline() {
   const startTime = Date.now();
@@ -1240,9 +1373,35 @@ async function runStackSignalPipeline() {
   console.log(`${'━'.repeat(50)}`);
 
   try {
-    // Phase 0: Fetch RSS articles + filter by signal score
+    // Check the day's open slots before any fetch or Gemini call. Scoring and
+    // clustering used to run every 15 minutes and get thrown away once the
+    // day's articles were written.
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    const { count: commentaryToday } = await getCommentaryCount();
+    const open = slotsOpenAt(now);
+
+    if (commentaryToday >= open) {
+      const why = commentaryToday >= DAILY_CAP ? 'Daily synthesis cap reached' : 'Next slot not open yet';
+      console.log(`[Pipeline] ${why}: ${commentaryToday} written, ${open}/${DAILY_CAP} open (${today}), skipping before fetch`);
+      return { articles: 0, scored: 0, clusters: 0, synthesized: 0, saved: 0, skipped: true };
+    }
+
+    const recentFeed = await getRecentFeed();
+    const lastAt = recentFeed.length ? Date.parse(recentFeed[0].published_at) : NaN;
+    if (now.getTime() - lastAt < MIN_GAP_MS) {
+      console.log(`[Pipeline] Last feed article went out at ${recentFeed[0].published_at}, under 90 minutes ago, skipping before fetch`);
+      return { articles: 0, scored: 0, clusters: 0, synthesized: 0, saved: 0, skipped: true };
+    }
+
+    // Phase 0: Fetch RSS articles, drop ones a run already passed on, filter by signal score
     console.log('\n[Pipeline] Phase 0: Fetching RSS feeds...');
-    const rawArticles = await fetchNewArticles();
+    const { links: passed } = await readPassedLinks(now.getTime());
+    const fetched = await fetchNewArticles();
+    const rawArticles = fetched.filter(a => !passed[a.link]);
+    if (rawArticles.length < fetched.length) {
+      console.log(`[Pipeline] Left out ${fetched.length - rawArticles.length} articles an earlier run passed on`);
+    }
 
     if (!rawArticles.length) {
       console.log('[Pipeline] No new articles found. Pipeline complete.');
@@ -1263,40 +1422,46 @@ async function runStackSignalPipeline() {
       return { articles: rawArticles.length, scored: 0, clusters: 0, synthesized: 0, saved: 0 };
     }
 
-    // Check the daily cap before any Gemini call. Scoring and clustering used to
-    // run first, every 15 minutes, and get thrown away once the day's articles
-    // were written.
-    const today = new Date().toISOString().split('T')[0];
-    const { count: commentaryToday, allowed } = await getCommentaryCount();
-
-    if (!allowed) {
-      console.log(`[Pipeline] Daily synthesis cap reached: ${commentaryToday}/${DAILY_CAP} (${today}), skipping before scoring`);
-      return { articles: rawArticles.length, scored: 0, clusters: 0, synthesized: 0, saved: 0, skipped: true };
-    }
-
     // Phase 1: Score with Gemini (detailed scoring on the filtered set)
     console.log('\n[Pipeline] Phase 1: Scoring articles...');
     const scoredArticles = await scoreArticles(articlesToProcess);
 
-    // Phase 2: Cluster by theme
+    // Phase 2: Cluster by theme, against what the feed ran in the last 24 hours
     console.log('\n[Pipeline] Phase 2: Clustering articles by theme...');
-    const clusters = await clusterArticles(scoredArticles);
-    console.log(`[Pipeline] ${clusters.length} clusters identified`);
+    const recentTitles = recentFeed.map(r => r.title);
+    const clusters = await clusterArticles(scoredArticles, { recentTitles });
 
-    // Phase 3: Write synthesis articles (daily-capped)
-    const remainingSlots = DAILY_CAP - commentaryToday;
-    const clustersToWrite = clusters.slice(0, remainingSlots);
+    if (clusters === null) {
+      await rememberPassedLinks(scoredArticles.map(a => a.link), now, RETRY_TTL_MS);
+      return { articles: rawArticles.length, scored: scoredArticles.length, clusters: 0, covered: 0, synthesized: 0, saved: 0 };
+    }
 
-    console.log(`\n[Pipeline] Phase 3: Writing ${clustersToWrite.length} synthesis articles (${commentaryToday} already today, cap ${DAILY_CAP})...`);
+    const covered = clusters.filter(c => c.already_covered);
+    const fresh = clusters.filter(c => !c.already_covered);
+    console.log(`[Pipeline] ${clusters.length} clusters identified, ${covered.length} already covered`);
+
+    // Everything this run passed on sits out for a day: stories already
+    // covered, articles scored under 50, and articles no cluster used. Without
+    // that, the same five headlines come back every 15 minutes and newer
+    // stories never get scored. Fresh clusters that missed this run's slot
+    // stay in play for the next one.
+    const inFresh = new Set(fresh.flatMap(c => c.articles.map(a => a.link)));
+    await rememberPassedLinks(scoredArticles.map(a => a.link).filter(link => !inFresh.has(link)), now);
+
+    // Phase 3: Write synthesis articles (one per run, while a slot is open)
+    const remainingSlots = Math.min(open - commentaryToday, MAX_PER_RUN);
+    const clustersToWrite = fresh.slice(0, remainingSlots);
+
+    console.log(`\n[Pipeline] Phase 3: Writing ${clustersToWrite.length} synthesis articles (${commentaryToday} already today, ${open}/${DAILY_CAP} open)...`);
 
     const prices = getCachedPrices();
     const synthesizedArticles = [];
 
     for (let i = 0; i < clustersToWrite.length; i++) {
-      // Re-check cap before each article
-      const { count: currentCount, allowed: stillAllowed } = await getCommentaryCount();
-      if (!stillAllowed) {
-        console.log(`[Synthesis] Daily cap reached: ${currentCount}/${DAILY_CAP} — stopping`);
+      // Re-check the open slots before each article
+      const { count: currentCount } = await getCommentaryCount();
+      if (currentCount >= slotsOpenAt(new Date())) {
+        console.log(`[Synthesis] No open slot: ${currentCount}/${DAILY_CAP} written — stopping`);
         break;
       }
 
@@ -1306,6 +1471,10 @@ async function runStackSignalPipeline() {
       const articleText = await writeFeedReaction(cluster, prices);
       if (!articleText) {
         console.log(`[Synthesis] Skipped: "${cluster.theme.slice(0, 50)}" — no output from Claude`);
+        continue;
+      }
+      if (articleText.length < MIN_ARTICLE_CHARS) {
+        console.log(`[Synthesis] Skipped: "${cluster.theme.slice(0, 50)}" — ${articleText.length} chars, under ${MIN_ARTICLE_CHARS}, slot kept`);
         continue;
       }
 
@@ -1340,7 +1509,7 @@ async function runStackSignalPipeline() {
 
     if (!synthesizedArticles.length) {
       console.log('[Pipeline] No synthesis articles generated');
-      return { articles: rawArticles.length, scored: scoredArticles.length, clusters: clusters.length, synthesized: 0, saved: 0 };
+      return { articles: rawArticles.length, scored: scoredArticles.length, clusters: clusters.length, covered: covered.length, synthesized: 0, saved: 0 };
     }
 
     // Phase 4: Images
@@ -1376,13 +1545,12 @@ async function runStackSignalPipeline() {
       console.log(`[Pipeline] Push phase error: ${err.message}`);
     }
 
-    // Phase 7: Claude daily synthesis editorial (once per day)
-    console.log('\n[Pipeline] Phase 7: Checking for Claude daily synthesis...');
-    try {
-      await generateClaudeDailySynthesis();
-    } catch (err) {
-      console.log(`[Pipeline] Claude synthesis error: ${err.message}`);
-    }
+    // Phase 7 used to have Claude write a third daily editorial from the feed.
+    // It couldn't save, since 'synthesis' isn't an allowed category on
+    // stack_signal_articles, so each night paid for up to three Sonnet drafts
+    // that were thrown away. The 6:15 AM flagship and the weekday evening
+    // edition already cover the day, so the call is off.
+    // generateClaudeDailySynthesis stays exported for a manual run.
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n${'━'.repeat(50)}`);
@@ -1392,7 +1560,7 @@ async function runStackSignalPipeline() {
     console.log(`  Saved: ${saved} | Runtime: ${elapsed}s`);
     console.log(`${'━'.repeat(50)}\n`);
 
-    return { articles: rawArticles.length, scored: scoredArticles.length, clusters: clusters.length, synthesized: synthesizedArticles.length, saved };
+    return { articles: rawArticles.length, scored: scoredArticles.length, clusters: clusters.length, covered: covered.length, synthesized: synthesizedArticles.length, saved };
   } catch (err) {
     console.error(`[Pipeline] Fatal error: ${err.message}`);
     return { articles: 0, scored: 0, clusters: 0, synthesized: 0, saved: 0, error: err.message };
@@ -1400,6 +1568,7 @@ async function runStackSignalPipeline() {
 }
 
 module.exports = {
+  slotsOpenAt,
   scoreArticles,
   clusterArticles,
   writeSynthesisArticle,

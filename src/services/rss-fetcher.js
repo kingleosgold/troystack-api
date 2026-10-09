@@ -223,13 +223,19 @@ async function fetchNewArticles() {
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const allArticles = [];
 
-  // Fetch existing URLs and titles from DB to deduplicate
+  // Fetch existing URLs and titles from DB to deduplicate. Reading the whole
+  // table hit the API's 1,000-row cap, in no set order, so links already
+  // written up came back as new. Only items from the last 24 hours are kept
+  // below, so a week of articles covers them with room for feeds that re-date
+  // an item or leave the date off, and it's well under the cap.
   let existingUrls = new Set();
   let existingTitles = new Set();
   try {
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const { data } = await supabase
       .from('stack_signal_articles')
-      .select('sources, title');
+      .select('sources, title')
+      .gte('published_at', since);
 
     if (data) {
       for (const row of data) {
@@ -280,7 +286,11 @@ async function fetchNewArticles() {
 
       if (!title || !link) continue;
 
-      const pubDate = pubDateStr ? new Date(pubDateStr) : new Date();
+      // An item with no date, or one that doesn't parse, can't be held to the
+      // 24-hour window or the week of dedup, so it could come back as new
+      // every run. Leave it out.
+      const pubDate = new Date(pubDateStr);
+      if (!pubDateStr || Number.isNaN(pubDate.getTime())) continue;
       if (pubDate < cutoff) continue;
 
       if (existingUrls.has(link)) continue;
