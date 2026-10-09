@@ -451,6 +451,7 @@ test('verify-session records a Gold-product price as Gold and anything else as f
   let res = fakeRes();
   await verifySession({ body: { session_id: 'cs_1' } }, res);
   assert.equal(res.body.tier, 'gold');
+  assert.equal(res.body.status, 'trialing', 'the page reads this to say whether a free week started');
   assert.equal(state.updates[0].subscription_tier, 'gold');
 
   reset({
