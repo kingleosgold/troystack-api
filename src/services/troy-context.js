@@ -101,20 +101,24 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now() }) {
     return (data && data[0]) || null;
   }
 
+  // Syntheses are filtered out in the query, before the limit, since several
+  // editions a day (daily, evening, weekly, recap) could otherwise fill it.
   async function newestHeadlines() {
     const { data, error } = await db
       .from('stack_signal_articles')
-      .select('title, published_at, is_stack_signal')
+      .select('title, published_at')
+      .or('is_stack_signal.is.null,is_stack_signal.eq.false')
       .order('published_at', { ascending: false })
-      .limit(10);
+      .limit(6);
     if (error) throw error;
-    return (data || []).filter((a) => !a.is_stack_signal);
+    return data || [];
   }
 
-  return async function getMarketBlock() {
-    // An empty block, when everything failed, is only kept for half a minute.
-    const ttl = cache.block ? TTL_MS : EMPTY_TTL_MS;
-    if (cache.block !== null && now() - cache.at < ttl) return cache.block;
+  // Questions that arrive while a refresh is running share it, so a burst at
+  // the five-minute mark makes one set of reads, not one per question.
+  let inFlight = null;
+
+  async function refresh() {
     const [spot, signal, headlines] = await Promise.all([
       fetchSpot().catch((e) => {
         console.log(`[Troy Context] Spot unavailable: ${e.message}`);
@@ -132,6 +136,18 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now() }) {
     const block = buildMarketBlock({ spot, signal, headlines });
     cache = { at: now(), block };
     return block;
+  }
+
+  return async function getMarketBlock() {
+    // An empty block, when everything failed, is only kept for half a minute.
+    const ttl = cache.block ? TTL_MS : EMPTY_TTL_MS;
+    if (cache.block !== null && now() - cache.at < ttl) return cache.block;
+    if (!inFlight) {
+      inFlight = refresh().finally(() => {
+        inFlight = null;
+      });
+    }
+    return inFlight;
   };
 }
 
