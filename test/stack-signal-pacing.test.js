@@ -114,7 +114,7 @@ const calls = { gemini: [], claude: 0, claudePrompts: [], rss: 0 };
 let clusterReply = '[]';
 let scoreValue = 80;
 let draft = null; // what the feed writer returns; null means the long article
-let draftQueue = []; // one reply per feed-writer call, in order, before falling back to draft
+let draftQueue = []; // one reply per feed-writer call, in order, before falling back to draft; an Error is thrown
 
 const longArticle = 'Gold held its ground as the dollar slipped and physical buyers kept coming. '.repeat(40);
 
@@ -125,7 +125,11 @@ async function fakeGemini(model, system, user) {
     return JSON.stringify(Array.from({ length: count }, (_, i) => ({ index: i + 1, score: scoreValue, category: 'gold' })));
   }
   if (system.includes('editor at a precious metals intelligence publication')) return clusterReply;
-  if (system.includes('posts reactions to market news')) return draftQueue.length ? draftQueue.shift() : (draft || longArticle);
+  if (system.includes('posts reactions to market news')) {
+    const reply = draftQueue.length ? draftQueue.shift() : (draft || longArticle);
+    if (reply instanceof Error) throw reply; // a failed call, like a timeout or a quota error
+    return reply;
+  }
   if (system.includes('news editor')) return 'Physical buyers kept buying while paper traders sold';
   throw new Error(`unexpected Gemini call: ${system.slice(0, 60)}`);
 }
@@ -543,6 +547,50 @@ test('a run throws away at most two drafts, and the stories behind them stay in 
   assert.strictEqual(savedFeedRows().length, 0);
   assert.strictEqual(db.dailyCount, 4);
   assert.deepStrictEqual(passedLinks(), ['https://example.com/fed-1', 'https://example.com/fed-2']);
+});
+
+test('a draft call that fails hands the slot to the next fresh cluster', async () => {
+  db.dailyCount = 4;
+  clusterReply = JSON.stringify([
+    { theme: 'Fed split keeps gold bid', importance: 90, article_indices: [0, 1], suggested_angle: 'Split Fed', category: 'macro', already_covered: false },
+    { theme: 'Perth Mint backlog tightens silver', importance: 85, article_indices: [2], suggested_angle: 'Mint backlog', category: 'silver', already_covered: false },
+  ]);
+  draftQueue = [new Error('timeout of 30000ms exceeded'), longArticle];
+  const result = await ssp.runStackSignalPipeline();
+  assert.strictEqual(result.error, undefined);
+  assert.strictEqual(result.synthesized, 1);
+  assert.deepStrictEqual(savedFeedRows().map(r => r.title), ['Perth Mint backlog tightens silver']);
+  assert.strictEqual(writerCalls().length, 2);
+  assert.match(writerCalls()[0].user, /Fed minutes show officials split/);
+  assert.match(writerCalls()[1].user, /Perth Mint pauses silver bar orders/);
+  // The Fed story sits out an hour, so the next run doesn't draft it first again.
+  assert.strictEqual(passedUntil('https://example.com/fed-1'), HOUR_LATER);
+  assert.strictEqual(passedUntil('https://example.com/fed-2'), HOUR_LATER);
+  assert.strictEqual(passedUntil('https://example.com/perth-1'), undefined);
+  assert.strictEqual(db.dailyCount, 5);
+});
+
+test('when both draft calls fail, the run ends without an error and publishes nothing', async () => {
+  db.dailyCount = 4;
+  clusterReply = JSON.stringify([
+    { theme: 'Fed split keeps gold bid', importance: 90, article_indices: [0], suggested_angle: 'Split Fed', category: 'macro', already_covered: false },
+    { theme: 'Gold eases after the minutes', importance: 88, article_indices: [1], suggested_angle: 'Dip buyers', category: 'gold', already_covered: false },
+    { theme: 'Perth Mint backlog tightens silver', importance: 85, article_indices: [2], suggested_angle: 'Mint backlog', category: 'silver', already_covered: false },
+  ]);
+  draftQueue = [new Error('Request failed with status code 429'), new Error('socket hang up')];
+  const result = await ssp.runStackSignalPipeline();
+  assert.strictEqual(result.error, undefined);
+  assert.strictEqual(result.clusters, 3);
+  assert.strictEqual(result.synthesized, 0);
+  assert.strictEqual(result.saved, 0);
+  // Each failed call counts as a draft, so the third cluster isn't tried this run.
+  assert.strictEqual(writerCalls().length, 2);
+  assert.strictEqual(savedFeedRows().length, 0);
+  assert.strictEqual(db.dailyCount, 4);
+  // Both failed stories sit out an hour, and the one behind them stays in play.
+  assert.deepStrictEqual(passedLinks(), ['https://example.com/fed-1', 'https://example.com/fed-2']);
+  assert.strictEqual(passedUntil('https://example.com/fed-1'), HOUR_LATER);
+  assert.strictEqual(passedUntil('https://example.com/fed-2'), HOUR_LATER);
 });
 
 test('a story whose draft was thrown away comes back after its hour', async t => {
