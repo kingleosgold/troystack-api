@@ -15,6 +15,11 @@
 -- these columns, which also stops it writing free over a plan bought on the
 -- web. App Store plans reach profiles through the RevenueCat webhook, the
 -- "Supabase Sync" connection pointed at /v1/webhooks/revenuecat.
+--
+-- Run this only after the webhook in src/routes/revenuecat-webhook.js is
+-- deployed. It applies the one-time lifetime purchase and answers 500 on a
+-- failed write so RevenueCat retries. The old handler did neither, and with
+-- the app's own writes blocked a new App Store lifetime buyer would stay free.
 
 create or replace function public.profiles_keep_plan()
 returns trigger
