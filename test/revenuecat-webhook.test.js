@@ -31,6 +31,11 @@ function fakeSupabase(rows, opts = {}) {
       };
       return {
         select: read.select,
+        async upsert(row) {
+          if (opts.failWrite) return { error: { message: 'connection reset' } };
+          if (!rows[row.id]) rows[row.id] = { subscription_tier: null, subscription_status: null, subscription_expires_at: null, stripe_customer_id: null };
+          return { error: null };
+        },
         update(fields) {
           return {
             async eq(_col, v) {
@@ -202,13 +207,35 @@ test('anonymous users, odd ids, unknown products, transfers and billing issues c
   assert.deepStrictEqual(db.writes, []);
 }));
 
-test('an event for an account with no profile is skipped', withSecret(SECRET, async () => {
-  const db = fakeSupabase({});
+test('a purchase for an account with no profile row makes the row and applies', withSecret(SECRET, async () => {
+  const rows = {};
+  const db = fakeSupabase(rows);
   const { revenueCatWebhookHandler } = loadHandler(db);
   const res = await send(revenueCatWebhookHandler, { type: 'NON_RENEWING_PURCHASE', app_user_id: USER, product_id: 'stacktracker_lifetime' });
   assert.strictEqual(res.code, 200);
+  assert.strictEqual(rows[USER].subscription_tier, 'lifetime');
+}));
+
+test('an expiry for an account with no profile row ends nothing', withSecret(SECRET, async () => {
+  const db = fakeSupabase({});
+  const { revenueCatWebhookHandler } = loadHandler(db);
+  const res = await send(revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' });
+  assert.strictEqual(res.code, 200);
   assert.strictEqual(res.body.skipped, 'no_profile');
   assert.deepStrictEqual(db.writes, []);
+}));
+
+test('a retried expiry for a period already replaced ends nothing', withSecret(SECRET, async () => {
+  const renewedTo = Date.UTC(2026, 10, 9);
+  const rows = { [USER]: { subscription_tier: 'gold', subscription_status: null, subscription_expires_at: new Date(renewedTo).toISOString() } };
+  const db = fakeSupabase(rows);
+  const { revenueCatWebhookHandler } = loadHandler(db);
+  const res = await send(revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly', expiration_at_ms: Date.UTC(2026, 9, 9) });
+  assert.strictEqual(res.body.skipped, 'superseded');
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+  // The expiry for the current period still ends it.
+  await send(revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly', expiration_at_ms: renewedTo });
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
 }));
 
 test('when an App Store plan ends, a web plan Stripe still holds is kept', withSecret(SECRET, async () => {
