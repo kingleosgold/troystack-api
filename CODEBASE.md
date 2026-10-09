@@ -190,12 +190,12 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | /v1/webhooks/stripe | Signature | Stripe webhook (checkout, subscription updates) |
+| POST | /v1/webhooks/stripe | Signature | Stripe webhook (checkout, subscription updates). A checkout on another Gold-product price is saved as Gold. If the Gold product can't be read, the tier the checkout recorded stands, or the handler answers 500 so Stripe sends the event again |
 | POST | /v1/stripe/create-checkout-session | Bearer (Supabase session, must match user_id) | Create Stripe checkout. The price must be a Gold price or on the Gold product, or it answers 400. Another Gold-product price sells as lifetime when one-time and Gold when recurring. Redirect URLs must be on a TroyStack site; optional `campaign` is stored on the session and subscription |
 | POST | /v1/stripe/verify-session | Public (session id) | Verify checkout completion |
 | POST | /v1/stripe/customer-portal | Bearer (Supabase session, must match user_id) | Stripe billing portal; return_url must be on a TroyStack site |
 | GET | /v1/stripe/my-plan | Bearer (Supabase session) | The web plan Stripe holds for the signed-in account: `{ plan: 'gold' \| 'lifetime' \| null, status, trial_end }`. The iPhone app asks before it treats an account with no App Store plan as free. A failed profile lookup, Stripe not configured, or a Gold price Stripe can't read answers non-2xx, never `plan: null`. Never writes |
-| GET | /v1/sync-subscription | Public (UUID) | Plan for a user. A free profile with a paid lifetime checkout that wasn't refunded, or a live subscription to a Gold price or product, gets its plan restored, since the iPhone app writes free when RevenueCat has nothing. Lifetime wins over a subscription. The answer changes only when the profile update succeeds |
+| GET | /v1/sync-subscription | Public (UUID) | Plan for a user. A free profile with a paid lifetime checkout that wasn't refunded (every completed checkout is paged through), or a live subscription to a Gold price or product, gets its plan restored, since the iPhone app writes free when RevenueCat has nothing. Lifetime wins over a subscription. The answer changes only when the profile update succeeds |
 | POST | /v1/webhooks/revenuecat | Signature | RevenueCat iOS purchase webhook |
 
 ### src/routes/stack-signal.js
