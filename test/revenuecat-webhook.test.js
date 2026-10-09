@@ -261,3 +261,38 @@ test('an account that never reached web checkout goes free without asking Stripe
   await send(mod.revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' });
   assert.strictEqual(rows[USER].subscription_tier, 'free', 'nothing in Stripe either');
 }));
+
+test("a temporary grant during a store outage gives Gold for a day, then the real purchase or the expiry decides", withSecret(SECRET, async () => {
+  const at = Date.UTC(2026, 9, 9, 12);
+  const rows = { [USER]: { subscription_tier: 'free', subscription_status: null, subscription_expires_at: null, stripe_customer_id: null } };
+  const { revenueCatWebhookHandler } = loadHandler(fakeSupabase(rows));
+  // The grant names no product.
+  let res = await send(revenueCatWebhookHandler, { type: 'TEMPORARY_ENTITLEMENT_GRANT', app_user_id: USER, store: 'APP_STORE', event_timestamp_ms: at });
+  assert.strictEqual(res.code, 200);
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+  assert.strictEqual(rows[USER].subscription_status, 'temporary_grant');
+  assert.strictEqual(rows[USER].subscription_expires_at, new Date(at + 24 * 3600 * 1000).toISOString());
+
+  // The purchase validates as lifetime.
+  await send(revenueCatWebhookHandler, { type: 'NON_RENEWING_PURCHASE', app_user_id: USER, product_id: 'stacktracker_lifetime' });
+  assert.strictEqual(rows[USER].subscription_tier, 'lifetime');
+  assert.strictEqual(rows[USER].subscription_status, 'active');
+
+  // Another account's grant fails validation, and the expiry ends it even
+  // though it names the lifetime product.
+  rows[USER] = { subscription_tier: 'free', subscription_status: null, subscription_expires_at: null, stripe_customer_id: null };
+  await send(revenueCatWebhookHandler, { type: 'TEMPORARY_ENTITLEMENT_GRANT', app_user_id: USER, store: 'APP_STORE', event_timestamp_ms: at });
+  res = await send(revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_lifetime' });
+  assert.strictEqual(res.body.temporary, true);
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+  assert.strictEqual(rows[USER].subscription_status, null);
+}));
+
+test('a temporary grant leaves an account that already has a plan alone', withSecret(SECRET, async () => {
+  const rows = { [USER]: { subscription_tier: 'gold', subscription_status: 'active', subscription_expires_at: '2026-11-09T00:00:00.000Z' } };
+  const db = fakeSupabase(rows);
+  const { revenueCatWebhookHandler } = loadHandler(db);
+  const res = await send(revenueCatWebhookHandler, { type: 'TEMPORARY_ENTITLEMENT_GRANT', app_user_id: USER, store: 'APP_STORE' });
+  assert.strictEqual(res.body.kept, 'gold');
+  assert.deepStrictEqual(db.writes, []);
+}));
