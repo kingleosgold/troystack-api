@@ -161,24 +161,40 @@ function calculateChanges(current, yesterday) {
 // FRIDAY CLOSE
 // ============================================
 
+// Friday close writes to app_state go out one at a time, in the order the
+// closes were made. A write that stalls holds back the next one until it
+// settles, so it can't land after a newer close, and a close that's been
+// replaced by the time its write's turn comes isn't written at all.
+let fridayCloseWrites = Promise.resolve();
+
 /**
  * Save current prices as Friday close for weekend use.
- * Persists to Supabase so it survives Railway redeploys.
+ * Persists to Supabase so it survives Railway redeploys. The close is kept in
+ * memory at once and its write waits its turn, so callers don't wait on it.
+ * `isCurrent` is false once the fetch saving it has been replaced, and then
+ * nothing is saved.
  */
-async function saveFridayClose(data) {
-  fridayCloseData = { ...data, savedAt: new Date().toISOString() };
-  try {
-    await supabase
-      .from('app_state')
-      .upsert({ key: 'friday_close', value: fridayCloseData }, { onConflict: 'key' });
-    console.log('   Saved Friday close prices to Supabase');
-  } catch (err) {
-    console.log('   Could not persist Friday close:', err.message);
-  }
+function saveFridayClose(data, isCurrent = () => true) {
+  if (!isCurrent()) return;
+  const close = { ...data, savedAt: new Date().toISOString() };
+  fridayCloseData = close;
+  fridayCloseWrites = fridayCloseWrites.then(async () => {
+    if (fridayCloseData !== close) return;
+    try {
+      await supabase
+        .from('app_state')
+        .upsert({ key: 'friday_close', value: close }, { onConflict: 'key' });
+      console.log('   Saved Friday close prices to Supabase');
+    } catch (err) {
+      console.log('   Could not persist Friday close:', err.message);
+    }
+  });
 }
 
 /**
  * Load Friday close data from Supabase (called on startup).
+ * A fetch can save a close while this read is out, and the stored close only
+ * replaces that one when it's newer.
  */
 async function loadFridayClose() {
   try {
@@ -188,6 +204,10 @@ async function loadFridayClose() {
       .eq('key', 'friday_close')
       .single();
     if (!error && data && data.value) {
+      if (fridayCloseData && !isNewerFridayClose(data.value, fridayCloseData)) {
+        console.log("   Kept the Friday close saved since startup, the stored one isn't newer");
+        return;
+      }
       fridayCloseData = data.value;
       console.log('   Loaded Friday close from Supabase');
     }
@@ -206,6 +226,17 @@ function getFridayClose() {
 function fridayQuotedAt(friday) {
   if (friday.quotedAt !== undefined) return friday.quotedAt;
   return /fallback/.test(String(friday.source || '')) ? null : friday.timestamp || null;
+}
+
+// Whether close `a` is newer than close `b`. The one whose prices were read
+// live later wins, and prices never read live count as oldest. On a tie, like
+// two closes on built-in prices, the one saved later wins.
+function isNewerFridayClose(a, b) {
+  const time = (iso) => Date.parse(iso || '') || 0;
+  const quotedA = time(fridayQuotedAt(a));
+  const quotedB = time(fridayQuotedAt(b));
+  if (quotedA !== quotedB) return quotedA > quotedB;
+  return time(a.savedAt || a.timestamp) > time(b.savedAt || b.timestamp);
 }
 
 // ============================================
@@ -440,17 +471,14 @@ async function fetchLiveSpotPricesNow(generation) {
     const fridayDayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
     if (fridayDayMap[fridayParts.weekday] === 5 && parseInt(fridayParts.hour) >= 16) {
       console.log('   Friday afternoon — saving as Friday close');
-      await saveFridayClose({
+      saveFridayClose({
         prices: spotPriceCache.prices,
         timestamp: spotPriceCache.lastUpdated.toISOString(),
         quotedAt: spotPriceCache.quotedAt,
         source: spotPriceCache.source,
         change: spotPriceCache.change,
-      });
+      }, isCurrent);
     }
-
-    // A newer fetch may have started while the Friday close was saving.
-    if (!isCurrent()) return spotPriceCache;
 
     // Log to price_log (non-blocking) — skip fallback data to avoid polluting the log
     if (fetched.source === 'static-fallback' || fetched.source === 'cached-fallback') {
@@ -573,7 +601,7 @@ async function getSpotPrices() {
 
     // If no Friday close but we have cached data, save it as Friday close
     if (!friday && spotPriceCache.lastUpdated) {
-      await saveFridayClose({
+      saveFridayClose({
         prices: spotPriceCache.prices,
         timestamp: spotPriceCache.lastUpdated.toISOString(),
         quotedAt: spotPriceCache.quotedAt,
