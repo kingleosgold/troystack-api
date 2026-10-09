@@ -41,6 +41,7 @@ function reset(over = {}) {
     customerById: {},
     searchFails: false,
     upserts: [],
+    expired: [],
   }, over);
   router.resetGoldProductCache();
 }
@@ -63,6 +64,13 @@ const fakeSupabase = {
               const p = state.profile;
               const matches = p && (p[col] === undefined || p[col] === val);
               return matches ? { data: p, error: null } : { data: null, error: { code: 'PGRST116', message: 'no rows' } };
+            },
+            // The RevenueCat webhook reads with maybeSingle: no row is null data.
+            maybeSingle: async () => {
+              if (state.profileError) return { data: null, error: state.profileError };
+              const p = state.profile;
+              const matches = p && (p[col] === undefined || p[col] === val);
+              return { data: matches ? p : null, error: null };
             },
           }),
         };
@@ -171,6 +179,11 @@ fakeStripe.billingPortal = {
       return { url: 'https://billing.stripe.com/p/session/test' };
     },
   },
+};
+fakeStripe.checkout.sessions.expire = async (id) => {
+  state.stripeCalls.push('checkout.sessions.expire');
+  state.expired.push(id);
+  return { id, status: 'expired' };
 };
 fakeStripe.checkout.sessions.create = async (params) => {
   state.stripeCalls.push('checkout.sessions.create');
@@ -347,10 +360,10 @@ test('my-plan answers no web plan when there is no profile row', async () => {
   assert.deepEqual(res.body, { plan: null, status: null, trial_end: null });
 });
 
-async function checkout(priceId) {
+async function checkout(priceId, campaign) {
   const res = fakeRes();
   await createCheckout(
-    { headers: { authorization: 'Bearer good-token' }, body: { user_id: USER, price_id: priceId, success_url: 'https://troystack.ai/settings?session_id={CHECKOUT_SESSION_ID}' } },
+    { headers: { authorization: 'Bearer good-token' }, body: { user_id: USER, price_id: priceId, success_url: 'https://troystack.ai/settings?session_id={CHECKOUT_SESSION_ID}', ...(campaign ? { campaign } : {}) } },
     res,
   );
   return res;
@@ -565,7 +578,7 @@ test('a history longer than the check reads is not taken as no plan', async () =
 
 test('the webhook leaves the profile alone for a one-time checkout that sold no Gold plan', async () => {
   reset({ lineItems: { cs_mug: oneTime('price_mug', 'prod_other') } });
-  const event = { type: 'checkout.session.completed', data: { object: { id: 'cs_mug', client_reference_id: USER, customer: 'cus_1', mode: 'payment', metadata: { user_id: USER } } } };
+  const event = { type: 'checkout.session.completed', data: { object: { id: 'cs_mug', client_reference_id: USER, customer: 'cus_1', mode: 'payment', payment_status: 'paid', metadata: { user_id: USER } } } };
   let res = webhookRes();
   await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(event)) }, res);
   assert.equal(res.statusCode, 200);
@@ -662,6 +675,7 @@ test('when a subscription ends, the profile gets the plan Stripe still holds, or
   reset({
     profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' },
     subscriptions: [{ id: 'sub_second', status: 'active', items: { data: [{ price: { id: 'price_gold_yearly', product: 'prod_gold' } }] } }],
+    subscriptionById: { sub_old: { id: 'sub_old', customer: 'cus_1', status: 'canceled', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } } },
   });
   res = webhookRes();
   await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(subscriptionEvent('customer.subscription.updated', 'canceled'))) }, res);
@@ -681,17 +695,33 @@ test("checkout doesn't open when the new customer id can't be saved", async () =
 });
 
 test('an App Store expiry keeps a web plan Stripe still holds', async () => {
-  reset({
-    profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' },
-    subscriptions: [{ id: 'sub_web', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
-  });
-  const res = fakeRes();
-  await router.revenueCatWebhookHandler({ headers: {}, body: { event: { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' } } }, res);
-  assert.equal(state.updates[0].subscription_tier, 'gold');
+  const before = process.env.REVENUECAT_WEBHOOK_SECRET;
+  process.env.REVENUECAT_WEBHOOK_SECRET = 'rc-test-secret';
+  const expiry = { headers: { authorization: 'Bearer rc-test-secret' }, body: { event: { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' } } };
+  try {
+    reset({
+      profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' },
+      subscriptions: [{ id: 'sub_web', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+    });
+    const res = fakeRes();
+    await router.revenueCatWebhookHandler(expiry, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(state.updates[0].subscription_tier, 'gold');
 
-  reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' } });
-  await router.revenueCatWebhookHandler({ headers: {}, body: { event: { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' } } }, fakeRes());
-  assert.equal(state.updates[0].subscription_tier, 'free');
+    reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' } });
+    await router.revenueCatWebhookHandler(expiry, fakeRes());
+    assert.equal(state.updates[0].subscription_tier, 'free');
+
+    // Stripe can't be read, so RevenueCat is asked to send it again.
+    reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' }, searchFails: true });
+    const failed = fakeRes();
+    await router.revenueCatWebhookHandler(expiry, failed);
+    assert.equal(failed.statusCode, 500);
+    assert.equal(state.updates.length, 0);
+  } finally {
+    if (before == null) delete process.env.REVENUECAT_WEBHOOK_SECRET;
+    else process.env.REVENUECAT_WEBHOOK_SECRET = before;
+  }
 });
 
 const portalHandler = routeHandler('/customer-portal');
@@ -757,8 +787,9 @@ test('a subscription event for a customer the profile no longer holds still find
 });
 
 test('a live subscription to something other than Gold gives no Gold', async () => {
-  reset({ profile: { id: USER, subscription_tier: 'free', subscription_status: null, stripe_customer_id: 'cus_1' } });
-  const event = { type: 'customer.subscription.updated', data: { object: { id: 'sub_api', customer: 'cus_1', status: 'active', items: { data: [{ price: { id: 'price_other_api', product: 'prod_other' } }] } } } };
+  const sub = { id: 'sub_api', customer: 'cus_1', status: 'active', items: { data: [{ price: { id: 'price_other_api', product: 'prod_other' } }] } };
+  reset({ profile: { id: USER, subscription_tier: 'free', subscription_status: null, stripe_customer_id: 'cus_1' }, subscriptionById: { sub_api: sub } });
+  const event = { type: 'customer.subscription.updated', data: { object: sub } };
   const res = webhookRes();
   await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(event)) }, res);
   assert.equal(state.updates[0].subscription_tier, 'free');
@@ -774,4 +805,128 @@ test('the billing page opens on the customer that holds the plan', async () => {
   await portalHandler({ headers: { authorization: 'Bearer good-token' }, body: { user_id: USER, return_url: 'https://troystack.ai/settings' } }, res);
   assert.equal(res.statusCode, 200);
   assert.equal(state.portal.customer, 'cus_old');
+});
+
+test('a late subscription update is checked against where the subscription stands now', async () => {
+  reset({
+    profile: { id: USER, subscription_tier: 'free', subscription_status: 'canceled', stripe_customer_id: 'cus_1' },
+    subscriptionById: { sub_old: { id: 'sub_old', customer: 'cus_1', status: 'canceled', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } } },
+  });
+  // A retried event from before the cancellation still says active.
+  const res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(subscriptionEvent('customer.subscription.updated', 'active'))) }, res);
+  assert.equal(res.statusCode, 200);
+  assert.ok(state.stripeCalls.includes('subscriptions.retrieve'));
+  assert.equal(state.updates[0].subscription_tier, 'free');
+});
+
+test("a profile read that fails isn't taken as no profile, so Stripe sends the event again", async () => {
+  reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' }, profileError: { code: '08006', message: 'connection reset' } });
+  const res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(subscriptionEvent('customer.subscription.deleted', 'canceled'))) }, res);
+  assert.equal(res.statusCode, 500);
+  assert.equal(state.updates.length, 0);
+});
+
+test('the free week is for the first Gold subscription only', async () => {
+  reset({ profile: { stripe_customer_id: 'cus_1' } });
+  let res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.created.subscription_data.trial_period_days, 7);
+  assert.equal(res.body.trial, true);
+
+  reset({
+    profile: { stripe_customer_id: 'cus_1' },
+    subscriptions: [{ id: 'sub_was', status: 'canceled', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+  });
+  res = await checkout('price_gold_yearly');
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.created.subscription_data, undefined, 'no trial and no campaign');
+  assert.equal(res.body.trial, false);
+
+  // A subscription whose first payment never went through, or one to
+  // something else, doesn't use up the week.
+  reset({
+    profile: { stripe_customer_id: 'cus_1' },
+    subscriptions: [
+      { id: 'sub_failed', status: 'incomplete_expired', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } },
+      { id: 'sub_api', status: 'canceled', items: { data: [{ price: { id: 'price_other_api', product: 'prod_other' } }] } },
+    ],
+  });
+  res = await checkout('price_gold_monthly');
+  assert.equal(state.created.subscription_data.trial_period_days, 7);
+});
+
+test('an earlier Gold subscription on an older customer counts too', async () => {
+  reset({
+    profile: { stripe_customer_id: 'cus_new' },
+    customers: [{ id: 'cus_old', metadata: { supabase_user_id: USER } }],
+    subscriptions: [{ id: 'sub_old', customer: 'cus_old', status: 'canceled', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+  });
+  const res = await checkout('price_gold_monthly', 'pricing');
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.created.subscription_data.trial_period_days, undefined);
+  assert.deepEqual(state.created.subscription_data.metadata, { campaign: 'pricing' });
+});
+
+test('a checkout left open in another tab is closed before a new one opens', async () => {
+  reset({
+    profile: { stripe_customer_id: 'cus_1' },
+    sessions: [
+      { id: 'cs_open', customer: 'cus_1', status: 'open', mode: 'subscription' },
+      { id: 'cs_done', customer: 'cus_1', status: 'complete', mode: 'subscription' },
+    ],
+  });
+  const res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(state.expired, ['cs_open']);
+  assert.ok(state.stripeCalls.indexOf('checkout.sessions.expire') < state.stripeCalls.indexOf('checkout.sessions.create'));
+});
+
+test('a plan on a customer the profile never recorded still stops a second checkout', async () => {
+  reset({
+    profile: { stripe_customer_id: null },
+    customers: [{ id: 'cus_old', metadata: { supabase_user_id: USER } }],
+    subscriptions: [{ id: 'sub_live', customer: 'cus_old', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+  });
+  const res = await checkout('price_gold_yearly');
+  assert.equal(res.statusCode, 409);
+  assert.equal(state.created, undefined);
+});
+
+test('the billing page opens where a subscription is still billing, even with lifetime elsewhere', async () => {
+  reset({
+    profile: { stripe_customer_id: 'cus_life' },
+    customers: [{ id: 'cus_sub', metadata: { supabase_user_id: USER } }],
+    sessions: [{ ...lifetimeSession('pi_life'), customer: 'cus_life' }],
+    charges: { pi_life: { refunded: false } },
+    subscriptions: [{ id: 'sub_monthly', customer: 'cus_sub', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+  });
+  const res = fakeRes();
+  await portalHandler({ headers: { authorization: 'Bearer good-token' }, body: { user_id: USER, return_url: 'https://troystack.ai/settings' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.portal.customer, 'cus_sub');
+});
+
+test('a one-time checkout gives nothing until its payment has gone through', async () => {
+  const pending = {
+    type: 'checkout.session.completed',
+    data: { object: { id: 'cs_ach', mode: 'payment', status: 'complete', payment_status: 'unpaid', customer: 'cus_1', client_reference_id: USER, metadata: { user_id: USER, tier: 'lifetime' }, payment_intent: 'pi_ach' } },
+  };
+  reset({ profile: { id: USER, subscription_tier: 'free', subscription_status: null, stripe_customer_id: 'cus_1' }, charges: { pi_ach: { refunded: false } } });
+  let res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(pending)) }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.updates.length, 0);
+
+  const failed = { type: 'checkout.session.async_payment_failed', data: { object: { ...pending.data.object } } };
+  res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(failed)) }, res);
+  assert.equal(state.updates.length, 0);
+
+  const paid = { type: 'checkout.session.async_payment_succeeded', data: { object: { ...pending.data.object, payment_status: 'paid' } } };
+  res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(paid)) }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.updates[0].subscription_tier, 'lifetime');
 });
