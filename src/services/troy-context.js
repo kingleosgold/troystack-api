@@ -17,6 +17,8 @@
 const TTL_MS = 5 * 60 * 1000;
 const EMPTY_TTL_MS = 30 * 1000;
 const WAIT_MS = 1500;
+// A read still running after this long is taken as hung and a fresh one starts.
+const STALL_MS = 10 * 1000;
 const METALS = ['gold', 'silver', 'platinum', 'palladium'];
 
 // The Signal is written by a pipeline that sometimes uses long dashes, and
@@ -123,7 +125,7 @@ function buildMarketBlock({ spot, signal, headlines, now } = {}) {
  * from a read kept for five minutes.
  * @param {{ fetchSpot: () => Promise<object>, db: object, now?: () => number, waitMs?: number }} deps
  */
-function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = WAIT_MS }) {
+function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = WAIT_MS, stallMs = STALL_MS }) {
   // The read's answer, or the fallback once `waitMs` have passed. The read
   // carries on either way and updates what's kept when it lands.
   function waitAtMost(promise, fallback) {
@@ -161,31 +163,52 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = W
   // One database read kept for five minutes. Questions that arrive while it
   // runs share it, so a burst makes one read, not one per question. A read
   // that fails keeps the last good answer and is tried again in 30 seconds.
+  // A read that hangs is given up on after stallMs, so the next question
+  // starts a fresh one, and an answer that lands after a newer read's is
+  // ignored.
   function keptRead(read, label, empty) {
     let value = empty;
     let at = null;
     let ok = false;
     let inFlight = null;
+    let startedAt = 0;
+    let started = 0;
+    let landed = 0;
     return function get() {
       if (at !== null && now() - at < (ok ? TTL_MS : EMPTY_TTL_MS)) return Promise.resolve(value);
+      if (inFlight && now() - startedAt >= stallMs) {
+        console.log(`[Troy Context] ${label} read still running after ${stallMs} ms, starting another`);
+        inFlight = null;
+      }
       if (!inFlight) {
-        inFlight = read()
+        const n = ++started;
+        startedAt = now();
+        const current = Promise.resolve()
+          .then(read)
           .then(
             (v) => {
-              value = v;
-              ok = true;
-              return v;
+              if (n > landed) {
+                landed = n;
+                value = v;
+                ok = true;
+                at = now();
+              }
+              return value;
             },
             (e) => {
               console.log(`[Troy Context] ${label} unavailable: ${e.message}`);
-              ok = false;
+              if (n > landed) {
+                landed = n;
+                ok = false;
+                at = now();
+              }
               return value;
             },
           )
           .finally(() => {
-            at = now();
-            inFlight = null;
+            if (inFlight === current) inFlight = null;
           });
+        inFlight = current;
       }
       return waitAtMost(inFlight, () => value);
     };
@@ -194,18 +217,24 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = W
   const signalPart = keptRead(latestSignal, 'Signal', null);
   const headlinesPart = keptRead(newestHeadlines, 'Headlines', []);
   let spotInFlight = null;
+  let spotStartedAt = 0;
 
+  // Questions that arrive during a spot read share it. One that hangs is
+  // given up on after stallMs, like the database reads.
   function currentSpot() {
+    if (spotInFlight && now() - spotStartedAt >= stallMs) spotInFlight = null;
     if (!spotInFlight) {
-      spotInFlight = Promise.resolve()
+      spotStartedAt = now();
+      const current = Promise.resolve()
         .then(fetchSpot)
         .catch((e) => {
           console.log(`[Troy Context] Spot unavailable: ${e.message}`);
           return null;
         })
         .finally(() => {
-          spotInFlight = null;
+          if (spotInFlight === current) spotInFlight = null;
         });
+      spotInFlight = current;
     }
     return waitAtMost(spotInFlight, () => null);
   }
