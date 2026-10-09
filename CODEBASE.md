@@ -183,10 +183,10 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | GET | /v1/push/audit-user-ids | Admin (INTELLIGENCE_API_KEY) | Scan tables for non-UUID user_id contamination |
 
 ### src/routes/stripe.js
-- **Purpose:** Stripe billing + RevenueCat iOS subscription webhooks
+- **Purpose:** Stripe billing + RevenueCat iOS subscription webhooks. The checkout webhook and verify-session leave a profile alone for a one-time checkout with no recorded tier that sold no lifetime Gold price
 - **Exports:** Router + `stripeWebhookHandler`, `revenueCatWebhookHandler`
 - **Dependencies:** stripe SDK, supabase, lib/stripe-checks
-- **Last modified:** 2026-10-08
+- **Last modified:** 2026-10-09
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -194,8 +194,8 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | POST | /v1/stripe/create-checkout-session | Bearer (Supabase session, must match user_id) | Create Stripe checkout. The price must be a Gold price or on the Gold product, or it answers 400. Another Gold-product price sells as lifetime when one-time and Gold when recurring. Redirect URLs must be on a TroyStack site; optional `campaign` is stored on the session and subscription |
 | POST | /v1/stripe/verify-session | Public (session id) | Verify checkout completion |
 | POST | /v1/stripe/customer-portal | Bearer (Supabase session, must match user_id) | Stripe billing portal; return_url must be on a TroyStack site |
-| GET | /v1/stripe/my-plan | Bearer (Supabase session) | The web plan Stripe holds for the signed-in account: `{ plan: 'gold' \| 'lifetime' \| null, status, trial_end }`. The iPhone app asks before it treats an account with no App Store plan as free. A failed profile lookup, Stripe not configured, or a Gold price Stripe can't read answers non-2xx, never `plan: null`. Never writes |
-| GET | /v1/sync-subscription | Public (UUID) | Plan for a user. A free profile with a paid lifetime checkout that wasn't refunded (every completed checkout is paged through), or a live subscription to a Gold price or product, gets its plan restored, since the iPhone app writes free when RevenueCat has nothing. Lifetime wins over a subscription. The answer changes only when the profile update succeeds |
+| GET | /v1/stripe/my-plan | Bearer (Supabase session) | The web plan Stripe holds for the signed-in account: `{ plan: 'gold' \| 'lifetime' \| null, status, trial_end }`. The iPhone app asks before it treats an account with no App Store plan as free. A failed profile lookup, Stripe not configured, a Gold price Stripe can't read, or a Stripe history longer than the 1,000 records it reads answers non-2xx, never `plan: null`. Never writes |
+| GET | /v1/sync-subscription | Public (UUID) | Plan for a user. A free profile with a paid lifetime checkout that wasn't refunded, or a live subscription to a Gold price or product, gets its plan restored, since the iPhone app writes free when RevenueCat has nothing. Every completed checkout and every subscription is paged through. A one-time checkout with no recorded tier counts only when its line items show the lifetime price or a one-time Gold price. Lifetime wins over a subscription. The answer changes only when the profile update succeeds |
 | POST | /v1/webhooks/revenuecat | Signature | RevenueCat iOS purchase webhook |
 
 ### src/routes/stack-signal.js
@@ -1193,10 +1193,10 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 - **Last modified:** 2026-03-04
 
 ### src/lib/stripe-checks.js
-- **Purpose:** Checks the Stripe routes run before acting: the signed-in account from the bearer token, redirect URLs limited to TroyStack sites, campaign tokens, which subscriptions count as live and Gold, and which checkouts count as paid lifetime purchases
-- **Exports:** `signedInUserId(req, supabase)`, `safeRedirect(url, fallback)`, `cleanCampaign(value)`, `liveSubscriptions(subs)`, `subscriptionTier(price, mapPrice, goldProducts)`, `paidLifetimeSessions(sessions)`, `SITE_ORIGINS`
+- **Purpose:** Checks the Stripe routes run before acting: the signed-in account from the bearer token, redirect URLs limited to TroyStack sites, campaign tokens, which subscriptions count as live and Gold, which checkouts are lifetime candidates, and whether a checkout's line items sold lifetime
+- **Exports:** `signedInUserId(req, supabase)`, `safeRedirect(url, fallback)`, `cleanCampaign(value)`, `liveSubscriptions(subs)`, `subscriptionTier(price, mapPrice, goldProducts)`, `paidLifetimeSessions(sessions)`, `soldLifetime(lineItems, lifetimePriceId, goldProducts)`, `SITE_ORIGINS`
 - **Dependencies:** none
-- **Last modified:** 2026-10-08
+- **Last modified:** 2026-10-09
 
 ### src/lib/supabase.js
 - **Purpose:** Supabase client singleton
