@@ -1,5 +1,4 @@
 const express = require('express');
-const axios = require('axios');
 const converter = require('number-to-words');
 const multer = require('multer');
 const { PassThrough } = require('node:stream');
@@ -8,13 +7,11 @@ const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
 const { getTopIntelligence } = require('../services/intelligence-scraper');
 const { getTTSProvider, getSTTProvider } = require('../services/voice-providers');
 const ttsCache = require('../services/tts-cache');
+const troyLlm = require('../services/troy-llm');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const router = express.Router();
-
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = 'gemini-2.5-flash';
 
 // Quota constants
 const FREE_DAILY_LIMIT = 3;
@@ -344,7 +341,7 @@ router.delete('/conversations/:id', async (req, res) => {
 
 router.post('/conversations/:id/messages', async (req, res) => {
   try {
-    if (!GEMINI_API_KEY) {
+    if (!troyLlm.isConfigured()) {
       return res.status(503).json({ error: 'AI advisor is not configured' });
     }
 
@@ -358,7 +355,7 @@ router.post('/conversations/:id/messages', async (req, res) => {
     if (!id || !isUUID(id)) {
       return res.status(400).json({ error: 'Valid conversation id is required' });
     }
-    if (!message || typeof message !== 'string' || message.length > 2000) {
+    if (!message || typeof message !== 'string' || !message.trim() || message.length > 2000) {
       return res.status(400).json({ error: 'Message is required (max 2000 characters)' });
     }
 
@@ -570,7 +567,10 @@ router.post('/conversations/:id/messages', async (req, res) => {
       console.log(`[Troy Chat] Intelligence fetch error (non-fatal): ${intelErr.message}`);
     }
 
-    const systemPrompt = `You are Troy Stack, the AI stack analyst inside TroyStack. You are the knowledgeable guy at the coin shop who's been stacking since 2008, survived the 2011 silver crash, called the 2020 breakout, and has been proven right about everything the mainstream dismissed for 15 years. You have strong, informed opinions and you're not afraid to share them.
+    // The system prompt is built in four parts. Gemini gets them joined in
+    // this order, byte for byte what it got before. Claude gets the two fixed
+    // parts first so they cache across requests (see services/troy-llm.js).
+    const promptPersona = `You are Troy Stack, the AI stack analyst inside TroyStack. You are the knowledgeable guy at the coin shop who's been stacking since 2008, survived the 2011 silver crash, called the 2020 breakout, and has been proven right about everything the mainstream dismissed for 15 years. You have strong, informed opinions and you're not afraid to share them.
 
 WHO YOU ARE:
 You are a precious metals analyst, macroeconomic commentator, and monetary historian. You see the world through the lens of sound money. Gold and silver aren't just commodities to you — they're money, and everything happening in the world connects back to that truth.
@@ -641,7 +641,9 @@ Good: "I respect the thesis. Finite supply, decentralized, a middle finger to th
 User: "Gold dropped 3% today, should I be worried?"
 Good: "Worried? I'd be checking my bank account to see what I can buy. A 3% pullback after a run to **$5,020** is noise. Paper traders taking profits, algos running stops — same game they always play. Registered COMEX inventory is still near multi-year lows. Physical demand out of Asia hasn't slowed. The setup hasn't changed. If anything, this is exactly the kind of pullback where patient stackers add. Your cost basis on gold is **$2,100/oz**. You're up over **130%**. A 3% dip doesn't change your thesis. It confirms it — the market is giving you another entry point."
 
-THE USER'S STACK:
+`;
+
+    const promptStack = `THE USER'S STACK:
 Total Value: $${totalValue.toFixed(2)}
 Total Cost Basis: $${totalCost.toFixed(2)}
 Overall ${totalValue >= totalCost ? 'Gain' : 'Loss'}: ${totalValue >= totalCost ? '+' : ''}$${(totalValue - totalCost).toFixed(2)} (${totalCost > 0 ? (((totalValue - totalCost) / totalCost) * 100).toFixed(1) : '0'}%)
@@ -661,7 +663,9 @@ ${goldOzTotal > 0 ? `- User's gold: ${goldOzTotal.toFixed(2)} oz → 1971 value:
 ${silverOzTotal > 0 ? `- User's silver: ${silverOzTotal.toFixed(2)} oz → 1971 value: $${silver1971Value.toFixed(2)} → today: $${silverTodayValue.toFixed(2)} → bought ${silverGallons1971.toFixed(1)} gallons of gas then, buys ${silverGallonsToday.toFixed(1)} gallons now (${silverGallons1971 > 0 ? (silverGallonsToday / silverGallons1971).toFixed(1) : '0'}x)` : '- User holds no silver'}
 - Total stack buys: ${(totalValue / B.oil_per_barrel).toFixed(1)} barrels of oil, ${(totalValue / B.rent_monthly).toFixed(1)} months of rent, ${(totalValue / B.labor_hourly).toFixed(1)} hours of median US labor today
 
-APP GUIDE (when users ask how to do things in the app):
+`;
+
+    const promptKnowledge = `APP GUIDE (when users ask how to do things in the app):
 - Add holding: Three ways to get your stack into the app: (1) Tap the "+" button at the TOP of the Portfolio tab — select metal, enter quantity, cost per oz, purchase date, and item details. (2) Receipt Scanner in the Tools tab — this is the fastest way. Take a photo of a dealer receipt, package slip, screenshot, or even a handwritten note — Troy's AI reads it and extracts all the details automatically. Seriously, try it — it's like magic. (3) CSV Import in the Tools tab — bulk import your entire stack from a spreadsheet.
 - Price alerts: Tools tab > Price Alerts. Set target prices for any metal and get push notifications when hit.
 - Edit holding: Tap any holding in the Portfolio tab to open details, then tap Edit.
@@ -747,37 +751,27 @@ Reference these when discussing silver especially:
 
 These facts make the case for silver without you having to hype it. Let the data speak.
 
-${communityIntel ? `WHAT THE COMMUNITY IS DISCUSSING TODAY:
+`;
+
+    const promptCommunity = `${communityIntel ? `WHAT THE COMMUNITY IS DISCUSSING TODAY:
 ${communityIntel}
 
 Reference these community discussions naturally when relevant — "Schiff pointed out on X today...", "the WallStreetSilver crowd is watching...", "Arcadia Economics made a good point about...". This makes you feel plugged in, not isolated.` : ''}`;
 
-    // Build Gemini contents from stored messages
-    const contents = [];
-    for (const msg of priorMessages) {
-      if (msg.role === 'user') {
-        contents.push({ role: 'user', parts: [{ text: msg.content }] });
-      } else if (msg.role === 'assistant') {
-        contents.push({ role: 'model', parts: [{ text: msg.content }] });
-      }
-    }
-    contents.push({ role: 'user', parts: [{ text: message }] });
-
-    // Call Gemini
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-    const geminiResp = await axios.post(geminiUrl, {
-      contents,
-      system_instruction: { parts: [{ text: systemPrompt }] },
-      generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
-    }, {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 30000,
+    // Gemini by default, Claude when TROY_CHAT_PROVIDER or the canary list says
+    // so, with the other provider answering if the first one fails.
+    const reply = await troyLlm.generateTroyReply({
+      userId,
+      priorMessages,
+      message,
+      prompt: {
+        persona: promptPersona,
+        stack: promptStack,
+        knowledge: promptKnowledge,
+        community: promptCommunity,
+      },
     });
-
-    const responseText = geminiResp.data?.candidates?.[0]?.content?.parts
-      ?.filter(p => p.text)
-      ?.map(p => p.text)
-      ?.join('') || '';
+    const responseText = reply.text;
 
     if (!responseText) {
       return res.status(500).json({ error: 'AI advisor returned an empty response' });
@@ -820,7 +814,7 @@ Reference these community discussions naturally when relevant — "Schiff pointe
     await incrementQuota(userId);
 
     const preview = detectPreviewContent(responseText, contextData);
-    console.log(`[Troy Chat] Response for user ${userId}, conv ${id}: ${responseText.length} chars, preview: ${preview?.type || 'none'}`);
+    console.log(`[Troy Chat] Response for user ${userId}, conv ${id}: ${responseText.length} chars, ${reply.provider}/${reply.model}${reply.fellBack ? ' (fallback)' : ''}, preview: ${preview?.type || 'none'}`);
 
     res.json({
       message: assistantMsg,
