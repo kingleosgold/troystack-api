@@ -127,10 +127,12 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 
 Troy's fixed persona and knowledge prompt sections live in `src/services/troy-prompt.js` (`TROY_PERSONA`, `TROY_KNOWLEDGE`), shared with the visitor chat below. They were moved there byte for byte.
 
+Both the signed-in chat and the visitor chat add the day's market context from `src/services/troy-context.js` to the dynamic part of the prompt: the date and time, each metal's move today, Troy's latest Stack Signal and the newest Signal headlines, so Troy can say what moved metals.
+
 ### src/routes/troy-ask.js
 - **Purpose:** Troy for visitors on troystack.ai who haven't signed in. Single answers, no saved history; the page sends back the last few turns for context
-- **Exports:** `createTroyAskRouter({ llm, getPrices, getIntel, now, env })`, `cleanHistory()`, `visitorBlock()`
-- **Dependencies:** troy-llm, troy-prompt, daily-budget, price-fetcher, intelligence-scraper (wired in index.js)
+- **Exports:** `createTroyAskRouter({ llm, getPrices, getIntel, getMarket, now, env })`, `cleanHistory()`, `visitorBlock()`
+- **Dependencies:** troy-llm, troy-prompt, daily-budget, price-fetcher, intelligence-scraper, troy-context (wired in index.js)
 - **Last modified:** 2026-10-08
 
 | Method | Path | Auth | Description |
@@ -449,7 +451,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `30 11 * * *` | 6:30 AM | Intelligence generation | intelligence.js `runIntelligenceGeneration()` |
 | `35 11 * * *` | 6:35 AM | Daily brief for Gold/Lifetime users + push | intelligence.js `generateDailyBrief()` |
 | `0 23 * * *` | 6:00 PM | COMEX vault data scrape | comex-scraper.js `scrapeComexVaultData()` |
-| `* * * * *` | Every 60s | Price fetch + cache update + price_log write (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 60s (decimated later) |
+| `* * * * *` | Every 60s | Price fetch + cache update + price_log write (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 60s (decimated later). One live fetch runs at a time: the cron, startup and `getSpotPrices()` callers that arrive while one is running share it, and one still running after 30 seconds is replaced. At that point everyone waiting on it, however late they joined, gets the cached prices rather than waiting on a fetch that may never finish. A replaced fetch that finishes later writes nothing, so it can't put back older prices |
 | `*/5 * * * *` | Every 5 min | Price alert checker | price-alert-checker.js `checkPriceAlerts()` |
 | `*/15 * * * *` | Every 15 min | Stack Signal article pipeline (~41 feeds, signal scoring, max 5/run) | stack-signal-processor.js `runStackSignalPipeline()` |
 | `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis → podcast episode hook (TTS flagship → troy-podcast bucket → podcast_episodes) → catch-up sweep healing the last 3 days' missed/failed episodes; each in its own try/catch, never breaks the article publish | stack-signal-processor.js `generateStackSignal()` + podcast.js `generateEpisode()` / `sweepRecentEpisodes()` |
@@ -1104,7 +1106,7 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 - **Last modified:** 2026-04-14
 - **Fetch chain:** Yahoo Finance futures GC=F/SI=F (primary, free/unlimited) → MetalPriceAPI (fallback, all 4 metals) → cached fallback → static fallback. GoldAPI.io removed.
 - **Pt/Pd:** Yahoo Finance only covers Au/Ag. Pt/Pd sourced from MetalPriceAPI as supplement when Yahoo is primary, or from last known price_log values.
-- **Cache:** In-memory, 90-second TTL (was 10 min). Friday close stored for change calculation.
+- **Cache:** In-memory, 90-second TTL (was 10 min). Friday close stored for change calculation, kept in memory and in app_state `friday_close`. A replaced fetch doesn't save one. Writes of the close go out one at a time in the order the closes were made, so a write that stalls can't land after a newer close, and a close replaced before its write's turn isn't written. Fetches don't wait on the write. The startup load keeps whichever close is newer, by when its prices were read live and then when it was saved, so a load that returns late can't replace a newer close a fetch saved in the meantime. Built-in prices never become the close: they aren't saved as one, and a stored close on them isn't loaded. A weekend reading with no close stands the cache in for one, but only once the startup read is back, since the cache would win over the stored close and its change reads as a flat day. `quotedAt` is when the cached prices were last read live and stays put through failed fetches, while `lastUpdated` moves with every fetch. `getSpotPrices()` and `getPriceSnapshot()` readings carry both, as `quotedAt` and `timestamp`.
 - **Cron:** Every 60 seconds during market hours. Cache update + price_log write both happen on every tick (price_log insert lives inside `fetchLiveSpotPrices` with a >10% spike guard; decimated later).
 - **Market hours:** Closed Friday 5PM ET → Sunday 6PM ET
 
@@ -1191,6 +1193,15 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 - **Dedup:** by `source_url` in `troy_intelligence` table
 - **`getTopIntelligence(limit)`:** queries last 24h items ordered by relevance_score DESC, returns formatted string for prompt injection
 - **Crons:** YouTube every 4h (`0 */4 * * *`), Twitter every 2h (`0 */2 * * *`), Reddit every 3h (`0 */3 * * *`)
+
+### src/services/troy-context.js
+- **Purpose:** What Troy knows about today before anyone asks. The date and time in New York, each metal's move today (from `getSpotPrices().change`, the same figure the app shows), the latest Stack Signal synthesis dated to the minute and the newest Signal headlines from `stack_signal_articles`, as one prompt block. Move lines carry no price, since each route's own CURRENT SPOT already has it, and Troy is told the Signal's figures are as of publication. Long dashes become commas and cut-off one-liners fall back to the commentary. Any part that fails is left out
+- **Exports:** `buildMarketBlock({ spot, signal, headlines, now })` (pure), `createMarketContext({ fetchSpot, db, now, waitMs })`, `sharedMarketBlock(spotSnapshot?)` (one shared instance for troy-ask and troy-chat), `plain()`, `usableOneLiner()`
+- **Cache:** the moves are read with every question from the price cache (refreshed each minute by the price cron). The Signal read and the headlines read are each kept 5 minutes. A read that fails keeps the last good answer and is tried again after 30 seconds. Questions that arrive during a read share it. No part holds a question for more than 1.5 seconds: a slower read gives way to the last good answer, or no moves for spot, and finishes in the background. A read still running after 10 seconds is taken as hung and the next question starts a fresh one, and an answer that lands after a newer read's is ignored
+- **One price reading:** troy-chat and troy-ask read the price cache once with `getPriceSnapshot()` from price-fetcher.js and pass that reading to `sharedMarketBlock`, so CURRENT SPOT and today's moves come from the same snapshot. A cache still on its built-in startup prices is read fresh with `getSpotPrices()` first. While markets are closed the snapshot is the saved Friday close, as `getSpotPrices()` gives the app, so the weekend reads the last session's moves instead of a flat day
+- **Fallback prices:** when the reading's source is `static-fallback` or `cached-fallback`, the moves are left out, since their change is measured from prices that aren't today's, and a PRICES RIGHT NOW line tells Troy the feeds are down: built-in prices are placeholders not to quote, and cached ones give the time of the last live price, the reading's `quotedAt`, which failed fetches don't move. The fetcher keeps built-in prices labeled `static-fallback` when the next fetch fails too
+- **Tests:** `test/troy-context.test.js`
+- **Last modified:** 2026-10-09
 
 ### src/services/comex-scraper.js
 - **Purpose:** Scrape COMEX warehouse inventory from CME XLS files

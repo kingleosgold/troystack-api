@@ -3,8 +3,9 @@ const converter = require('number-to-words');
 const multer = require('multer');
 const { PassThrough } = require('node:stream');
 const supabase = require('../lib/supabase');
-const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
+const { getPriceSnapshot, getSpotPrices } = require('../services/price-fetcher');
 const { getTopIntelligence } = require('../services/intelligence-scraper');
+const { sharedMarketBlock } = require('../services/troy-context');
 const { getTTSProvider, getSTTProvider } = require('../services/voice-providers');
 const ttsCache = require('../services/tts-cache');
 const troyLlm = require('../services/troy-llm');
@@ -37,6 +38,20 @@ const PURCHASING_POWER_BENCHMARKS = {
 // ============================================
 // HELPERS
 // ============================================
+
+// The purchasing power card that can show under Troy's answer. It divides by
+// the same benchmarks his instructions use, so the card and what he says
+// about oil, rent and labor agree. It used $85 oil, $1,850 rent and $29 an
+// hour while the prompt said $70, $1,800 and $30.
+function purchasingPowerCard(prices, totalValue, B = PURCHASING_POWER_BENCHMARKS) {
+  return {
+    goldPerBarrelOfOil: prices.gold / B.oil_per_barrel,
+    silverPerGallonOfGas: prices.silver / B.gas_per_gallon,
+    stackBarrelsOfOil: totalValue / B.oil_per_barrel,
+    stackMonthsOfRent: totalValue / B.rent_monthly,
+    stackHoursOfLabor: totalValue / B.labor_hourly,
+  };
+}
 
 function isUUID(str) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
@@ -439,17 +454,18 @@ router.post('/conversations/:id/messages', async (req, res) => {
 
     const userHoldings = holdings || [];
 
-    // Get current spot prices from in-memory cache (same source as /v1/prices)
-    let prices = getCachedPrices();
-    if (!prices.gold || !prices.silver) {
-      // Cache cold (server just started) — fetch fresh
+    // One reading of the price cache feeds both CURRENT SPOT and today's
+    // moves in the market block, so the two always agree. A cache still on
+    // the built-in prices from startup is read fresh first.
+    let snapshot = getPriceSnapshot();
+    if (snapshot.source === 'static-fallback' || !snapshot.prices.gold || !snapshot.prices.silver) {
       try {
-        const fresh = await getSpotPrices();
-        prices = fresh.prices;
+        snapshot = await getSpotPrices();
       } catch (e) {
         console.error('[Troy Chat] Price fetch fallback failed:', e.message);
       }
     }
+    const prices = snapshot.prices || {};
 
     // Build portfolio summary
     const metalTotals = { gold: { oz: 0, cost: 0 }, silver: { oz: 0, cost: 0 }, platinum: { oz: 0, cost: 0 }, palladium: { oz: 0, cost: 0 } };
@@ -514,13 +530,7 @@ router.post('/conversations/:id/messages', async (req, res) => {
       goldPrice: prices.gold,
       silverPrice: prices.silver,
       goldSilverRatio: prices.silver > 0 ? prices.gold / prices.silver : null,
-      purchasingPower: {
-        goldPerBarrelOfOil: prices.gold / 85,
-        silverPerGallonOfGas: prices.silver / 3.50,
-        stackBarrelsOfOil: totalValue / 85,
-        stackMonthsOfRent: totalValue / 1850,
-        stackHoursOfLabor: totalValue / 29,
-      },
+      purchasingPower: purchasingPowerCard(prices, totalValue),
       purchasingPowerComparison: {
         gold: {
           oz: goldOzTotal,
@@ -559,6 +569,15 @@ router.post('/conversations/:id/messages', async (req, res) => {
         const gl = val - v.cost;
         return `${m.charAt(0).toUpperCase() + m.slice(1)}: ${v.oz.toFixed(2)} oz, Value $${val.toFixed(2)}, Cost $${v.cost.toFixed(2)}, ${gl >= 0 ? '+' : ''}$${gl.toFixed(2)}`;
       }).join('\n');
+
+    // The day's moves, Troy's latest Stack Signal and the newest headlines, so
+    // he can say what moved metals, the same as on troystack.ai.
+    let marketBlock = '';
+    try {
+      marketBlock = (await sharedMarketBlock(snapshot)) || '';
+    } catch (marketErr) {
+      console.log(`[Troy Chat] Market context error (non-fatal): ${marketErr.message}`);
+    }
 
     // Fetch community intelligence (YouTube, X, Reddit) for context injection
     let communityIntel = '';
@@ -610,7 +629,7 @@ Reference these community discussions naturally when relevant — "Schiff pointe
       message,
       prompt: {
         persona: promptPersona,
-        stack: promptStack,
+        stack: promptStack + marketBlock,
         knowledge: promptKnowledge,
         community: promptCommunity,
       },
@@ -1279,3 +1298,6 @@ module.exports = router;
 // reuses the exact /speak sanitizer so spoken output policy stays single-
 // sourced here (alongside SANITIZER_VERSION). Function body unchanged.
 module.exports.sanitizeTTSText = sanitizeTTSText;
+// For tests: the card's figures and the benchmarks Troy is told.
+module.exports.purchasingPowerCard = purchasingPowerCard;
+module.exports.PURCHASING_POWER_BENCHMARKS = PURCHASING_POWER_BENCHMARKS;
