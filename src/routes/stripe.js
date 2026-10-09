@@ -320,9 +320,37 @@ async function closeOpenCheckouts(userId, customerId) {
   }
 }
 
+// Checkout requests running, by account: each one's promise, which settles
+// when the request finishes. Two requests at once could otherwise both find
+// no plan and no open checkout before either opens one, and paying both would
+// start two subscriptions. The API runs as a single instance, which the crons
+// scheduled in index.js already count on, so a lock held in this process
+// covers every request. Requests for different accounts don't wait on each
+// other.
+const checkoutsRunning = new Map();
+
+// Waits until no other checkout request for this account is running, then
+// answers a function that ends this one's turn. The account's entry goes once
+// its last request finishes.
+async function checkoutTurn(userId) {
+  const before = checkoutsRunning.get(userId);
+  let finish;
+  const running = new Promise((resolve) => {
+    finish = resolve;
+  });
+  checkoutsRunning.set(userId, running);
+  if (before) await before;
+  return () => {
+    finish();
+    if (checkoutsRunning.get(userId) === running) checkoutsRunning.delete(userId);
+  };
+}
+
 // The customer the billing page opens on: one with a subscription that's
 // still billing, so it can be cancelled, then the one holding the plan, then
-// the profile's own.
+// the profile's own. With no customer on the profile, the account's customers
+// are found by search, and the answer is null when none of them is billing or
+// holds a plan.
 async function portalCustomerFor(userId, profileCustomerId) {
   for (const id of await customersFor(userId, profileCustomerId, { strict: true })) {
     for await (const sub of customerSubscriptions(id)) {
@@ -548,6 +576,7 @@ async function stripeWebhookHandler(req, res) {
 
 // POST /v1/stripe/create-checkout-session
 router.post('/create-checkout-session', async (req, res) => {
+  let endTurn = null;
   try {
     if (!stripe) {
       return res.status(503).json({ error: 'Stripe is not configured' });
@@ -590,6 +619,11 @@ router.post('/create-checkout-session', async (req, res) => {
       }
       tier = 'gold';
     }
+
+    // From the profile read to the new session, an account's requests run one
+    // at a time, so a second request sees the first one's open checkout and
+    // closes it, or sees its plan and answers 409.
+    endTurn = await checkoutTurn(user_id);
 
     // The profile has no email column, so asking for one failed every time
     // and each checkout made a new Stripe customer. The profile is read for
@@ -718,6 +752,8 @@ router.post('/create-checkout-session', async (req, res) => {
   } catch (error) {
     console.error('❌ [Stripe] Create checkout error:', error.message);
     return res.status(500).json({ error: error.message });
+  } finally {
+    if (endTurn) endTurn();
   }
 });
 
@@ -841,19 +877,30 @@ router.post('/customer-portal', async (req, res) => {
       .eq('id', user_id)
       .single();
 
-    if (profileError || !profile?.stripe_customer_id) {
+    // No profile row (PGRST116) means no customer on the profile, which the
+    // search below can still make up for. Any other failure keeps this answer.
+    if (profileError && profileError.code !== 'PGRST116') {
       return res.status(404).json({ error: 'No Stripe customer found for this user' });
     }
 
-    // After older checkouts an account can have several customers. The
-    // billing page opens on one with a subscription still billing, so it can
-    // be cancelled even when lifetime sits on another, then on the one that
-    // holds the plan.
-    let portalCustomer = profile.stripe_customer_id;
+    // After older checkouts an account can have several customers, and the
+    // profile may hold none of them when an older checkout's id never reached
+    // it. The billing page opens on one with a subscription still billing, so
+    // it can be cancelled even when lifetime sits on another, then on the one
+    // that holds the plan. A profile with no customer has the account's
+    // customers searched by the user id in their metadata.
+    const profileCustomer = profile?.stripe_customer_id || null;
+    let portalCustomer = profileCustomer;
     try {
-      portalCustomer = await portalCustomerFor(user_id, profile.stripe_customer_id);
+      portalCustomer = await portalCustomerFor(user_id, profileCustomer);
     } catch (e) {
+      // With no customer on the profile there's nothing to fall back on, and
+      // a search that failed isn't an answer that there's none.
+      if (!profileCustomer) throw e;
       console.warn('⚠️ [Stripe] Could not find the customer holding the plan:', e.message);
+    }
+    if (!portalCustomer) {
+      return res.status(404).json({ error: 'No Stripe customer found for this user' });
     }
 
     const session = await stripe.billingPortal.sessions.create({

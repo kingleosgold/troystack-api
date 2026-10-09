@@ -24,8 +24,12 @@
 // hold a plan bought on troystack.ai. stripe.js hands this module a check of
 // what Stripe holds, and the profile gets that plan before it gets free.
 //
-// The purchase time of the newest App Store purchase applied to each account
-// is kept in app_state, so a refund that arrives late can't end a newer period.
+// RevenueCat retries a delivery that failed, and events can arrive out of
+// order. For each account, app_state keeps the purchase time of the newest
+// App Store purchase applied, so a refund or a subscription grant that
+// arrives late can't end or replace a newer period, and of the latest
+// purchase a refund ended, so a grant for it that arrives late can't give it
+// back.
 
 const crypto = require('node:crypto');
 const supabase = require('../lib/supabase');
@@ -132,8 +136,10 @@ async function profileForPurchase(id) {
   return (await readProfile(id)) || { subscription_tier: null, subscription_status: null, subscription_expires_at: null, stripe_customer_id: null };
 }
 
-// The newest App Store purchase applied to an account is kept in app_state
-// under this key as { purchasedAt }, its purchase time in ms.
+// Each account's record is kept in app_state under this key as
+// { purchasedAt, endedAt }: the purchase time in ms of the newest App Store
+// purchase applied, and of the latest purchase a refund ended. Either can be
+// missing.
 function grantKey(id) {
   return `revenuecat_grant:${id}`;
 }
@@ -144,9 +150,9 @@ function positiveMs(value) {
   return Number.isFinite(ms) && ms > 0 ? ms : null;
 }
 
-// The purchase time on record for an account, or null when there's none. A
-// read that fails throws, so the event is answered 500 and sent again.
-async function newestGrant(id) {
+// The account's record, with null for a time that isn't on it. A read that
+// fails throws, so the event is answered 500 and sent again.
+async function readRecord(id) {
   const { data, error } = await supabase.from('app_state').select('value').eq('key', grantKey(id)).maybeSingle();
   if (error) throw new Error(`purchase record read failed: ${error.message}`);
   let value = data?.value;
@@ -158,20 +164,46 @@ async function newestGrant(id) {
       value = null;
     }
   }
-  return positiveMs(value?.purchasedAt);
+  return { purchasedAt: positiveMs(value?.purchasedAt), endedAt: positiveMs(value?.endedAt) };
+}
+
+// Saves the record, leaving out a time that's null. A write that fails throws.
+async function writeRecord(id, { purchasedAt, endedAt }) {
+  const value = {};
+  if (purchasedAt != null) value.purchasedAt = purchasedAt;
+  if (endedAt != null) value.endedAt = endedAt;
+  const { error } = await supabase.from('app_state').upsert({ key: grantKey(id), value }, { onConflict: 'key' });
+  if (error) throw new Error(`purchase record write failed: ${error.message}`);
 }
 
 // Records a purchase's time once its plan is on the profile, unless a newer
-// one is already on record, which a late or repeated event finds. A read or
-// write that fails throws and RevenueCat sends the event again, and the
-// profile write it repeats does no harm.
-async function recordGrant(id, purchasedAtMs) {
+// one is already on record, which a late or repeated event finds. A reversed
+// refund also wipes the record of a refund ending this purchase or an older
+// one, so the purchase it gives back is treated like any other from then on.
+// A read or write that fails throws and RevenueCat sends the event again, and
+// the profile write it repeats does no harm.
+async function recordGrant(id, purchasedAtMs, { reversesRefund = false } = {}) {
   const at = positiveMs(purchasedAtMs);
   if (at == null) return;
-  const newest = await newestGrant(id);
-  if (newest != null && newest >= at) return;
-  const { error } = await supabase.from('app_state').upsert({ key: grantKey(id), value: { purchasedAt: at } }, { onConflict: 'key' });
-  if (error) throw new Error(`purchase record write failed: ${error.message}`);
+  const record = await readRecord(id);
+  const purchasedAt = record.purchasedAt != null && record.purchasedAt >= at ? record.purchasedAt : at;
+  const endedAt = reversesRefund && record.endedAt != null && record.endedAt <= at ? null : record.endedAt;
+  if (purchasedAt === record.purchasedAt && endedAt === record.endedAt) return;
+  await writeRecord(id, { purchasedAt, endedAt });
+}
+
+// Records that a refund ended a purchase, once the profile no longer has it,
+// so a grant for it that RevenueCat sends again afterwards, on a retry or out
+// of order, gives nothing back. The later of this purchase and any refunded
+// one already on record is kept, and the newest purchase on record stays as
+// it is. A read or write that fails throws and RevenueCat sends the refund
+// again, and the profile write it repeats does no harm.
+async function recordEnd(id, purchasedAtMs) {
+  const at = positiveMs(purchasedAtMs);
+  if (at == null) return;
+  const record = await readRecord(id);
+  if (record.endedAt != null && record.endedAt >= at) return;
+  await writeRecord(id, { purchasedAt: record.purchasedAt, endedAt: at });
 }
 
 // Whether a purchase newer than this one has been applied to the account.
@@ -179,8 +211,20 @@ async function recordGrant(id, purchasedAtMs) {
 async function newerGrantApplied(id, purchasedAtMs) {
   const at = positiveMs(purchasedAtMs);
   if (at == null) return false;
-  const newest = await newestGrant(id);
-  return newest != null && newest > at;
+  const { purchasedAt } = await readRecord(id);
+  return purchasedAt != null && purchasedAt > at;
+}
+
+// Whether what's on record has overtaken a grant: a refund ended this
+// purchase or a later one, or, unless the grant is lifetime, a newer purchase
+// has been applied. Without a purchase time on the event or a record, there's
+// no telling, so no.
+async function grantSuperseded(id, purchasedAtMs, { lifetime = false } = {}) {
+  const at = positiveMs(purchasedAtMs);
+  if (at == null) return false;
+  const { purchasedAt, endedAt } = await readRecord(id);
+  if (endedAt != null && at <= endedAt) return true;
+  return !lifetime && purchasedAt != null && at < purchasedAt;
 }
 
 /**
@@ -197,9 +241,31 @@ async function applyEvent(event) {
 
   if (GRANTS.has(type)) {
     if (tier === 'free') return { skipped: 'unknown_product' };
-    // A refund reversed after the subscription's period ran out gives nothing back.
-    if (type === 'REFUND_REVERSED' && tier !== 'lifetime' && expires && Date.parse(expires) <= Date.now()) {
+    // RevenueCat retries a delivery that failed and can deliver events out of
+    // order, so a grant can land after the expiry or refund that ended it. A
+    // subscription whose expiry is already past has nothing left to give,
+    // since the period it paid for is over, and that goes for a reversed
+    // refund too. Lifetime never expires, and a grant that names no expiry
+    // isn't held to this.
+    if (tier !== 'lifetime' && expires && Date.parse(expires) <= Date.now()) {
       return { skipped: 'already_expired' };
+    }
+    // A purchase a refund already ended stays ended when one of its grants
+    // comes late. A subscription grant older than the newest purchase on
+    // record is a delayed or retried event for a period that's been replaced,
+    // and applying it would pull subscription_expires_at back or rewrite the
+    // plan. One with the same purchase time, like an UNCANCELLATION or
+    // SUBSCRIPTION_EXTENDED for the current period, still applies. Lifetime
+    // outranks any subscription however old its event is, so a lifetime
+    // grant, NON_RENEWING_PURCHASE included, is held only to the refund check.
+    // A reversed refund is held to neither. It's how a refunded purchase comes
+    // back, and when the account bought again after the refund, the purchase
+    // it gives back is older than the one on record. That newer purchase may
+    // have been refunded or run out since, so skipping the reversal could
+    // leave the account without what Apple gave back.
+    const lifetimeGrant = tier === 'lifetime' || type === 'NON_RENEWING_PURCHASE';
+    if (type !== 'REFUND_REVERSED' && (await grantSuperseded(id, event.purchased_at_ms, { lifetime: lifetimeGrant }))) {
+      return { skipped: 'superseded' };
     }
     const profile = await profileForPurchase(id);
     // A subscription bought after lifetime doesn't replace it.
@@ -210,7 +276,7 @@ async function applyEvent(event) {
       // A purchase that validated after a temporary grant isn't temporary now.
       ...(profile.subscription_status === TEMPORARY ? { subscription_status: 'active' } : {}),
     });
-    await recordGrant(id, event.purchased_at_ms);
+    await recordGrant(id, event.purchased_at_ms, { reversesRefund: type === 'REFUND_REVERSED' });
     return { tier };
   }
 
@@ -248,6 +314,7 @@ async function applyEvent(event) {
         if (tier !== 'lifetime' && (await newerGrantApplied(id, event.purchased_at_ms))) return { skipped: 'superseded' };
         const left = await planLeft(id, profile);
         await writeProfile(id, fieldsFor(left));
+        await recordEnd(id, event.purchased_at_ms);
         return { tier: left.tier, refunded: true };
       }
       return { kept: 'lifetime' };
