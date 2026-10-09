@@ -37,6 +37,10 @@ function reset(over = {}) {
     sessionToVerify: null,
     lineItems: {},
     disputes: {},
+    customers: [],
+    customerById: {},
+    searchFails: false,
+    upserts: [],
   }, over);
   router.resetGoldProductCache();
 }
@@ -44,15 +48,21 @@ function reset(over = {}) {
 const fakeSupabase = {
   auth: {
     getUser: async (token) => (token === 'good-token' ? { data: { user: { id: USER } }, error: null } : { data: { user: null }, error: { message: 'invalid JWT' } }),
+    admin: {
+      getUserById: async (id) => ({ data: { user: { id, email: 'a@example.com' } }, error: null }),
+    },
   },
   from() {
     return {
       select() {
         return {
-          eq: () => ({
+          // The one profile matches a filter unless it holds a different value.
+          eq: (col, val) => ({
             single: async () => {
               if (state.profileError) return { data: null, error: state.profileError };
-              return state.profile ? { data: state.profile, error: null } : { data: null, error: { code: 'PGRST116', message: 'no rows' } };
+              const p = state.profile;
+              const matches = p && (p[col] === undefined || p[col] === val);
+              return matches ? { data: p, error: null } : { data: null, error: { code: 'PGRST116', message: 'no rows' } };
             },
           }),
         };
@@ -65,6 +75,10 @@ const fakeSupabase = {
           },
         };
       },
+      upsert: async (values) => {
+        state.upserts.push(values);
+        return { error: null };
+      },
     };
   },
 };
@@ -74,7 +88,7 @@ const fakeStripe = {
     // Newest first and paged by starting_after, like Stripe.
     list: async (params = {}) => {
       state.stripeCalls.push('subscriptions.list');
-      let rows = state.subscriptions;
+      let rows = state.subscriptions.filter((x) => !x.customer || !params.customer || x.customer === params.customer);
       if (params.starting_after) rows = rows.slice(rows.findIndex((x) => x.id === params.starting_after) + 1);
       const page = rows.slice(0, params.limit || 10);
       return { data: page, has_more: rows.length > page.length };
@@ -85,7 +99,7 @@ const fakeStripe = {
       // Newest first, filtered by status and paged by starting_after, like Stripe.
       list: async (params = {}) => {
         state.stripeCalls.push('checkout.sessions.list');
-        let rows = state.sessions.filter((x) => !params.status || x.status === params.status);
+        let rows = state.sessions.filter((x) => (!params.status || x.status === params.status) && (!x.customer || !params.customer || x.customer === params.customer));
         if (params.starting_after) rows = rows.slice(rows.findIndex((x) => x.id === params.starting_after) + 1);
         const page = rows.slice(0, params.limit || 10);
         return { data: page, has_more: rows.length > page.length };
@@ -105,9 +119,22 @@ const fakeStripe = {
     },
   },
   customers: {
-    create: async () => {
+    create: async (params) => {
       state.stripeCalls.push('customers.create');
+      state.createdCustomer = params;
       return { id: 'cus_new' };
+    },
+    // Customers made for an account, found by the user id in their metadata.
+    search: async (params = {}) => {
+      state.stripeCalls.push('customers.search');
+      if (state.searchFails) throw new Error('search is unavailable');
+      const m = /supabase_user_id'\]:'([^']+)'/.exec(params.query || '');
+      const data = state.customers.filter((c) => c.metadata?.supabase_user_id === (m && m[1]));
+      return { data, has_more: false, next_page: null };
+    },
+    retrieve: async (id) => {
+      state.stripeCalls.push('customers.retrieve');
+      return state.customerById[id] || { id, metadata: {} };
     },
   },
   prices: {
@@ -135,6 +162,15 @@ fakeStripe.checkout.sessions.retrieve = async () => {
 fakeStripe.checkout.sessions.listLineItems = async (id) => {
   state.stripeCalls.push('checkout.sessions.listLineItems');
   return { data: state.lineItems[id] || [], has_more: false };
+};
+fakeStripe.billingPortal = {
+  sessions: {
+    create: async (params) => {
+      state.stripeCalls.push('billingPortal.sessions.create');
+      state.portal = params;
+      return { url: 'https://billing.stripe.com/p/session/test' };
+    },
+  },
 };
 fakeStripe.checkout.sessions.create = async (params) => {
   state.stripeCalls.push('checkout.sessions.create');
@@ -656,4 +692,86 @@ test('an App Store expiry keeps a web plan Stripe still holds', async () => {
   reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' } });
   await router.revenueCatWebhookHandler({ headers: {}, body: { event: { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' } } }, fakeRes());
   assert.equal(state.updates[0].subscription_tier, 'free');
+});
+
+const portalHandler = routeHandler('/customer-portal');
+
+test('checkout uses a customer an earlier checkout made instead of making another', async () => {
+  reset({ profile: { stripe_customer_id: null }, customers: [{ id: 'cus_old', metadata: { supabase_user_id: USER } }] });
+  const res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.created.customer, 'cus_old');
+  assert.ok(!state.stripeCalls.includes('customers.create'));
+  assert.deepEqual(state.updates, [{ stripe_customer_id: 'cus_old' }]);
+});
+
+test('checkout makes a customer with the account email when there is none, and a bare profile row', async () => {
+  reset({ profile: null });
+  const res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(state.upserts, [{ id: USER }], 'a missing row gets a bare one that never touches a plan');
+  assert.equal(state.createdCustomer.email, 'a@example.com');
+  assert.equal(state.createdCustomer.metadata.supabase_user_id, USER);
+  assert.equal(state.created.customer, 'cus_new');
+});
+
+test('checkout turns away an account that already holds a live web plan', async () => {
+  reset({
+    profile: { stripe_customer_id: 'cus_1' },
+    subscriptions: [{ id: 'sub_live', status: 'trialing', items: { data: [{ price: { id: 'price_gold_yearly', product: 'prod_gold' } }] } }],
+  });
+  const res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 409);
+  assert.equal(state.created, undefined);
+});
+
+test('my-plan finds a plan on an older customer the profile no longer holds', async () => {
+  reset({
+    profile: { subscription_tier: 'free', subscription_status: null, stripe_customer_id: 'cus_new' },
+    customers: [{ id: 'cus_old', metadata: { supabase_user_id: USER } }],
+    subscriptions: [{ id: 'sub_old', customer: 'cus_old', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+  });
+  const res = await askMyPlan('good-token');
+  assert.equal(res.body.plan, 'gold');
+});
+
+test("a customer search that fails means my-plan couldn't check", async () => {
+  reset({ profile: { subscription_tier: 'free', subscription_status: null, stripe_customer_id: 'cus_1' }, searchFails: true });
+  const res = await askMyPlan('good-token');
+  assert.equal(res.statusCode, 500);
+  const synced = await sync();
+  assert.equal(synced.body.subscription_tier, 'free');
+  assert.equal(state.updates.length, 0);
+});
+
+test('a subscription event for a customer the profile no longer holds still finds the account', async () => {
+  reset({
+    profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_new' },
+    customerById: { cus_old: { id: 'cus_old', metadata: { supabase_user_id: USER } } },
+  });
+  const event = { type: 'customer.subscription.deleted', data: { object: { id: 'sub_old', customer: 'cus_old', status: 'canceled' } } };
+  const res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(event)) }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.updates[0].subscription_tier, 'free');
+});
+
+test('a live subscription to something other than Gold gives no Gold', async () => {
+  reset({ profile: { id: USER, subscription_tier: 'free', subscription_status: null, stripe_customer_id: 'cus_1' } });
+  const event = { type: 'customer.subscription.updated', data: { object: { id: 'sub_api', customer: 'cus_1', status: 'active', items: { data: [{ price: { id: 'price_other_api', product: 'prod_other' } }] } } } };
+  const res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(event)) }, res);
+  assert.equal(state.updates[0].subscription_tier, 'free');
+});
+
+test('the billing page opens on the customer that holds the plan', async () => {
+  reset({
+    profile: { stripe_customer_id: 'cus_new' },
+    customers: [{ id: 'cus_old', metadata: { supabase_user_id: USER } }],
+    subscriptions: [{ id: 'sub_old', customer: 'cus_old', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+  });
+  const res = fakeRes();
+  await portalHandler({ headers: { authorization: 'Bearer good-token' }, body: { user_id: USER, return_url: 'https://troystack.ai/settings' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.portal.customer, 'cus_old');
 });
