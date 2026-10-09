@@ -62,15 +62,46 @@ function resetGoldProductCache() {
 }
 
 // The plan a subscription's price gives: a configured Gold price, or another
-// price on the Gold product. Anything else gives free.
+// price on the Gold product. Anything else gives free. Throws when the Gold
+// product can't be read, since that isn't an answer.
 async function tierForSubscriptionPrice(price) {
   const mapped = price?.id ? mapStripePriceToTier(price.id) : 'free';
   if (mapped !== 'free') return mapped;
+  return subscriptionTier(price, mapStripePriceToTier, await goldProductIds()) || 'free';
+}
+
+// The tier for a completed checkout's subscription. When the Gold product
+// can't be read, the tier this API wrote on the session when it opened the
+// checkout stands, since it only opens checkouts for Gold prices. A session
+// without one is retried rather than recorded as free.
+async function tierForCheckout(session, price) {
   try {
-    return subscriptionTier(price, mapStripePriceToTier, await goldProductIds()) || 'free';
+    return await tierForSubscriptionPrice(price);
   } catch (e) {
-    console.warn('⚠️ [Stripe] Could not read the Gold product:', e.message);
-    return 'free';
+    const recorded = session.metadata?.tier;
+    if (recorded === 'gold' || recorded === 'lifetime') {
+      console.warn(`⚠️ [Stripe] Gold product unreadable, keeping the session's ${recorded}:`, e.message);
+      return recorded;
+    }
+    throw e;
+  }
+}
+
+// Every completed checkout for a customer, newest first, a page at a time.
+// Abandoned checkouts aren't complete, so they never crowd out a purchase.
+async function* completedCheckouts(customerId, { pageSize = 100, maxPages = 10 } = {}) {
+  let startingAfter;
+  for (let page = 0; page < maxPages; page += 1) {
+    const res = await stripe.checkout.sessions.list({
+      customer: customerId,
+      status: 'complete',
+      limit: pageSize,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+    const data = res.data || [];
+    for (const session of data) yield session;
+    if (!res.has_more || data.length === 0) return;
+    startingAfter = data[data.length - 1].id;
   }
 }
 
@@ -80,8 +111,9 @@ async function tierForSubscriptionPrice(price) {
 // refunded in full. Otherwise a live subscription to a Gold price or product
 // gives Gold, and a subscription to anything else gives nothing.
 async function planFromStripe(customerId) {
-  const sessions = await stripe.checkout.sessions.list({ customer: customerId, limit: 20 });
-  for (const session of paidLifetimeSessions(sessions.data)) {
+  for await (const checkout of completedCheckouts(customerId)) {
+    const [session] = paidLifetimeSessions([checkout]);
+    if (!session) continue;
     const intentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
     if (!intentId) return { tier: 'lifetime', status: 'active', trialEnd: null };
     const intent = await stripe.paymentIntents.retrieve(intentId, { expand: ['latest_charge'] });
@@ -139,18 +171,23 @@ async function stripeWebhookHandler(req, res) {
         let trialEnd = null;
 
         if (session.subscription) {
+          let subscription = null;
           try {
-            const subscription = await stripe.subscriptions.retrieve(session.subscription);
+            subscription = await stripe.subscriptions.retrieve(session.subscription);
+          } catch (e) {
+            console.warn('⚠️ [Stripe Webhook] Could not retrieve subscription:', e.message);
+          }
+          if (subscription) {
             const price = subscription.items?.data?.[0]?.price;
+            // A Gold product Stripe can't read throws here, the handler answers
+            // 500 and Stripe sends the event again, rather than free being saved.
             if (price?.id) {
-              tier = await tierForSubscriptionPrice(price);
+              tier = await tierForCheckout(session, price);
             }
             subscriptionStatus = subscription.status || 'active';
             if (subscription.trial_end) {
               trialEnd = new Date(subscription.trial_end * 1000).toISOString();
             }
-          } catch (e) {
-            console.warn('⚠️ [Stripe Webhook] Could not retrieve subscription:', e.message);
           }
         } else if (session.mode === 'payment') {
           tier = session.metadata?.tier || 'lifetime';
@@ -406,7 +443,7 @@ router.post('/verify-session', async (req, res) => {
     if (subscription) {
       const price = subscription.items?.data?.[0]?.price;
       if (price?.id) {
-        tier = await tierForSubscriptionPrice(price);
+        tier = await tierForCheckout(session, price);
       }
       subscriptionStatus = subscription.status || 'active';
       if (subscription.trial_end) {
