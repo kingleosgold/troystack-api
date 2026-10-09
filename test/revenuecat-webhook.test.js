@@ -210,3 +210,54 @@ test('an event for an account with no profile is skipped', withSecret(SECRET, as
   assert.strictEqual(res.body.skipped, 'no_profile');
   assert.deepStrictEqual(db.writes, []);
 }));
+
+test('when an App Store plan ends, a web plan Stripe still holds is kept', withSecret(SECRET, async () => {
+  const rows = { [USER]: { subscription_tier: 'gold', subscription_expires_at: '2026-10-09T00:00:00.000Z', stripe_customer_id: 'cus_web' } };
+  const mod = loadHandler(fakeSupabase(rows));
+  const asked = [];
+  mod.setWebPlanCheck(async (id, customer) => {
+    asked.push([id, customer]);
+    return { tier: 'gold', status: 'trialing', trialEnd: '2026-10-16T00:00:00.000Z' };
+  });
+  const res = await send(mod.revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' });
+  assert.strictEqual(res.code, 200);
+  assert.deepStrictEqual(asked, [[USER, 'cus_web']]);
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+  assert.strictEqual(rows[USER].subscription_status, 'trialing');
+  assert.strictEqual(rows[USER].trial_end, '2026-10-16T00:00:00.000Z');
+  assert.strictEqual(rows[USER].subscription_expires_at, null);
+}));
+
+test('a refunded App Store plan leaves a web lifetime in place', withSecret(SECRET, async () => {
+  const rows = { [USER]: { subscription_tier: 'gold', subscription_expires_at: null, stripe_customer_id: 'cus_web' } };
+  const mod = loadHandler(fakeSupabase(rows));
+  mod.setWebPlanCheck(async () => ({ tier: 'lifetime', status: 'active', trialEnd: null }));
+  const res = await send(mod.revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'stacktracker_gold_yearly', cancel_reason: 'CUSTOMER_SUPPORT' });
+  assert.strictEqual(res.body.refunded, true);
+  assert.strictEqual(rows[USER].subscription_tier, 'lifetime');
+}));
+
+test("when Stripe can't be read the event is answered 500 and nothing is written", withSecret(SECRET, async () => {
+  const rows = { [USER]: { subscription_tier: 'gold', subscription_expires_at: null, stripe_customer_id: 'cus_web' } };
+  const db = fakeSupabase(rows);
+  const mod = loadHandler(db);
+  mod.setWebPlanCheck(async () => { throw new Error('Stripe is having a moment'); });
+  const res = await send(mod.revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' });
+  assert.strictEqual(res.code, 500);
+  assert.deepStrictEqual(db.writes, []);
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+}));
+
+test('an account that never reached web checkout goes free without asking Stripe', withSecret(SECRET, async () => {
+  const rows = { [USER]: { subscription_tier: 'gold', subscription_expires_at: null, stripe_customer_id: null } };
+  const mod = loadHandler(fakeSupabase(rows));
+  let asked = 0;
+  mod.setWebPlanCheck(async () => { asked += 1; return { tier: 'gold' }; });
+  await send(mod.revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' });
+  assert.strictEqual(asked, 0);
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+  mod.setWebPlanCheck(async () => ({ tier: 'free', status: null, trialEnd: null }));
+  rows[USER] = { subscription_tier: 'gold', subscription_expires_at: null, stripe_customer_id: 'cus_web' };
+  await send(mod.revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' });
+  assert.strictEqual(rows[USER].subscription_tier, 'free', 'nothing in Stripe either');
+}));
