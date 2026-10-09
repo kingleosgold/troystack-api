@@ -170,12 +170,74 @@ async function planFromStripe(customerId) {
   return null;
 }
 
+// Every Stripe customer made for an account. Checkout used to make a new
+// customer each time, so an account can have several while the profile keeps
+// only the latest. They're found by the supabase_user_id this API puts in a
+// customer's metadata. Stripe's search can lag a minute behind, so the
+// profile's own customer is always included. With strict, a search that fails
+// throws, since an answer from one customer of several isn't an answer.
+async function customersFor(userId, profileCustomerId, { strict = false } = {}) {
+  const ids = profileCustomerId ? [profileCustomerId] : [];
+  try {
+    let page;
+    for (let n = 0; n < 3; n += 1) {
+      const res = await stripe.customers.search({
+        query: `metadata['supabase_user_id']:'${userId}'`,
+        limit: 100,
+        ...(page ? { page } : {}),
+      });
+      for (const c of res.data || []) if (c?.id && !ids.includes(c.id)) ids.push(c.id);
+      if (!res.has_more || !res.next_page) break;
+      page = res.next_page;
+    }
+  } catch (e) {
+    if (strict) throw e;
+    console.warn('⚠️ [Stripe] Customer search failed:', e.message);
+  }
+  return ids;
+}
+
+// What Stripe holds for an account across all its customers. Lifetime on any
+// of them wins, then the first live Gold subscription. Only asked when the
+// profile has a customer, since an account that never reached web checkout
+// has nothing in Stripe.
+async function planForUser(userId, profileCustomerId) {
+  if (!profileCustomerId) return null;
+  let found = null;
+  for (const customerId of await customersFor(userId, profileCustomerId, { strict: true })) {
+    const plan = await planFromStripe(customerId);
+    if (plan?.tier === 'lifetime') return { ...plan, customerId };
+    if (plan && !found) found = { ...plan, customerId };
+  }
+  return found;
+}
+
 // What a profile should read once a plan it had ends: the plan Stripe still
-// holds for the customer, or free. A failed Stripe read throws, so the caller
+// holds for the account, or free. A failed Stripe read throws, so the caller
 // tries again rather than saving free over a plan that's still paid.
-async function planAfterEnding(customerId) {
-  if (!customerId) return { tier: 'free', status: null, trialEnd: null };
-  return (await planFromStripe(customerId)) || { tier: 'free', status: null, trialEnd: null };
+async function planAfterEnding(userId, customerId) {
+  return (await planForUser(userId, customerId)) || { tier: 'free', status: null, trialEnd: null };
+}
+
+// The account behind a Stripe customer: the profile that holds the customer,
+// or, for a customer an earlier checkout made and the profile no longer
+// holds, the account named in the customer's metadata.
+async function profileForCustomer(customerId) {
+  const { data: byCustomer } = await supabase
+    .from('profiles')
+    .select('id, subscription_tier, stripe_customer_id')
+    .eq('stripe_customer_id', customerId)
+    .single();
+  if (byCustomer) return byCustomer;
+  const customer = await stripe.customers.retrieve(customerId);
+  const userId = customer?.metadata?.supabase_user_id;
+  if (!userId || !isUUID(userId)) return null;
+  const { data: byId } = await supabase
+    .from('profiles')
+    .select('id, subscription_tier, stripe_customer_id')
+    .eq('id', userId)
+    .single();
+  return byId || null;
 }
 
 // Lifetime outlasts anything a later checkout adds, so a profile that reads
@@ -291,29 +353,29 @@ async function stripeWebhookHandler(req, res) {
       case 'customer.subscription.updated': {
         const subscription = event.data.object;
         const customerId = subscription.customer;
-
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('id, subscription_tier')
-          .eq('stripe_customer_id', customerId)
-          .single();
+        const profile = await profileForCustomer(customerId);
 
         if (profile) {
           // Don't downgrade lifetime users via subscription events
           if (profile.subscription_tier === 'lifetime') break;
 
+          // A live subscription gives Gold only when it's to a Gold price or
+          // product. A Gold product Stripe can't read throws, and the event
+          // comes again.
           const live = subscription.status === 'active' || subscription.status === 'trialing';
+          const price = subscription.items?.data?.[0]?.price;
+          const goldNow = live && price?.id ? (await tierForSubscriptionPrice(price)) !== 'free' : false;
           let updateData;
-          if (live) {
+          if (goldNow) {
             updateData = {
               subscription_tier: 'gold',
               subscription_status: subscription.status,
               trial_end: subscription.trial_end ? new Date(subscription.trial_end * 1000).toISOString() : null,
             };
           } else {
-            // This subscription ended, but the customer may hold another plan
-            // in Stripe, so the profile gets what Stripe still holds.
-            const after = await planAfterEnding(customerId);
+            // This subscription isn't Gold now, but the account may hold
+            // another plan in Stripe, so the profile gets what Stripe still holds.
+            const after = await planAfterEnding(profile.id, profile.stripe_customer_id || customerId);
             updateData = { subscription_tier: after.tier, subscription_status: after.status || subscription.status, trial_end: after.trialEnd };
           }
           const { error: updateError } = await supabase
@@ -332,19 +394,14 @@ async function stripeWebhookHandler(req, res) {
       case 'customer.subscription.deleted': {
         const subscription = event.data.object;
         const customerId = subscription.customer;
-
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('id, subscription_tier')
-          .eq('stripe_customer_id', customerId)
-          .single();
+        const profile = await profileForCustomer(customerId);
 
         if (profile) {
           if (profile.subscription_tier === 'lifetime') break;
 
-          // The customer may hold another plan in Stripe, a second Gold
+          // The account may hold another plan in Stripe, a second Gold
           // subscription or lifetime, so the profile gets what Stripe still holds.
-          const after = await planAfterEnding(customerId);
+          const after = await planAfterEnding(profile.id, profile.stripe_customer_id || customerId);
           const { error: updateError } = await supabase
             .from('profiles')
             .update({ subscription_tier: after.tier, subscription_status: after.status, trial_end: after.trialEnd })
@@ -425,36 +482,50 @@ router.post('/create-checkout-session', async (req, res) => {
       tier = 'gold';
     }
 
-    // Look up user profile
-    let { data: profile } = await supabase
+    // The profile has no email column, so asking for one failed every time
+    // and each checkout made a new Stripe customer. The profile is read for
+    // its customer only. A missing row gets a bare one that never touches a
+    // plan, and the email comes from the account.
+    const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('email, stripe_customer_id')
+      .select('stripe_customer_id')
       .eq('id', user_id)
       .single();
-
-    // If profile doesn't exist, create from auth.users
+    if (profileError && profileError.code !== 'PGRST116') {
+      console.error('❌ [Stripe] Profile lookup failed:', profileError.message);
+      return res.status(500).json({ error: "Checkout didn't open. Try again in a moment." });
+    }
     if (!profile) {
+      await supabase.from('profiles').upsert({ id: user_id }, { onConflict: 'id', ignoreDuplicates: true });
+    }
+
+    // An account that already holds a live web plan isn't sold a second one.
+    // A check that fails doesn't stop checkout.
+    let existing = null;
+    try {
+      existing = await planForUser(user_id, profile?.stripe_customer_id);
+    } catch (e) {
+      console.warn('⚠️ [Stripe] Could not check for an existing plan:', e.message);
+    }
+    if (existing) {
+      return res.status(409).json({ error: 'This account already has Gold. You can manage it from Settings.' });
+    }
+
+    // A customer an earlier checkout made for this account is used again, so
+    // purchases stay together. A new one is made only when there's none.
+    let customerId = profile?.stripe_customer_id || (await customersFor(user_id, null))[0] || null;
+    if (!customerId) {
       const { data: authUser, error: authError } = await supabase.auth.admin.getUserById(user_id);
       if (authError || !authUser?.user) {
         return res.status(404).json({ error: 'User not found' });
       }
-      const userEmail = authUser.user.email || '';
-      await supabase
-        .from('profiles')
-        .upsert({ id: user_id, email: userEmail, subscription_tier: 'free' }, { onConflict: 'id' });
-      profile = { email: userEmail, stripe_customer_id: null };
-      console.log(`📝 [Stripe] Created missing profile for user ${user_id}`);
-    }
-
-    let customerId = profile.stripe_customer_id;
-
-    // Create Stripe customer if needed
-    if (!customerId) {
       const customer = await stripe.customers.create({
-        email: profile.email,
+        ...(authUser.user.email ? { email: authUser.user.email } : {}),
         metadata: { supabase_user_id: user_id },
       });
       customerId = customer.id;
+    }
+    if (customerId !== profile?.stripe_customer_id) {
       // The customer id is how a purchase is found again later, so checkout
       // doesn't open without it saved.
       const { error: saveError } = await supabase
@@ -624,8 +695,18 @@ router.post('/customer-portal', async (req, res) => {
       return res.status(404).json({ error: 'No Stripe customer found for this user' });
     }
 
+    // The billing page opens on the customer that holds the account's plan,
+    // which after older checkouts may not be the one on the profile.
+    let portalCustomer = profile.stripe_customer_id;
+    try {
+      const plan = await planForUser(user_id, profile.stripe_customer_id);
+      if (plan?.customerId) portalCustomer = plan.customerId;
+    } catch (e) {
+      console.warn('⚠️ [Stripe] Could not find the customer holding the plan:', e.message);
+    }
+
     const session = await stripe.billingPortal.sessions.create({
-      customer: profile.stripe_customer_id,
+      customer: portalCustomer,
       return_url: safeRedirect(return_url, 'https://troystack.ai/settings'),
     });
 
@@ -664,7 +745,7 @@ router.get('/my-plan', async (req, res) => {
     }
     if (!profile?.stripe_customer_id) return res.json({ plan: null, status: null, trial_end: null });
 
-    const found = await planFromStripe(profile.stripe_customer_id);
+    const found = await planForUser(auth.userId, profile.stripe_customer_id);
     if (!found) return res.json({ plan: null, status: null, trial_end: null });
     return res.json({ plan: found.tier, status: found.status, trial_end: found.trialEnd });
   } catch (error) {
@@ -702,7 +783,7 @@ router.get('/sync-subscription', async (req, res) => {
     // back here. The answer only changes once the profile update succeeds.
     if (tier === 'free' && stripe && profile.stripe_customer_id) {
       try {
-        const restored = await planFromStripe(profile.stripe_customer_id);
+        const restored = await planForUser(user_id, profile.stripe_customer_id);
         if (restored) {
           const { error: updateError } = await supabase
             .from('profiles')
@@ -819,7 +900,7 @@ async function revenueCatWebhookHandler(req, res) {
         if (stripe) {
           try {
             const { data: profile } = await supabase.from('profiles').select('stripe_customer_id').eq('id', appUserId).single();
-            if (profile?.stripe_customer_id) after = await planAfterEnding(profile.stripe_customer_id);
+            if (profile?.stripe_customer_id) after = await planAfterEnding(appUserId, profile.stripe_customer_id);
           } catch (stripeErr) {
             console.error('  Stripe check before downgrading failed:', stripeErr.message);
           }
