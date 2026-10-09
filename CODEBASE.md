@@ -185,15 +185,16 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 ### src/routes/stripe.js
 - **Purpose:** Stripe billing + RevenueCat iOS subscription webhooks
 - **Exports:** Router + `stripeWebhookHandler`, `revenueCatWebhookHandler`
-- **Dependencies:** stripe SDK, supabase
-- **Last modified:** 2026-02-23
+- **Dependencies:** stripe SDK, supabase, lib/stripe-checks
+- **Last modified:** 2026-10-08
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | /v1/webhooks/stripe | Signature | Stripe webhook (checkout, subscription updates) |
-| POST | /v1/stripe/create-checkout-session | Public (UUID) | Create Stripe checkout |
-| POST | /v1/stripe/verify-session | Public (UUID) | Verify checkout completion |
-| GET | /v1/sync-subscription | Public (UUID) | Sync subscription status |
+| POST | /v1/stripe/create-checkout-session | Bearer (Supabase session, must match user_id) | Create Stripe checkout. Redirect URLs must be on a TroyStack site; optional `campaign` is stored on the session and subscription |
+| POST | /v1/stripe/verify-session | Public (session id) | Verify checkout completion |
+| POST | /v1/stripe/customer-portal | Bearer (Supabase session, must match user_id) | Stripe billing portal; return_url must be on a TroyStack site |
+| GET | /v1/sync-subscription | Public (UUID) | Plan for a user. A free profile with a live Stripe subscription gets its Gold restored, since the iPhone app writes free when RevenueCat has nothing |
 | POST | /v1/webhooks/revenuecat | Signature | RevenueCat iOS purchase webhook |
 
 ### src/routes/stack-signal.js
@@ -1189,6 +1190,12 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 - **Exports:** `checkPriceAlerts()`
 - **Dependencies:** supabase, push.js, price-fetcher
 - **Last modified:** 2026-03-04
+
+### src/lib/stripe-checks.js
+- **Purpose:** Checks the Stripe routes run before acting: the signed-in account from the bearer token, redirect URLs limited to TroyStack sites, campaign tokens, and which subscription counts as live
+- **Exports:** `signedInUserId(req, supabase)`, `safeRedirect(url, fallback)`, `cleanCampaign(value)`, `liveSubscription(subs)`, `SITE_ORIGINS`
+- **Dependencies:** none
+- **Last modified:** 2026-10-08
 
 ### src/lib/supabase.js
 - **Purpose:** Supabase client singleton
