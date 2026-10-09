@@ -214,8 +214,8 @@ Troy's fixed persona and knowledge prompt sections live in `src/services/troy-pr
 
 ### src/routes/revenuecat-webhook.js
 - **Purpose:** App Store purchases from RevenueCat land on profiles. Once migration 006 is on, this is the only way an App Store plan reaches profiles.
-- **Exports:** `revenueCatWebhookHandler`, plus `applyEvent`, `mapProductToTier` and `authorized` for tests
-- **Dependencies:** supabase
+- **Exports:** `revenueCatWebhookHandler`, `setWebPlanCheck` for stripe.js to hand in its Stripe plan check, plus `applyEvent`, `mapProductToTier` and `authorized` for tests
+- **Dependencies:** supabase, and the Stripe check handed in with `setWebPlanCheck`
 - **Last modified:** 2026-10-09
 
 | Method | Path | Auth | Description |
@@ -225,7 +225,8 @@ Troy's fixed persona and knowledge prompt sections live in `src/services/troy-pr
 - Refuses every call with 503 when `REVENUECAT_WEBHOOK_SECRET` isn't set, and 401 when the header doesn't match. The header may carry the secret with or without `Bearer `.
 - INITIAL_PURCHASE, RENEWAL, PRODUCT_CHANGE (by `new_product_id`), UNCANCELLATION, NON_RENEWING_PURCHASE (the one-time lifetime), SUBSCRIPTION_EXTENDED and TEMPORARY_ENTITLEMENT_GRANT set the tier from the product, gold or lifetime. A subscription never replaces lifetime.
 - CANCELLATION with `cancel_reason` CUSTOMER_SUPPORT is a refund and ends what was refunded now. Any other CANCELLATION only records the expiry date.
-- EXPIRATION writes free unless the profile is lifetime.
+- EXPIRATION leaves a lifetime profile alone and otherwise ends the App Store plan.
+- When an App Store plan ends, by expiry or refund, the account may still hold a plan bought on the web. Once stripe.js has handed in a check with `setWebPlanCheck`, the profile gets the plan Stripe still holds (a web subscription or lifetime, with its status and trial end) before it gets free. Stripe is asked only when the profile has a `stripe_customer_id`, and a Stripe read that fails answers 500 so RevenueCat sends the event again. With no check handed in, an ended plan writes free.
 - BILLING_ISSUE changes nothing during Apple's grace period. TRANSFER is logged and not applied, since settling it needs RevenueCat's REST API and a secret key the API doesn't hold.
 - Unknown products, anonymous and non-UUID ids, and accounts with no profile are skipped with 200. A failed profile read or write answers 500 so RevenueCat retries.
 - Sandbox events are applied, because App Review buys in the sandbox.
