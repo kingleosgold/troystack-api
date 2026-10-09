@@ -10,6 +10,14 @@ const path = require('node:path');
 process.env.SUPABASE_URL ||= 'http://localhost:54321';
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-dummy-service-role-key';
 
+// The price fetcher logs a lot, and its lines are kept out of stdout while
+// this file runs. Node 22's runner reads a test file's output in chunks, and a
+// log line that arrives in the same chunk right after one of the runner's own
+// messages is read as a message, which fails the whole file. The Friday close
+// is written in the background now, so its log line can land between tests.
+test.before(() => { test.mock.method(console, 'log', () => {}); });
+test.after(() => { test.mock.restoreAll(); });
+
 const SRC = path.join(__dirname, '..', 'src');
 const { buildMarketBlock } = require(path.join(SRC, 'services', 'troy-context'));
 const SUPABASE_PATH = require.resolve(path.join(SRC, 'lib', 'supabase'));
@@ -369,6 +377,166 @@ test('a caller who joins a hung fetch at 20 seconds is released at 30, not 50', 
 
   db.release();
   await settle();
+});
+
+// A database that keeps the Friday close in app_state. The test can hold
+// Friday close writes on their way in and let them go one at a time, and
+// `landed` lists the gold price of each close in the order its write landed.
+// It can also hold the next read of the Friday close ('close') or of the last
+// platinum and palladium prices ('ptpd'), and a held read answers with what
+// was stored when it was made.
+function fridayCloseDb(stored = null) {
+  let holding = 0;
+  const held = [];
+  const landed = [];
+  const heldReads = {};
+  const land = (close) => { stored = close; landed.push(close.prices.gold); return { error: null }; };
+  const missing = { data: null, error: { code: 'PGRST116' } };
+  return {
+    landed,
+    stored: () => stored,
+    hold: (count) => { holding = count; },
+    release: () => held.shift()(),
+    holdRead(kind) {
+      let release;
+      heldReads[kind] = new Promise((resolve) => { release = resolve; });
+      return () => release();
+    },
+    from(table) {
+      let kind = table === 'app_state' ? 'close' : 'yesterday';
+      const q = {
+        select: () => q, eq: () => q, gte: () => q, lte: () => q, order: () => q, limit: () => q,
+        gt: () => { kind = 'ptpd'; return q; },
+        single: () => {
+          const answer = table === 'app_state' && stored ? { data: { value: stored }, error: null } : missing;
+          const gate = heldReads[kind];
+          delete heldReads[kind];
+          return gate ? gate.then(() => answer) : Promise.resolve(answer);
+        },
+        insert: () => Promise.resolve({ error: null }),
+        upsert: (row) => {
+          if (holding === 0) return Promise.resolve(land(row.value));
+          holding -= 1;
+          return new Promise((resolve) => held.push(() => resolve(land(row.value))));
+        },
+      };
+      return q;
+    },
+  };
+}
+
+const FRIDAY_QUOTES = { 'GC=F': 4300, 'SI=F': 64.5, 'PL=F': 1790, 'PA=F': 1270 };
+
+test("a Friday close write that stalls can't land after a newer close", async (t) => {
+  // Friday, 4:30 PM in New York, when every fetch saves the Friday close.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-09T20:30:00Z') });
+  const quotes = { ...FRIDAY_QUOTES };
+  const db = fridayCloseDb();
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios(quotes) });
+
+  // The 4:30 fetch saves a $4,300 close, and its write stalls on the way to the database.
+  db.hold(1);
+  const first = fetcher.fetchLiveSpotPrices();
+  await settle();
+
+  // A minute later the next fetch saves a $4,310 close without waiting on that write.
+  t.mock.timers.tick(60 * 1000);
+  await first;
+  quotes['GC=F'] = 4310;
+  let secondDone = false;
+  fetcher.fetchLiveSpotPrices().then(() => { secondDone = true; });
+  await settle();
+  assert.ok(secondDone, "the newer fetch doesn't wait on the stalled write");
+
+  // After the close the app reads the newer close, and then the stalled write goes through.
+  t.mock.timers.tick(30 * 60 * 1000); // 5:01 PM, markets closed
+  assert.strictEqual(fetcher.getPriceSnapshot().prices.gold, 4310);
+  db.release();
+  await settle();
+  assert.deepStrictEqual(db.landed, [4300, 4310], 'the newer close lands after the stalled one, not before');
+  assert.strictEqual(db.stored().prices.gold, 4310);
+
+  // A restart over the weekend reads the newer close back.
+  t.mock.timers.setTime(Date.parse('2026-10-10T16:00:00Z')); // Saturday, noon in New York
+  const restarted = loadWith('services/price-fetcher', { supabase: db, axios: offline });
+  await restarted.initPriceFetcher();
+  assert.strictEqual(restarted.getPriceSnapshot().prices.gold, 4310);
+});
+
+test('a Friday close replaced while its write waited is never written', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-09T20:30:00Z') }); // Friday, 4:30 PM in New York
+  const quotes = { ...FRIDAY_QUOTES };
+  const db = fridayCloseDb();
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios(quotes) });
+
+  db.hold(1);
+  const first = fetcher.fetchLiveSpotPrices();
+  await settle();
+
+  // While the first write is stuck, fetches a minute apart save closes at $4,310 and $4,320.
+  for (const gold of [4310, 4320]) {
+    t.mock.timers.tick(60 * 1000);
+    quotes['GC=F'] = gold;
+    await fetcher.fetchLiveSpotPrices();
+  }
+  await first;
+
+  db.release();
+  await settle();
+  assert.deepStrictEqual(db.landed, [4300, 4320], 'the $4,310 close was replaced before its turn, so only the newest follows the stalled write');
+  assert.strictEqual(db.stored().prices.gold, 4320);
+});
+
+// The close app_state holds before the restarts below, read live at 3 PM on Friday.
+const STORED_AT_3PM = {
+  prices: { gold: 4200, silver: 63, platinum: 1780, palladium: 1260 },
+  change: { gold: {}, silver: {}, platinum: {}, palladium: {}, source: 'unavailable' },
+  source: 'yahoo_finance',
+  timestamp: '2026-10-09T19:00:00.000Z',
+  quotedAt: '2026-10-09T19:00:00.000Z',
+  savedAt: '2026-10-09T19:00:00.000Z',
+};
+
+test('a startup read of the Friday close that comes back late keeps a newer close saved since', async (t) => {
+  // Friday, 5:30 PM in New York, right after a restart.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-09T21:30:00Z') });
+  const db = fridayCloseDb(STORED_AT_3PM);
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios({ ...FRIDAY_QUOTES, 'GC=F': 4310 }) });
+
+  // The startup read is slow, and a price request's fetch saves a $4,310 close first.
+  const releaseLoad = db.holdRead('close');
+  const releasePtPd = db.holdRead('ptpd');
+  const init = fetcher.initPriceFetcher();
+  await fetcher.getSpotPrices();
+
+  // Then the read comes back with the $4,200 close from 3 PM. Startup waits on
+  // its next read here, before its own fetch saves another close.
+  releaseLoad();
+  await settle();
+  assert.strictEqual(fetcher.getPriceSnapshot().prices.gold, 4310, 'the close saved since startup is newer, so it stays');
+
+  releasePtPd();
+  await init;
+});
+
+test('a stored Friday close still replaces one saved since startup on built-in prices', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-09T21:30:00Z') }); // Friday, 5:30 PM in New York
+  const db = fridayCloseDb(STORED_AT_3PM);
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: offline });
+
+  // With the feeds down, the request's fetch can only save a close on built-in prices.
+  const releaseLoad = db.holdRead('close');
+  const releasePtPd = db.holdRead('ptpd');
+  const init = fetcher.initPriceFetcher();
+  await fetcher.getSpotPrices();
+  assert.strictEqual(fetcher.getPriceSnapshot().source, 'static-fallback (friday-close)');
+
+  releaseLoad();
+  await settle();
+  assert.strictEqual(fetcher.getPriceSnapshot().prices.gold, 4200, 'prices read live at 3 PM beat built-in ones');
+
+  releasePtPd();
+  await init;
 });
 
 test('failed fetches keep the time of the last live price, and the reading reports it', async (t) => {
