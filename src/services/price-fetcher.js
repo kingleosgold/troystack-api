@@ -357,12 +357,13 @@ async function fetchLiveSpotPricesNow() {
       }
     }
 
-    // Priority 3: Use last cached prices
+    // Priority 3: Use last cached prices. Built-in prices stay labeled as
+    // built-in, so they're never taken for a real reading after a second failure.
     if (!fetched && spotPriceCache.lastUpdated) {
       console.log('   Using last cached prices (all APIs failed)');
       fetched = {
         ...spotPriceCache.prices,
-        source: 'cached-fallback',
+        source: spotPriceCache.source === 'static-fallback' ? 'static-fallback' : 'cached-fallback',
       };
     }
 
@@ -481,13 +482,22 @@ async function logPriceToSupabase(prices, source) {
 
 // One live fetch at a time. Anyone who asks while one runs, the minute cron,
 // startup, or a burst of questions right after a deploy, shares it instead of
-// running the whole Yahoo and MetalPriceAPI chain again.
+// running the whole Yahoo and MetalPriceAPI chain again. A fetch still running
+// after 30 seconds is taken as hung, and the next caller starts a fresh one.
+const LIVE_FETCH_STALL_MS = 30 * 1000;
 let liveFetch = null;
+let liveFetchStartedAt = 0;
 function fetchLiveSpotPrices() {
+  if (liveFetch && Date.now() - liveFetchStartedAt >= LIVE_FETCH_STALL_MS) {
+    console.log('   [Price Fetcher] Live fetch still running after 30s, starting another');
+    liveFetch = null;
+  }
   if (!liveFetch) {
-    liveFetch = fetchLiveSpotPricesNow().finally(() => {
-      liveFetch = null;
+    liveFetchStartedAt = Date.now();
+    const current = fetchLiveSpotPricesNow().finally(() => {
+      if (liveFetch === current) liveFetch = null;
     });
+    liveFetch = current;
   }
   return liveFetch;
 }

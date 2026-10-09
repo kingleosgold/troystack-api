@@ -88,10 +88,23 @@ function buildMarketBlock({ spot, signal, headlines, now } = {}) {
   // When the live price sources fail, the fetcher falls back to cached or
   // built-in prices, and its change is then measured from prices that aren't
   // today's. Those moves would be wrong, so they're left out.
-  const trusted = !/fallback/i.test(String(spot?.source || ''));
+  const source = String(spot?.source || '');
+  const trusted = !/fallback/i.test(source);
   const moves = trusted ? METALS.map((m) => moveLine(m, Number(prices[m]), spot?.change?.[m])).filter(Boolean) : [];
   if (moves.length) {
     sections.push(`TODAY'S MARKET:\n${moves.join('\n')}${spot?.marketsClosed ? "\nMarkets are closed right now, so these are the last session's moves." : ''}`);
+  }
+  // The live feeds are down, so CURRENT SPOT isn't today's price. Built-in
+  // prices aren't market prices at all, and cached ones are only as fresh as
+  // when they were read.
+  const stale = Boolean(spot) && !trusted;
+  if (stale) {
+    const when = /static/i.test(source) ? '' : dayAndTime(spot.timestamp);
+    sections.push(
+      /static/i.test(source)
+        ? "PRICES RIGHT NOW: The live price feeds are down, so CURRENT SPOT holds placeholder numbers, not market prices. Don't quote them. If someone asks where prices are, say live prices aren't available this minute and to check back shortly."
+        : `PRICES RIGHT NOW: The live price feeds are down, so CURRENT SPOT is the last price read${when ? `, ${when}` : ''}, and may be out of date. Say so when you use it.`,
+    );
   }
 
   const hasSignal = Boolean(signal && signal.title);
@@ -114,9 +127,11 @@ function buildMarketBlock({ spot, signal, headlines, now } = {}) {
 
   if (!sections.length) return '';
   const head = Number.isFinite(now) ? `${nowLine(now)}\n\n` : '';
-  const asOf = hasSignal
-    ? ` Prices and moves in the Signal are as of when it was published. For where prices are now${moves.length ? " and how they've moved today, use only CURRENT SPOT and TODAY'S MARKET" : ', use only CURRENT SPOT'}.`
-    : '';
+  const asOf = !hasSignal
+    ? ''
+    : stale
+      ? ' Prices and moves in the Signal are as of when it was published, and live prices are unavailable right now.'
+      : ` Prices and moves in the Signal are as of when it was published. For where prices are now${moves.length ? " and how they've moved today, use only CURRENT SPOT and TODAY'S MARKET" : ', use only CURRENT SPOT'}.`;
   return `${head}${sections.join('\n\n')}\n\nWhen someone asks what moved metals or what's in the news, answer from these, and say how recent they are when it matters.${asOf} Don't invent headlines, numbers or dates beyond them.\n\n`;
 }
 
