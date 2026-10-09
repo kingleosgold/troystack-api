@@ -167,15 +167,28 @@ function calculateChanges(current, yesterday) {
 // replaced by the time its write's turn comes isn't written at all.
 let fridayCloseWrites = Promise.resolve();
 
+// Whether the startup read of the stored close has come back, found or not.
+let storedCloseLoaded = false;
+
+// Built-in prices were never read from a live source, so they're never saved
+// as the Friday close or loaded as one.
+function isBuiltInClose(close) {
+  return close.source === 'static-fallback';
+}
+
 /**
  * Save current prices as Friday close for weekend use.
  * Persists to Supabase so it survives Railway redeploys. The close is kept in
  * memory at once and its write waits its turn, so callers don't wait on it.
  * `isCurrent` is false once the fetch saving it has been replaced, and then
- * nothing is saved.
+ * nothing is saved. Nothing is saved from built-in prices either.
  */
 function saveFridayClose(data, isCurrent = () => true) {
   if (!isCurrent()) return;
+  if (isBuiltInClose(data)) {
+    console.log('   Prices are built-in, so the Friday close is left as it was');
+    return;
+  }
   const close = { ...data, savedAt: new Date().toISOString() };
   fridayCloseData = close;
   fridayCloseWrites = fridayCloseWrites.then(async () => {
@@ -194,7 +207,8 @@ function saveFridayClose(data, isCurrent = () => true) {
 /**
  * Load Friday close data from Supabase (called on startup).
  * A fetch can save a close while this read is out, and the stored close only
- * replaces that one when it's newer.
+ * replaces that one when it's newer. A stored close on built-in prices isn't
+ * used.
  */
 async function loadFridayClose() {
   try {
@@ -204,6 +218,10 @@ async function loadFridayClose() {
       .eq('key', 'friday_close')
       .single();
     if (!error && data && data.value) {
+      if (isBuiltInClose(data.value)) {
+        console.log("   The stored Friday close is on built-in prices, so it isn't used");
+        return;
+      }
       if (fridayCloseData && !isNewerFridayClose(data.value, fridayCloseData)) {
         console.log("   Kept the Friday close saved since startup, the stored one isn't newer");
         return;
@@ -213,6 +231,8 @@ async function loadFridayClose() {
     }
   } catch (err) {
     console.log('   No Friday close data in Supabase:', err.message);
+  } finally {
+    storedCloseLoaded = true;
   }
 }
 
@@ -229,8 +249,8 @@ function fridayQuotedAt(friday) {
 }
 
 // Whether close `a` is newer than close `b`. The one whose prices were read
-// live later wins, and prices never read live count as oldest. On a tie, like
-// two closes on built-in prices, the one saved later wins.
+// live later wins, and a close with no known live read counts as oldest. On a
+// tie, the one saved later wins.
 function isNewerFridayClose(a, b) {
   const time = (iso) => Date.parse(iso || '') || 0;
   const quotedA = time(fridayQuotedAt(a));
@@ -599,8 +619,11 @@ async function getSpotPrices() {
   if (marketsClosed) {
     let friday = getFridayClose();
 
-    // If no Friday close but we have cached data, save it as Friday close
-    if (!friday && spotPriceCache.lastUpdated) {
+    // If no Friday close but we have cached data, save it as Friday close.
+    // Not before the startup read of the stored close is back, though. The
+    // cache was read later, so it would win over the stored close, and its
+    // change, measured against Friday's own last price, reads as a flat day.
+    if (!friday && spotPriceCache.lastUpdated && storedCloseLoaded) {
       saveFridayClose({
         prices: spotPriceCache.prices,
         timestamp: spotPriceCache.lastUpdated.toISOString(),
