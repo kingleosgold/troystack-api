@@ -172,6 +172,7 @@ Return ONLY the JSON array, no other text.`;
       const raw = await callGemini(MODELS.flash, systemPrompt, userMessage, {
         temperature: 0.2,
         responseMimeType: 'application/json',
+        thinking: false,
       });
 
       let scores;
@@ -280,6 +281,7 @@ CRITICAL: Return ONLY the JSON array. No markdown, no code fences, no explanatio
     const raw = await callGemini(MODELS.flash, systemPrompt, userMessage, {
       temperature: 0.3,
       responseMimeType: 'application/json',
+      thinking: false,
     });
 
     let clusters;
@@ -528,13 +530,17 @@ function sanitizeTweetText(raw) {
 }
 
 async function generateTweetText(title, commentary) {
+  // tweet_text only feeds the X queue, so there's nothing to pay Gemini for
+  // while X distribution is off. Flipping the flag back on brings it back.
+  if (!X_DISTRIBUTION_ENABLED) return null;
+
   const content = commentary?.substring(0, 500) || title;
   if (!content || content === title) return null; // nothing to react to beyond the title
 
   try {
     const raw = await callGemini(MODELS.flash, TWEET_SYSTEM_PROMPT,
       `Write a Troy tweet reacting to this:\nTitle: ${title}\nAnalysis: ${content}`,
-      { temperature: 0.9, maxOutputTokens: 1024 });
+      { temperature: 0.9, maxOutputTokens: 1024, thinking: false });
     let cleaned = sanitizeTweetText(raw);
     // Truncate to 255 chars (280 - 23 t.co URL - 2 \n\n) at a sentence boundary
     if (cleaned && cleaned.length > 255) {
@@ -566,9 +572,12 @@ async function generateArticleMetadata(cluster, articleText) {
 
   let oneLiner;
   try {
+    // 100 tokens is plenty for one line, but only with thinking off. With it
+    // on, the thinking draws on the same limit and can leave the line empty.
     const raw = await callGemini(MODELS.flash, systemPrompt, userMessage, {
       temperature: 0.5,
       maxOutputTokens: 100,
+      thinking: false,
     });
     oneLiner = raw.trim().replace(/^["']|["']$/g, '');
   } catch (err) {
@@ -1254,6 +1263,17 @@ async function runStackSignalPipeline() {
       return { articles: rawArticles.length, scored: 0, clusters: 0, synthesized: 0, saved: 0 };
     }
 
+    // Check the daily cap before any Gemini call. Scoring and clustering used to
+    // run first, every 15 minutes, and get thrown away once the day's articles
+    // were written.
+    const today = new Date().toISOString().split('T')[0];
+    const { count: commentaryToday, allowed } = await getCommentaryCount();
+
+    if (!allowed) {
+      console.log(`[Pipeline] Daily synthesis cap reached: ${commentaryToday}/${DAILY_CAP} (${today}), skipping before scoring`);
+      return { articles: rawArticles.length, scored: 0, clusters: 0, synthesized: 0, saved: 0, skipped: true };
+    }
+
     // Phase 1: Score with Gemini (detailed scoring on the filtered set)
     console.log('\n[Pipeline] Phase 1: Scoring articles...');
     const scoredArticles = await scoreArticles(articlesToProcess);
@@ -1264,14 +1284,6 @@ async function runStackSignalPipeline() {
     console.log(`[Pipeline] ${clusters.length} clusters identified`);
 
     // Phase 3: Write synthesis articles (daily-capped)
-    const today = new Date().toISOString().split('T')[0];
-    const { count: commentaryToday, allowed } = await getCommentaryCount();
-
-    if (!allowed) {
-      console.log(`[Pipeline] Daily synthesis cap reached: ${commentaryToday}/${DAILY_CAP} (${today}) — skipping entire cycle`);
-      return { articles: rawArticles.length, scored: scoredArticles.length, clusters: clusters.length, synthesized: 0, saved: 0, skipped: true };
-    }
-
     const remainingSlots = DAILY_CAP - commentaryToday;
     const clustersToWrite = clusters.slice(0, remainingSlots);
 
@@ -1399,4 +1411,5 @@ module.exports = {
   generateTweetText,
   sanitizeTweetText,
   parseJsonObject,
+  generateArticleMetadata,
 };
