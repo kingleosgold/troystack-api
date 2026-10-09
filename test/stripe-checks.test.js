@@ -63,9 +63,11 @@ test('no token, a bad token or a failed lookup is a 401', async () => {
   assert.equal(thrown.status, 401);
 });
 
-test('only active or trialing subscriptions are live', () => {
+test('active, trialing and past due subscriptions are live, and unpaid or ended ones are not', () => {
   assert.deepEqual(liveSubscriptions([{ status: 'canceled' }, { status: 'incomplete_expired' }]), []);
   assert.deepEqual(liveSubscriptions([{ status: 'canceled' }, { id: 's2', status: 'trialing' }, { id: 's3', status: 'active' }]).map((s) => s.id), ['s2', 's3']);
+  // Stripe is still retrying a past due renewal. Unpaid means the retries ran out.
+  assert.deepEqual(liveSubscriptions([{ id: 's4', status: 'past_due' }, { id: 's5', status: 'unpaid' }]).map((s) => s.id), ['s4']);
   assert.deepEqual(liveSubscriptions(undefined), []);
 });
 

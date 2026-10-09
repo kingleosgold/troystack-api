@@ -58,9 +58,18 @@ function reset(over = {}) {
     appState: {},
     // Promises by account that hold that account's new checkout until they settle.
     holdCreate: {},
+    // app_state inserts and deletes fail with this error, as when the
+    // database can't be reached.
+    turnError: null,
   }, over);
   router.resetGoldProductCache();
   router.resetCustomerSearchCache();
+}
+
+// A JSON field of an app_state value, as PostgREST's value->>field filter reads it.
+function valueField(value, column) {
+  const field = /^value->>(\w+)$/.exec(column)?.[1];
+  return field && value && value[field] != null ? String(value[field]) : null;
 }
 
 const appStateTable = {
@@ -74,6 +83,35 @@ const appStateTable = {
   upsert: async (row) => {
     state.appState[row.key] = row.value;
     return { error: null };
+  },
+  // A key that's already there fails on the primary key, as in Postgres.
+  insert: async (row) => {
+    if (state.turnError) return { error: state.turnError };
+    if (Object.hasOwn(state.appState, row.key)) return { error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
+    state.appState[row.key] = row.value;
+    return { error: null };
+  },
+  // Deletes the rows that match every filter, on the key or on a JSON field.
+  delete() {
+    const filters = [];
+    const query = {
+      eq(column, wanted) {
+        filters.push((key, value) => (column === 'key' ? key === wanted : valueField(value, column) === String(wanted)));
+        return query;
+      },
+      lt(column, bound) {
+        filters.push((_key, value) => valueField(value, column) != null && valueField(value, column) < bound);
+        return query;
+      },
+      then(resolve, reject) {
+        if (state.turnError) return Promise.resolve({ error: state.turnError }).then(resolve, reject);
+        for (const key of Object.keys(state.appState)) {
+          if (filters.every((match) => match(key, state.appState[key]))) delete state.appState[key];
+        }
+        return Promise.resolve({ error: null }).then(resolve, reject);
+      },
+    };
+    return query;
   },
 };
 
@@ -150,7 +188,12 @@ const fakeStripe = {
       // Newest first, filtered by status and paged by starting_after, like Stripe.
       list: async (params = {}) => {
         state.stripeCalls.push('checkout.sessions.list');
-        let rows = state.sessions.filter((x) => (!params.status || x.status === params.status) && (!x.customer || !params.customer || x.customer === params.customer));
+        let rows = state.sessions.filter(
+          (x) =>
+            (!params.status || x.status === params.status) &&
+            (!x.customer || !params.customer || x.customer === params.customer) &&
+            (!params.payment_intent || x.payment_intent === params.payment_intent),
+        );
         if (params.starting_after) rows = rows.slice(rows.findIndex((x) => x.id === params.starting_after) + 1);
         const page = rows.slice(0, params.limit || 10);
         return { data: page, has_more: rows.length > page.length };
@@ -1148,4 +1191,141 @@ test("checkouts for two different accounts don't wait on each other", async () =
     release();
   }
   assert.equal((await first).statusCode, 200);
+});
+
+const goldItems = { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] };
+
+async function stripeEvent(event) {
+  const res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(event)) }, res);
+  return res;
+}
+
+test("a Gold subscription whose renewal failed keeps Gold while Stripe retries, and an unpaid one doesn't", async () => {
+  const sub = (status) => ({ id: 'sub_old', customer: 'cus_1', status, items: goldItems });
+  reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' }, subscriptionById: { sub_old: sub('past_due') } });
+  let res = await stripeEvent(subscriptionEvent('customer.subscription.updated', 'past_due'));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(state.updates, [{ subscription_tier: 'gold', subscription_status: 'past_due', trial_end: null }]);
+
+  // Retries ran out. Nothing else is held, so the plan ends.
+  reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: 'past_due', stripe_customer_id: 'cus_1' }, subscriptionById: { sub_old: sub('unpaid') }, subscriptions: [sub('unpaid')] });
+  res = await stripeEvent(subscriptionEvent('customer.subscription.updated', 'unpaid'));
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.updates[0].subscription_tier, 'free');
+
+  // The app's plan checks see a past due subscription as Gold too.
+  reset({ profile: { subscription_tier: 'free', subscription_status: null, stripe_customer_id: 'cus_1' }, subscriptions: [sub('past_due')] });
+  assert.deepEqual((await askMyPlan('good-token')).body, { plan: 'gold', status: 'past_due', trial_end: null });
+});
+
+test('checkout turns away an account whose Gold payment failed and points it to the billing page', async () => {
+  const sub = (status) => ({ id: 'sub_1', customer: 'cus_1', status, items: goldItems });
+  const cases = [
+    ['the profile kept Gold through the retries', { profile: { stripe_customer_id: 'cus_1', subscription_tier: 'gold', subscription_status: 'past_due' } }],
+    ['Stripe holds a past due subscription', { profile: { stripe_customer_id: 'cus_1' }, subscriptions: [sub('past_due')] }],
+    ['Stripe holds an unpaid subscription', { profile: { stripe_customer_id: 'cus_1' }, subscriptions: [sub('unpaid')] }],
+  ];
+  for (const [label, over] of cases) {
+    reset(over);
+    const res = await checkout('price_gold_yearly');
+    assert.equal(res.statusCode, 409, label);
+    assert.equal(res.body.reason, 'payment_issue', label);
+    assert.match(res.body.error, /card/, label);
+    assert.equal(state.created, undefined, label);
+  }
+});
+
+test('a checkout turn held on another instance answers 409, and one left by a request that died is cleared', async () => {
+  const turnKey = `checkout_turn:${USER}`;
+  const held = { until: new Date(Date.now() + 60 * 1000).toISOString(), owner: 'another-instance' };
+  reset({ profile: { stripe_customer_id: 'cus_1' }, appState: { [turnKey]: held } });
+  const busy = await checkout('price_gold_monthly');
+  assert.equal(busy.statusCode, 409);
+  assert.equal(busy.body.reason, 'checkout_in_progress');
+  assert.ok(!state.stripeCalls.includes('checkout.sessions.create'));
+  assert.deepEqual(state.appState[turnKey], held, "the other instance's turn stays");
+
+  reset({ profile: { stripe_customer_id: 'cus_1' }, appState: { [turnKey]: { until: new Date(Date.now() - 1000).toISOString(), owner: 'a-request-that-died' } } });
+  const res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.appState[turnKey], undefined, 'the turn is given back once the checkout is open');
+
+  // An early answer gives the turn back too.
+  reset({ profile: { stripe_customer_id: 'cus_1', subscription_tier: 'gold' } });
+  assert.equal((await checkout('price_gold_monthly')).statusCode, 409);
+  assert.equal(state.appState[turnKey], undefined);
+});
+
+test("checkout doesn't open when its turn can't be taken", async () => {
+  reset({ profile: { stripe_customer_id: 'cus_1' }, turnError: { message: 'connection reset' } });
+  const res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 500);
+  assert.deepEqual(res.body, { error: "Checkout didn't open. Try again in a moment." });
+  assert.deepEqual(state.stripeCalls, [], 'nothing is read or made in Stripe');
+});
+
+test('an account that had an App Store trial or plan gets no web free week', async () => {
+  for (const customer of ['cus_1', null]) {
+    reset({ profile: { stripe_customer_id: customer }, appState: { [`revenuecat_grant:${USER}`]: { purchasedAt: Date.now() - 100 * 86400000 } } });
+    const res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 200, String(customer));
+    assert.equal(res.body.trial, false, String(customer));
+    assert.equal(state.created.subscription_data, undefined, String(customer));
+  }
+});
+
+const lifetimeProfile = () => ({ id: USER, subscription_tier: 'lifetime', subscription_status: 'active', stripe_customer_id: 'cus_1' });
+const paidLifetime = () => ({ ...lifetimeSession('pi_life'), customer: 'cus_1', client_reference_id: USER });
+const charge = (type, object) => ({ type, data: { object } });
+
+test('a web lifetime refunded in full drops to what the account still holds', async () => {
+  const refunded = charge('charge.refunded', { id: 'ch_life', payment_intent: 'pi_life', refunded: true });
+  const until = Date.now() + 40 * 86400000;
+  const cases = [
+    ['nothing else', {}, { subscription_tier: 'free', subscription_status: null, trial_end: null }],
+    ['a Gold subscription still running', { subscriptions: [{ id: 'sub_1', customer: 'cus_1', status: 'active', items: goldItems }] }, { subscription_tier: 'gold', subscription_status: 'active', trial_end: null }],
+    ['an App Store subscription on record', { appState: { [`revenuecat_grant:${USER}`]: { subscriptionUntil: until } } }, { subscription_tier: 'gold', subscription_status: 'active', trial_end: null, subscription_expires_at: new Date(until).toISOString() }],
+  ];
+  for (const [label, over, written] of cases) {
+    reset({ profile: lifetimeProfile(), sessions: [paidLifetime()], charges: { pi_life: { refunded: true } }, ...over });
+    const res = await stripeEvent(refunded);
+    assert.equal(res.statusCode, 200, label);
+    assert.deepEqual(state.updates, [written], label);
+  }
+
+  // An older checkout that doesn't name its account is found through its customer.
+  reset({ profile: lifetimeProfile(), sessions: [{ ...lifetimeSession('pi_life'), customer: 'cus_1' }], charges: { pi_life: { refunded: true } } });
+  await stripeEvent(refunded);
+  assert.deepEqual(state.updates, [{ subscription_tier: 'free', subscription_status: null, trial_end: null }]);
+
+  // An App Store lifetime on record, a partial refund, and a refund of
+  // anything but a lifetime checkout all leave lifetime.
+  reset({ profile: lifetimeProfile(), sessions: [paidLifetime()], charges: { pi_life: { refunded: true } }, appState: { [`revenuecat_grant:${USER}`]: { lifetime: true } } });
+  await stripeEvent(refunded);
+  reset({ profile: lifetimeProfile(), sessions: [paidLifetime()], charges: { pi_life: { refunded: false } } });
+  await stripeEvent(charge('charge.refunded', { id: 'ch_life', payment_intent: 'pi_life', refunded: false }));
+  reset({ profile: lifetimeProfile(), sessions: [paidLifetime()], charges: { pi_life: { refunded: false } } });
+  await stripeEvent(charge('charge.refunded', { id: 'ch_sub', payment_intent: 'pi_invoice', refunded: true }));
+  assert.deepEqual(state.updates, []);
+});
+
+test('a chargeback on a web lifetime drops it, an inquiry leaves it, and winning gives it back', async () => {
+  const disputed = (status) => ({ profile: lifetimeProfile(), sessions: [paidLifetime()], charges: { pi_life: { refunded: false, disputed: true } }, disputes: { pi_life: [{ status }] } });
+  reset(disputed('needs_response'));
+  let res = await stripeEvent(charge('charge.dispute.created', { id: 'dp_1', payment_intent: 'pi_life', status: 'needs_response' }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(state.updates, [{ subscription_tier: 'free', subscription_status: null, trial_end: null }]);
+  // The sign-in repair doesn't bring it back while the chargeback is open.
+  reset({ ...disputed('under_review'), profile: { subscription_tier: 'free', subscription_status: null, stripe_customer_id: 'cus_1' } });
+  assert.equal((await sync()).body.subscription_tier, 'free');
+
+  reset(disputed('warning_needs_response'));
+  await stripeEvent(charge('charge.dispute.created', { id: 'dp_2', payment_intent: 'pi_life', status: 'warning_needs_response' }));
+  assert.deepEqual(state.updates, [], 'an inquiry is not a chargeback yet');
+
+  reset({ ...disputed('won'), profile: { ...lifetimeProfile(), subscription_tier: 'free', subscription_status: null } });
+  res = await stripeEvent(charge('charge.dispute.closed', { id: 'dp_1', payment_intent: 'pi_life', status: 'won' }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(state.updates, [{ subscription_tier: 'lifetime', subscription_status: 'active', trial_end: null }]);
 });
