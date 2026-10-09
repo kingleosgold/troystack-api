@@ -550,10 +550,23 @@ function getCachedPrices() {
 }
 
 /**
- * One reading of the price cache: the prices, the change measured against
- * them and where they came from, so a prompt built from it agrees with itself.
+ * One reading of the prices: the prices, the change measured against them and
+ * where they came from, so a prompt built from it agrees with itself. While
+ * markets are closed it's the Friday close, the same reading getSpotPrices
+ * gives the app. A weekend fetch measures its change against Friday's own
+ * last price, so the live cache would read the last session as flat.
  */
 function getPriceSnapshot() {
+  const friday = areMarketsClosed() ? getFridayClose() : null;
+  if (friday && friday.prices) {
+    return {
+      prices: { ...friday.prices },
+      change: friday.change || { gold: {}, silver: {}, platinum: {}, palladium: {}, source: 'unavailable' },
+      source: `${friday.source} (friday-close)`,
+      marketsClosed: true,
+      timestamp: friday.timestamp || null,
+    };
+  }
   return {
     prices: { ...spotPriceCache.prices },
     change: spotPriceCache.change,
