@@ -110,6 +110,28 @@ test('a subscription purchase or renewal makes the profile gold until it expires
   assert.strictEqual(rows[USER].subscription_expires_at, new Date(later).toISOString());
 }));
 
+// RevenueCat's catalog, read 10/9, has the App Store selling monthly,
+// yearly_gold and lifetime_gold, and its Test Store selling monthly and
+// lifetime. The tests above use older ids. The App Store's monthly id has no
+// "gold" in it, so the match on "monthly" is what keeps those subscribers Gold.
+test('the product ids RevenueCat sends today map to the right plan', withSecret(SECRET, async () => {
+  const rows = { [USER]: { subscription_tier: 'free', subscription_expires_at: null } };
+  const { mapProductToTier, revenueCatWebhookHandler } = loadHandler(fakeSupabase(rows));
+  assert.strictEqual(mapProductToTier('monthly'), 'gold');
+  assert.strictEqual(mapProductToTier('yearly_gold'), 'gold');
+  assert.strictEqual(mapProductToTier('lifetime_gold'), 'lifetime');
+  assert.strictEqual(mapProductToTier('lifetime'), 'lifetime');
+
+  const at = Date.UTC(2026, 10, 7);
+  const renewal = await send(revenueCatWebhookHandler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', environment: 'PRODUCTION', expiration_at_ms: at });
+  assert.strictEqual(renewal.code, 200);
+  assert.deepStrictEqual(rows[USER], { subscription_tier: 'gold', subscription_expires_at: new Date(at).toISOString() });
+
+  const lifetime = await send(revenueCatWebhookHandler, { type: 'NON_RENEWING_PURCHASE', app_user_id: USER, product_id: 'lifetime_gold', environment: 'PRODUCTION' });
+  assert.strictEqual(lifetime.code, 200);
+  assert.deepStrictEqual(rows[USER], { subscription_tier: 'lifetime', subscription_expires_at: null });
+}));
+
 test('a sandbox purchase counts, since App Review buys in the sandbox', withSecret(SECRET, async () => {
   const rows = { [USER]: { subscription_tier: 'free', subscription_expires_at: null } };
   const { revenueCatWebhookHandler } = loadHandler(fakeSupabase(rows));
