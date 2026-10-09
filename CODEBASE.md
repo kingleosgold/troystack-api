@@ -451,7 +451,7 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `30 11 * * *` | 6:30 AM | Intelligence generation | intelligence.js `runIntelligenceGeneration()` |
 | `35 11 * * *` | 6:35 AM | Daily brief for Gold/Lifetime users + push | intelligence.js `generateDailyBrief()` |
 | `0 23 * * *` | 6:00 PM | COMEX vault data scrape | comex-scraper.js `scrapeComexVaultData()` |
-| `* * * * *` | Every 60s | Price fetch + cache update + price_log write (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 60s (decimated later) |
+| `* * * * *` | Every 60s | Price fetch + cache update + price_log write (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 60s (decimated later). One live fetch runs at a time: the cron, startup and `getSpotPrices()` callers that arrive while one is running share it |
 | `*/5 * * * *` | Every 5 min | Price alert checker | price-alert-checker.js `checkPriceAlerts()` |
 | `*/15 * * * *` | Every 15 min | Stack Signal article pipeline (~41 feeds, signal scoring, max 5/run) | stack-signal-processor.js `runStackSignalPipeline()` |
 | `15 11 * * *` | 6:15 AM | Stack Signal daily synthesis → podcast episode hook (TTS flagship → troy-podcast bucket → podcast_episodes) → catch-up sweep healing the last 3 days' missed/failed episodes; each in its own try/catch, never breaks the article publish | stack-signal-processor.js `generateStackSignal()` + podcast.js `generateEpisode()` / `sweepRecentEpisodes()` |
