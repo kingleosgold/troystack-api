@@ -594,7 +594,9 @@ router.post('/create-checkout-session', async (req, res) => {
     // The profile has no email column, so asking for one failed every time
     // and each checkout made a new Stripe customer. The profile is read for
     // its customer only. A missing row gets a bare one that never touches a
-    // plan, and the email comes from the account.
+    // plan, and the email comes from the account. When that row can't be
+    // made, checkout stops before anything is made in Stripe, since the
+    // customer id would have nowhere to be saved.
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('stripe_customer_id, subscription_tier')
@@ -605,7 +607,11 @@ router.post('/create-checkout-session', async (req, res) => {
       return res.status(500).json({ error: "Checkout didn't open. Try again in a moment." });
     }
     if (!profile) {
-      await supabase.from('profiles').upsert({ id: user_id }, { onConflict: 'id', ignoreDuplicates: true });
+      const { error: createError } = await supabase.from('profiles').upsert({ id: user_id }, { onConflict: 'id', ignoreDuplicates: true });
+      if (createError) {
+        console.error('❌ [Stripe] Could not make the profile row:', createError.message);
+        return res.status(500).json({ error: "Checkout didn't open. Try again in a moment." });
+      }
     }
     // An account the profile already shows on Gold or Lifetime, from the App
     // Store as much as the web, isn't sold a second plan.
@@ -646,13 +652,17 @@ router.post('/create-checkout-session', async (req, res) => {
     }
     if (customerId !== profile?.stripe_customer_id) {
       // The customer id is how a purchase is found again later, so checkout
-      // doesn't open without it saved.
-      const { error: saveError } = await supabase
+      // doesn't open without it saved. An update that finds no row isn't an
+      // error to the database, so the saved row is asked for back. A customer
+      // made just now and not saved carries the user id in its metadata, so
+      // later searches still find it.
+      const { data: saved, error: saveError } = await supabase
         .from('profiles')
         .update({ stripe_customer_id: customerId })
-        .eq('id', user_id);
-      if (saveError) {
-        console.error('❌ [Stripe] Could not save the customer id:', saveError.message);
+        .eq('id', user_id)
+        .select('id');
+      if (saveError || !saved?.length) {
+        console.error('❌ [Stripe] Could not save the customer id:', saveError ? saveError.message : 'no profile row');
         return res.status(500).json({ error: "Checkout didn't open. Try again in a moment." });
       }
     }

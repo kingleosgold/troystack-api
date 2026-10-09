@@ -23,6 +23,9 @@
 // When an App Store plan ends, by expiry or refund, the account may still
 // hold a plan bought on troystack.ai. stripe.js hands this module a check of
 // what Stripe holds, and the profile gets that plan before it gets free.
+//
+// The purchase time of the newest App Store purchase applied to each account
+// is kept in app_state, so a refund that arrives late can't end a newer period.
 
 const crypto = require('node:crypto');
 const supabase = require('../lib/supabase');
@@ -78,19 +81,23 @@ function authorized(header, secret) {
 // What Stripe still holds for an account, set by stripe.js when Stripe is
 // configured. Called as check(userId, stripeCustomerId), it answers
 // { tier, status, trialEnd } with tier 'free' when there's nothing, and throws
-// when Stripe can't be read.
+// when Stripe can't be read. The customer id is null when the profile has
+// none, and the check then searches the account's customers for the user id
+// stripe.js puts in their metadata.
 let webPlanCheck = null;
 function setWebPlanCheck(check) {
   webPlanCheck = typeof check === 'function' ? check : null;
 }
 
 // The plan an account is left with once an App Store plan ends: what Stripe
-// still holds for it, or free. A Stripe read that fails throws, so the event
-// is answered 500 and RevenueCat sends it again, rather than free being saved
+// still holds for it, or free. A profile with no customer id is asked about
+// too, since a customer an older checkout made can hold a paid web plan the
+// profile never recorded. A Stripe read that fails throws, so the event is
+// answered 500 and RevenueCat sends it again, rather than free being saved
 // over a web plan that's still paid.
 async function planLeft(id, profile) {
-  if (!webPlanCheck || !profile.stripe_customer_id) return { tier: 'free' };
-  const plan = await webPlanCheck(id, profile.stripe_customer_id);
+  if (!webPlanCheck) return { tier: 'free' };
+  const plan = await webPlanCheck(id, profile.stripe_customer_id || null);
   return plan && (plan.tier === 'gold' || plan.tier === 'lifetime') ? plan : { tier: 'free' };
 }
 
@@ -125,6 +132,57 @@ async function profileForPurchase(id) {
   return (await readProfile(id)) || { subscription_tier: null, subscription_status: null, subscription_expires_at: null, stripe_customer_id: null };
 }
 
+// The newest App Store purchase applied to an account is kept in app_state
+// under this key as { purchasedAt }, its purchase time in ms.
+function grantKey(id) {
+  return `revenuecat_grant:${id}`;
+}
+
+// A time in ms, or null when it isn't a positive number.
+function positiveMs(value) {
+  const ms = Number(value);
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+// The purchase time on record for an account, or null when there's none. A
+// read that fails throws, so the event is answered 500 and sent again.
+async function newestGrant(id) {
+  const { data, error } = await supabase.from('app_state').select('value').eq('key', grantKey(id)).maybeSingle();
+  if (error) throw new Error(`purchase record read failed: ${error.message}`);
+  let value = data?.value;
+  // Stored as text, the value comes back as a JSON string.
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      value = null;
+    }
+  }
+  return positiveMs(value?.purchasedAt);
+}
+
+// Records a purchase's time once its plan is on the profile, unless a newer
+// one is already on record, which a late or repeated event finds. A read or
+// write that fails throws and RevenueCat sends the event again, and the
+// profile write it repeats does no harm.
+async function recordGrant(id, purchasedAtMs) {
+  const at = positiveMs(purchasedAtMs);
+  if (at == null) return;
+  const newest = await newestGrant(id);
+  if (newest != null && newest >= at) return;
+  const { error } = await supabase.from('app_state').upsert({ key: grantKey(id), value: { purchasedAt: at } }, { onConflict: 'key' });
+  if (error) throw new Error(`purchase record write failed: ${error.message}`);
+}
+
+// Whether a purchase newer than this one has been applied to the account.
+// Without a purchase time on the event or a record, there's no telling, so no.
+async function newerGrantApplied(id, purchasedAtMs) {
+  const at = positiveMs(purchasedAtMs);
+  if (at == null) return false;
+  const newest = await newestGrant(id);
+  return newest != null && newest > at;
+}
+
 /**
  * Applies one event to the account's profile and says what it did. Throws
  * when the database can't be read or written, so the caller answers 500.
@@ -152,6 +210,7 @@ async function applyEvent(event) {
       // A purchase that validated after a temporary grant isn't temporary now.
       ...(profile.subscription_status === TEMPORARY ? { subscription_status: 'active' } : {}),
     });
+    await recordGrant(id, event.purchased_at_ms);
     return { tier };
   }
 
@@ -175,6 +234,18 @@ async function applyEvent(event) {
     // A refund ends what was refunded right away. A web plan still stands.
     if (event.cancel_reason === 'CUSTOMER_SUPPORT') {
       if (tier === 'lifetime' || profile.subscription_tier !== 'lifetime') {
+        // A refund can arrive late, or come again on a retry, after a renewal
+        // or a new purchase has started a newer period, and then it ends
+        // nothing. The expiry date can't show that, because RevenueCat
+        // reports a refunded purchase's expiration_at_ms as the time of the
+        // refund. The period end stored here is always later, so a refund of
+        // the current period would look replaced too. RevenueCat sends this
+        // event for a subscription only when its latest period is refunded,
+        // so a refund for a purchase older than the newest one applied here
+        // came late. The API holds no RevenueCat REST key to ask what's
+        // current, so the purchase times are compared. A lifetime purchase
+        // can be refunded any time, so its refund always counts.
+        if (tier !== 'lifetime' && (await newerGrantApplied(id, event.purchased_at_ms))) return { skipped: 'superseded' };
         const left = await planLeft(id, profile);
         await writeProfile(id, fieldsFor(left));
         return { tier: left.tier, refunded: true };
