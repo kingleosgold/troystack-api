@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions } = require('../src/lib/stripe-checks');
+const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions, soldLifetime } = require('../src/lib/stripe-checks');
 
 const FALLBACK = 'https://troystack.ai/settings';
 
@@ -82,10 +82,23 @@ test('only a Gold price, or a price on a Gold product, gives a plan', () => {
 
 test('every paid, completed lifetime checkout is found, nothing else is', () => {
   const paid = { id: 'cs_life', mode: 'payment', status: 'complete', payment_status: 'paid', metadata: { tier: 'lifetime' } };
-  assert.deepEqual(paidLifetimeSessions([paid, { ...paid, id: 'cs_old', metadata: {} }]).map((s) => s.id), ['cs_life', 'cs_old'], 'older sessions without a tier count, as in the webhook');
+  assert.deepEqual(paidLifetimeSessions([paid, { ...paid, id: 'cs_old', metadata: {} }]).map((s) => s.id), ['cs_life', 'cs_old'], 'one without a tier is a candidate, checked against what it sold');
   assert.deepEqual(paidLifetimeSessions([{ ...paid, payment_status: 'unpaid' }]), []);
   assert.deepEqual(paidLifetimeSessions([{ ...paid, status: 'expired' }]), []);
   assert.deepEqual(paidLifetimeSessions([{ ...paid, mode: 'subscription' }]), []);
   assert.deepEqual(paidLifetimeSessions([{ ...paid, metadata: { tier: 'gold' } }]), []);
   assert.deepEqual(paidLifetimeSessions(undefined), []);
+});
+
+test('a checkout sold lifetime only through the lifetime price or a one-time Gold price', () => {
+  const gold = new Set(['prod_gold']);
+  const item = (price) => ({ price });
+  assert.equal(soldLifetime([item({ id: 'price_life', product: 'prod_gold', type: 'one_time' })], 'price_life', null), true);
+  assert.equal(soldLifetime([item({ id: 'price_2025_life', product: 'prod_gold', type: 'one_time' })], 'price_life', gold), true);
+  assert.equal(soldLifetime([item({ id: 'price_2025_life', product: { id: 'prod_gold' }, type: 'one_time' })], 'price_life', gold), true);
+  assert.equal(soldLifetime([item({ id: 'price_mug', product: 'prod_mug', type: 'one_time' })], 'price_life', gold), false, 'anything else in the account');
+  assert.equal(soldLifetime([item({ id: 'price_gold_monthly', product: 'prod_gold', type: 'recurring' })], 'price_life', gold), false, 'a recurring price is not lifetime');
+  assert.equal(soldLifetime([item({ id: 'price_2025_life', product: 'prod_gold', type: 'one_time' })], 'price_life', null), false, 'no Gold products known');
+  assert.equal(soldLifetime([], 'price_life', gold), false);
+  assert.equal(soldLifetime(undefined, 'price_life', gold), false);
 });

@@ -35,6 +35,7 @@ function reset(over = {}) {
     priceFails: false,
     subscriptionById: {},
     sessionToVerify: null,
+    lineItems: {},
   }, over);
   router.resetGoldProductCache();
 }
@@ -69,9 +70,13 @@ const fakeSupabase = {
 
 const fakeStripe = {
   subscriptions: {
-    list: async () => {
+    // Newest first and paged by starting_after, like Stripe.
+    list: async (params = {}) => {
       state.stripeCalls.push('subscriptions.list');
-      return { data: state.subscriptions };
+      let rows = state.subscriptions;
+      if (params.starting_after) rows = rows.slice(rows.findIndex((x) => x.id === params.starting_after) + 1);
+      const page = rows.slice(0, params.limit || 10);
+      return { data: page, has_more: rows.length > page.length };
     },
   },
   checkout: {
@@ -113,6 +118,10 @@ fakeStripe.subscriptions.retrieve = async (id) => {
 fakeStripe.checkout.sessions.retrieve = async () => {
   state.stripeCalls.push('checkout.sessions.retrieve');
   return state.sessionToVerify;
+};
+fakeStripe.checkout.sessions.listLineItems = async (id) => {
+  state.stripeCalls.push('checkout.sessions.listLineItems');
+  return { data: state.lineItems[id] || [], has_more: false };
 };
 fakeStripe.checkout.sessions.create = async (params) => {
   state.stripeCalls.push('checkout.sessions.create');
@@ -460,4 +469,57 @@ test("verify-session keeps the session's tier when the Gold product can't be rea
   await verifySession({ body: { session_id: 'cs_1' } }, res);
   assert.equal(res.body.tier, 'gold');
   assert.equal(state.updates[0].subscription_tier, 'gold');
+});
+
+const oneTime = (id, product) => [{ price: { id, product, type: 'one_time' } }];
+const untracked = (id) => ({ id, mode: 'payment', status: 'complete', payment_status: 'paid', metadata: {}, payment_intent: `pi_${id}` });
+
+test('a one-time payment for something else in the account is never read as lifetime', async () => {
+  reset({ sessions: [untracked('cs_mug')], lineItems: { cs_mug: oneTime('price_mug', 'prod_other') }, charge: { refunded: false } });
+  const res = await sync();
+  assert.equal(res.body.subscription_tier, 'free');
+  assert.equal(state.updates.length, 0);
+  assert.deepEqual((await askMyPlan('good-token')).body, { plan: null, status: null, trial_end: null });
+});
+
+test('an older checkout with no recorded tier counts when it sold a lifetime Gold price', async () => {
+  reset({ sessions: [untracked('cs_old')], lineItems: { cs_old: oneTime('price_gold_lifetime', 'prod_gold') }, charge: { refunded: false } });
+  assert.equal((await sync()).body.subscription_tier, 'lifetime');
+  assert.ok(!state.stripeCalls.includes('prices.retrieve'), 'the configured lifetime price needs no product read');
+
+  reset({ sessions: [untracked('cs_old')], lineItems: { cs_old: oneTime('price_gold_once_2025', 'prod_gold') }, charge: { refunded: false } });
+  assert.equal((await sync()).body.subscription_tier, 'lifetime');
+});
+
+test('a live Gold subscription behind a hundred and more ended ones is still found', async () => {
+  const ended = Array.from({ length: 150 }, (_, i) => ({ id: `sub_old_${i}`, status: 'canceled' }));
+  reset({ subscriptions: [...ended, { id: 'sub_live', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }] });
+  const res = await askMyPlan('good-token');
+  assert.equal(res.body.plan, 'gold');
+  assert.equal(state.stripeCalls.filter((c) => c === 'subscriptions.list').length, 2, 'two pages of a hundred');
+});
+
+test('a history longer than the check reads is not taken as no plan', async () => {
+  const ended = Array.from({ length: 1001 }, (_, i) => ({ id: `sub_old_${i}`, status: 'canceled' }));
+  reset({ subscriptions: ended });
+  const res = await askMyPlan('good-token');
+  assert.equal(res.statusCode, 500);
+  const synced = await sync();
+  assert.equal(synced.body.subscription_tier, 'free');
+  assert.equal(state.updates.length, 0);
+});
+
+test('the webhook leaves the profile alone for a one-time checkout that sold no Gold plan', async () => {
+  reset({ lineItems: { cs_mug: oneTime('price_mug', 'prod_other') } });
+  const event = { type: 'checkout.session.completed', data: { object: { id: 'cs_mug', client_reference_id: USER, customer: 'cus_1', mode: 'payment', metadata: { user_id: USER } } } };
+  let res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(event)) }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.updates.length, 0);
+
+  reset({ lineItems: { cs_life: oneTime('price_gold_lifetime', 'prod_gold') } });
+  event.data.object.id = 'cs_life';
+  res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(event)) }, res);
+  assert.equal(state.updates[0].subscription_tier, 'lifetime');
 });
