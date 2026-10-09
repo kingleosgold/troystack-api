@@ -331,8 +331,9 @@ async function fetchFromMetalPriceAPI() {
 /**
  * Fetch live spot prices with priority fallback chain.
  * Updates the in-memory cache, logs to price_log, handles Friday close.
+ * Callers use fetchLiveSpotPrices below, which shares a fetch in progress.
  */
-async function fetchLiveSpotPrices() {
+async function fetchLiveSpotPricesNow() {
   try {
     console.log('\n💰 [Price Fetcher] Fetching live spot prices...');
 
@@ -477,6 +478,19 @@ async function logPriceToSupabase(prices, source) {
 // ============================================
 // PUBLIC API: GET CACHED OR FRESH PRICES
 // ============================================
+
+// One live fetch at a time. Anyone who asks while one runs, the minute cron,
+// startup, or a burst of questions right after a deploy, shares it instead of
+// running the whole Yahoo and MetalPriceAPI chain again.
+let liveFetch = null;
+function fetchLiveSpotPrices() {
+  if (!liveFetch) {
+    liveFetch = fetchLiveSpotPricesNow().finally(() => {
+      liveFetch = null;
+    });
+  }
+  return liveFetch;
+}
 
 /**
  * Get prices — returns cached if fresh (<10min), otherwise fetches.
