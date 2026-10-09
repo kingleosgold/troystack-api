@@ -223,7 +223,7 @@ Troy's fixed persona and knowledge prompt sections live in `src/services/troy-pr
 | POST | /v1/webhooks/revenuecat | `Authorization` matching `REVENUECAT_WEBHOOK_SECRET` | RevenueCat purchase webhook |
 
 - Refuses every call with 503 when `REVENUECAT_WEBHOOK_SECRET` isn't set, and 401 when the header doesn't match. The header may carry the secret with or without `Bearer `.
-- INITIAL_PURCHASE, RENEWAL, PRODUCT_CHANGE (by `new_product_id`), UNCANCELLATION, NON_RENEWING_PURCHASE (the one-time lifetime) and SUBSCRIPTION_EXTENDED set the tier from the product, gold or lifetime. A subscription never replaces lifetime.
+- INITIAL_PURCHASE, RENEWAL, PRODUCT_CHANGE (by `new_product_id`), UNCANCELLATION, NON_RENEWING_PURCHASE (the one-time lifetime), SUBSCRIPTION_EXTENDED and REFUND_REVERSED set the tier from the product, gold or lifetime. A subscription never replaces lifetime, and a reversed refund for a subscription whose period has run out gives nothing back.
 - TEMPORARY_ENTITLEMENT_GRANT, sent when RevenueCat can't validate a purchase with the store, names no product. A profile without a plan gets gold with `subscription_status` `temporary_grant`, expiring a day after the event. The INITIAL_PURCHASE that follows a validation sets the real tier and status `active`, and an EXPIRATION ends a temporary grant whatever product it names.
 - CANCELLATION with `cancel_reason` CUSTOMER_SUPPORT is a refund and ends what was refunded now. Any other CANCELLATION only records the expiry date.
 - EXPIRATION leaves a lifetime profile alone and otherwise ends the App Store plan.
