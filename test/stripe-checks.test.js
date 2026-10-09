@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { safeRedirect, cleanCampaign, signedInUserId, liveSubscription } = require('../src/lib/stripe-checks');
+const { safeRedirect, cleanCampaign, signedInUserId, liveSubscription, paidLifetimeSession } = require('../src/lib/stripe-checks');
 
 const FALLBACK = 'https://troystack.ai/settings';
 
@@ -68,4 +68,15 @@ test('only an active or trialing subscription restores Gold', () => {
   assert.equal(liveSubscription([{ status: 'canceled' }, { id: 's2', status: 'trialing' }]).id, 's2');
   assert.equal(liveSubscription([{ id: 's1', status: 'active' }]).id, 's1');
   assert.equal(liveSubscription(undefined), null);
+});
+
+test('a paid, completed lifetime checkout counts, nothing else does', () => {
+  const paid = { id: 'cs_life', mode: 'payment', status: 'complete', payment_status: 'paid', metadata: { tier: 'lifetime' } };
+  assert.equal(paidLifetimeSession([paid]).id, 'cs_life');
+  assert.equal(paidLifetimeSession([{ ...paid, metadata: {} }]).id, 'cs_life', 'older sessions without a tier still count, as in the webhook');
+  assert.equal(paidLifetimeSession([{ ...paid, payment_status: 'unpaid' }]), null);
+  assert.equal(paidLifetimeSession([{ ...paid, status: 'expired' }]), null);
+  assert.equal(paidLifetimeSession([{ ...paid, mode: 'subscription' }]), null);
+  assert.equal(paidLifetimeSession([{ ...paid, metadata: { tier: 'gold' } }]), null);
+  assert.equal(paidLifetimeSession(undefined), null);
 });
