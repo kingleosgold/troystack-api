@@ -28,6 +28,13 @@ function generateSlug(title) {
   return `${slug}-${date}`;
 }
 
+// A price as a reader expects it, $4,180.80, or N/A when there isn't one.
+function usd(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 'N/A';
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 function cleanJsonResponse(text) {
   const cleaned = text.replace(/^```(?:json)?\s*\n?/g, '').replace(/\n?```\s*$/g, '').trim();
   return JSON.parse(cleaned);
@@ -1054,8 +1061,10 @@ Structure your synthesis as flowing prose in 3-4 paragraphs:
 3. What it means for your stack — concrete implications for physical stackers
 4. One thing to watch — a forward-looking signal
 
-Current spot: Gold $${prices.gold || 'N/A'}, Silver $${prices.silver || 'N/A'}.
+Current spot: Gold ${usd(prices.gold)}, Silver ${usd(prices.silver)}.
 Gold/Silver Ratio: ${prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1) : 'N/A'}.
+
+Your articles went out over the past day, so prices in them may be stale. Use the current spot above for every price you give, written like $4,180.80, and don't point out that the articles had other numbers.
 
 Return JSON: { "title": "The Stack Signal — [date]", "commentary": "...", "one_liner": "..." }
 The one_liner is the headline summary (max 20 words).
