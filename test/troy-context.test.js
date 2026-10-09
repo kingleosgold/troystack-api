@@ -249,3 +249,63 @@ test("a route's own price reading is used for the moves instead of a second read
   assert.equal(spotCalls, 0, 'no second spot read');
   assert.match(block, /Gold: down \$5\.00 \(0\.12%\) today/);
 });
+
+test('a read that hangs is given up on, and its late answer never replaces a newer one', async () => {
+  let t = 0;
+  const db = fakeDb();
+  let release;
+  let signalReads = 0;
+  const hanging = {
+    from(table) {
+      const q = db.from(table);
+      const limit = q.limit;
+      q.limit = (n) => {
+        if (q.filters.is_stack_signal !== true) return limit(n);
+        signalReads += 1;
+        if (signalReads === 1) {
+          // The first Signal read hangs until the test lets it answer, late and stale.
+          return new Promise((resolve) => {
+            release = () => resolve({ data: [{ ...SIGNAL, troy_one_liner: 'An old read that came back late.' }], error: null });
+          });
+        }
+        return limit(n);
+      };
+      return q;
+    },
+  };
+  const get = createMarketContext({ fetchSpot: async () => SPOT, db: hanging, now: () => t, waitMs: 20, stallMs: 10_000 });
+  const first = await get();
+  assert.ok(!first.includes('STACK SIGNAL ('), 'nothing yet while the read hangs');
+  t = 5_000;
+  await get();
+  assert.equal(signalReads, 1, 'a read still inside its time is shared');
+  t = 11_000;
+  const third = await get();
+  assert.equal(signalReads, 2, 'a hung read is given up on');
+  assert.match(third, /physical buyers in Beijing bought the dip/);
+  release();
+  await new Promise((r) => setTimeout(r, 0));
+  t = 12_000;
+  const fourth = await get();
+  assert.match(fourth, /physical buyers in Beijing bought the dip/, 'the late answer is ignored');
+  assert.ok(!fourth.includes('An old read'));
+});
+
+test('a spot read that hangs is given up on too', async () => {
+  let t = 0;
+  let spotReads = 0;
+  const get = createMarketContext({
+    fetchSpot: () => {
+      spotReads += 1;
+      return spotReads === 1 ? new Promise(() => {}) : Promise.resolve(SPOT);
+    },
+    db: fakeDb(),
+    now: () => t,
+    waitMs: 20,
+    stallMs: 10_000,
+  });
+  assert.ok(!(await get()).includes("TODAY'S MARKET"));
+  t = 11_000;
+  assert.match(await get(), /Gold: up \$17\.20/);
+  assert.equal(spotReads, 2);
+});
