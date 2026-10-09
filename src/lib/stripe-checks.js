@@ -7,7 +7,8 @@
 //   the billing portal, so only TroyStack's own sites count.
 // cleanCampaign: the web page passes which surface the checkout started from,
 //   stored on the Stripe session and subscription for attribution.
-// liveSubscriptions: the subscriptions that are active or trialing.
+// liveSubscriptions: the subscriptions that give a plan now, active,
+//   trialing, or past due while Stripe retries the payment.
 // subscriptionTier: the plan a subscription's price gives, or null when the
 //   price isn't a Gold price and isn't on a Gold product.
 // paidLifetimeSessions: completed, paid one-time checkouts recorded as
@@ -57,9 +58,15 @@ async function signedInUserId(req, supabase) {
   }
 }
 
+// A past_due subscription keeps its plan while Stripe retries the failed
+// renewal, as Apple keeps a subscriber through its billing grace period, and
+// dropping it would invite a second subscription that bills alongside the
+// first once a retry goes through. Unpaid means the retries ran out.
+const LIVE_STATUSES = ['active', 'trialing', 'past_due'];
+
 function liveSubscriptions(subscriptions) {
   const list = Array.isArray(subscriptions) ? subscriptions : [];
-  return list.filter((s) => s && (s.status === 'active' || s.status === 'trialing'));
+  return list.filter((s) => s && LIVE_STATUSES.includes(s.status));
 }
 
 // mapPrice is the route's price-to-tier map, which answers 'free' for a price
