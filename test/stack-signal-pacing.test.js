@@ -16,8 +16,10 @@ const db = {
   dailyCount: 0,
   appState: {},          // key -> value, besides commentary_daily_count
   recentFeed: [],        // { title, published_at } feed rows
+  writtenLinks: new Set(), // source links some saved article already lists, however old
+  lookups: [],           // every link looked up in saved articles' sources
   upserts: [],           // every upsert, as { table, row }
-  failReads: new Set(),  // app_state keys, or 'recentFeed', whose read errors
+  failReads: new Set(),  // app_state keys, 'recentFeed' or 'writtenLinks', whose read errors
   failUpserts: new Set(), // app_state keys whose upsert errors
 };
 
@@ -25,15 +27,27 @@ function resetDb() {
   db.dailyCount = 0;
   db.appState = {};
   db.recentFeed = [];
+  db.writtenLinks = new Set();
+  db.lookups = [];
   db.upserts = [];
   db.failReads = new Set();
   db.failUpserts = new Set();
 }
 
 const READ_ERROR = { code: '', message: 'fetch failed' };
+const JSON_ERROR = { code: '22P02', message: 'invalid input syntax for type json' };
 
 // Reads resolve like Supabase's query builder: awaiting the chain runs it.
 function resultFor(table, q) {
+  if (table === 'stack_signal_articles' && q.contains?.col === 'sources') {
+    if (db.failReads.has('writtenLinks')) return { data: null, error: READ_ERROR };
+    // sources is jsonb, and the real client sends an array as {a,b}, which
+    // isn't JSON, so like the database this only answers JSON text.
+    if (typeof q.contains.val !== 'string') return { data: null, error: JSON_ERROR };
+    const urls = JSON.parse(q.contains.val).map(s => s.url);
+    db.lookups.push(...urls);
+    return { data: urls.some(u => db.writtenLinks.has(u)) ? [{ id: 'written' }] : [], error: null };
+  }
   if (table === 'stack_signal_articles' && q.filters.is_stack_signal === false) {
     if (db.failReads.has('recentFeed')) return { data: null, error: READ_ERROR };
     const since = q.filters['published_at>='] || '';
@@ -53,6 +67,7 @@ const fakeSupabase = {
       select(cols) { q.selected = cols || ''; return api; },
       eq(col, val) { q.filters[col] = val; return api; },
       gte(col, val) { q.filters[`${col}>=`] = val; return api; },
+      contains(col, val) { q.contains = { col, val }; return api; },
       not() { return api; },
       order() { return api; },
       limit() { return api; },
@@ -169,6 +184,7 @@ const scoreCall = () => calls.gemini.find(c => c.system.includes('relevance scor
 const writerCalls = () => calls.gemini.filter(c => c.system.includes('posts reactions to market news'));
 const passedUntil = link => db.appState.stack_signal_passed?.links?.[link];
 const HOUR_LATER = '2026-10-09T14:05:00.000Z';
+const DAY_LATER = '2026-10-10T13:05:00.000Z';
 const shortDraft = 'Too short to publish. '.repeat(20);
 
 test.beforeEach(t => {
@@ -262,6 +278,66 @@ test('a set-aside link comes back once its time is up', async () => {
   db.recentFeed = [{ title: 'Something earlier', published_at: '2026-10-09T09:00:00.000Z' }];
   await ssp.runStackSignalPipeline();
   assert.ok(scoreCall().user.includes('Fed minutes show officials split'));
+});
+
+test('a link written up long ago that a feed re-dated is dropped before scoring and sits out a day', async () => {
+  db.dailyCount = 4;
+  // Written up weeks back, so the fetch's week of dedup let it through as new.
+  db.writtenLinks = new Set(['https://example.com/fed-1']);
+  const result = await ssp.runStackSignalPipeline();
+
+  const scored = scoreCall().user;
+  assert.ok(!scored.includes('Fed minutes show officials split'));
+  assert.ok(scored.includes('Gold slips after Fed minutes'));
+  assert.ok(scored.includes('Perth Mint pauses silver bar orders'));
+  assert.strictEqual(result.scored, 2);
+  // The run carries on with the other two and writes the top one.
+  assert.deepStrictEqual(savedFeedRows().map(r => r.title), ['Gold slips after Fed minutes']);
+  // Only the written link sits out. Perth missed the slot and stays in play.
+  assert.deepStrictEqual(passedLinks(), ['https://example.com/fed-1']);
+  assert.strictEqual(passedUntil('https://example.com/fed-1'), DAY_LATER);
+});
+
+test('a failed lookup of written links stops the run before any model call', async () => {
+  db.dailyCount = 4;
+  db.failReads.add('writtenLinks');
+  clusterReply = JSON.stringify([
+    { theme: 'Perth Mint backlog tightens silver', importance: 80, article_indices: [2], suggested_angle: 'Mint backlog', category: 'silver', already_covered: false },
+  ]);
+  const result = await ssp.runStackSignalPipeline();
+  assert.strictEqual(calls.rss, 1);
+  assert.strictEqual(calls.gemini.length, 0);
+  assert.strictEqual(result.scored, 0);
+  assert.strictEqual(result.synthesized, 0);
+  assert.strictEqual(savedFeedRows().length, 0);
+  assert.strictEqual(db.dailyCount, 4);
+  // Nothing is set aside, so the next run looks again.
+  assert.deepStrictEqual(passedLinks(), []);
+});
+
+test('when every article headed for scoring was written up, nothing is scored', async () => {
+  db.dailyCount = 4;
+  db.writtenLinks = new Set(rssArticles.map(a => a.link));
+  const result = await ssp.runStackSignalPipeline();
+  assert.strictEqual(calls.gemini.length, 0);
+  assert.strictEqual(result.scored, 0);
+  assert.strictEqual(result.synthesized, 0);
+  assert.strictEqual(savedFeedRows().length, 0);
+  assert.strictEqual(db.dailyCount, 4);
+  assert.deepStrictEqual(passedLinks(), rssArticles.map(a => a.link).sort());
+  assert.ok(Object.values(db.appState.stack_signal_passed.links).every(until => until === DAY_LATER));
+});
+
+test("only the five headed for scoring are looked up, and one that's dropped isn't replaced", async () => {
+  db.dailyCount = 4;
+  rssItems = Array.from({ length: 6 }, (_, i) => ({ title: `Gold story ${i}`, description: 'Spot', signal_score: 90 - i, link: `https://example.com/gold-${i}`, source: 'Wire' }));
+  db.writtenLinks = new Set(['https://example.com/gold-0']);
+  await ssp.runStackSignalPipeline();
+  assert.deepStrictEqual(db.lookups.sort(), rssItems.slice(0, 5).map(a => a.link).sort());
+  const scored = scoreCall().user;
+  assert.strictEqual((scored.match(/^\d+\. /gm) || []).length, 4);
+  assert.ok(!scored.includes('Gold story 0'));
+  assert.ok(!scored.includes('Gold story 5'));
 });
 
 test('nothing new against the last day writes nothing and sets every article it saw aside', async () => {
