@@ -550,6 +550,20 @@ function getCachedPrices() {
 }
 
 /**
+ * One reading of the price cache: the prices, the change measured against
+ * them and where they came from, so a prompt built from it agrees with itself.
+ */
+function getPriceSnapshot() {
+  return {
+    prices: { ...spotPriceCache.prices },
+    change: spotPriceCache.change,
+    source: spotPriceCache.source,
+    marketsClosed: areMarketsClosed(),
+    timestamp: spotPriceCache.lastUpdated ? spotPriceCache.lastUpdated.toISOString() : null,
+  };
+}
+
+/**
  * Initialize the price fetcher: load Friday close, fetch initial prices.
  */
 async function initPriceFetcher() {
@@ -561,6 +575,7 @@ async function initPriceFetcher() {
 
 module.exports = {
   getSpotPrices,
+  getPriceSnapshot,
   getCachedPrices,
   fetchLiveSpotPrices,
   initPriceFetcher,

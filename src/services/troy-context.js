@@ -210,8 +210,11 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = W
     return waitAtMost(spotInFlight, () => null);
   }
 
-  return async function getMarketBlock() {
-    const [spot, signal, headlines] = await Promise.all([currentSpot(), signalPart(), headlinesPart()]);
+  // A route that already read spot for its CURRENT SPOT passes that reading,
+  // so the moves come from the same snapshot as the prices beside them.
+  return async function getMarketBlock(spotSnapshot) {
+    const spotRead = spotSnapshot && spotSnapshot.prices ? Promise.resolve(spotSnapshot) : currentSpot();
+    const [spot, signal, headlines] = await Promise.all([spotRead, signalPart(), headlinesPart()]);
     return buildMarketBlock({ spot, signal, headlines, now: now() });
   };
 }
@@ -219,13 +222,13 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = W
 // One shared instance for the visitor route and the signed-in chat, so they
 // share the cache. Loaded lazily so tests of the pure parts need no database.
 let shared = null;
-function sharedMarketBlock() {
+function sharedMarketBlock(spotSnapshot) {
   if (!shared) {
     const supabase = require('../lib/supabase');
     const { getSpotPrices } = require('./price-fetcher');
     shared = createMarketContext({ fetchSpot: getSpotPrices, db: supabase });
   }
-  return shared();
+  return shared(spotSnapshot);
 }
 
 module.exports = { buildMarketBlock, createMarketContext, sharedMarketBlock, plain, usableOneLiner };
