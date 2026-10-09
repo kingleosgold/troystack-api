@@ -36,6 +36,7 @@ function reset(over = {}) {
     subscriptionById: {},
     sessionToVerify: null,
     lineItems: {},
+    disputes: {},
   }, over);
   router.resetGoldProductCache();
 }
@@ -95,6 +96,18 @@ const fakeStripe = {
     retrieve: async (id) => {
       state.stripeCalls.push('paymentIntents.retrieve');
       return { latest_charge: id in state.charges ? state.charges[id] : state.charge };
+    },
+  },
+  disputes: {
+    list: async (params = {}) => {
+      state.stripeCalls.push('disputes.list');
+      return { data: state.disputes[params.payment_intent] || [], has_more: false };
+    },
+  },
+  customers: {
+    create: async () => {
+      state.stripeCalls.push('customers.create');
+      return { id: 'cus_new' };
     },
   },
   prices: {
@@ -337,7 +350,7 @@ test('when a Gold price cannot be read, my-plan says it could not check', async 
   assert.equal(state.updates.length, 0);
 });
 
-test('checkout sells another Gold-product price as Gold, or as lifetime when it is one-time', async () => {
+test('checkout sells another recurring Gold-product price as Gold, and lifetime only at its own price', async () => {
   reset({ profile: { email: 'a@example.com', stripe_customer_id: 'cus_1' } });
   const promo = await checkout('price_gold_promo');
   assert.equal(promo.statusCode, 200);
@@ -346,7 +359,12 @@ test('checkout sells another Gold-product price as Gold, or as lifetime when it 
 
   reset({ profile: { email: 'a@example.com', stripe_customer_id: 'cus_1' } });
   const once = await checkout('price_gold_once_promo');
-  assert.equal(once.statusCode, 200);
+  assert.equal(once.statusCode, 400, 'a one-time Gold price that is not the lifetime price');
+  assert.equal(state.created, undefined);
+
+  reset({ profile: { email: 'a@example.com', stripe_customer_id: 'cus_1' } });
+  const life = await checkout('price_gold_lifetime');
+  assert.equal(life.statusCode, 200);
   assert.equal(state.created.mode, 'payment');
   assert.equal(state.created.metadata.tier, 'lifetime');
   assert.equal(state.created.subscription_data, undefined);
@@ -522,4 +540,120 @@ test('the webhook leaves the profile alone for a one-time checkout that sold no 
   res = webhookRes();
   await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(event)) }, res);
   assert.equal(state.updates[0].subscription_tier, 'lifetime');
+});
+
+const lifetimeSession = (pi) => ({ id: `cs_${pi}`, mode: 'payment', status: 'complete', payment_status: 'paid', metadata: { tier: 'lifetime' }, payment_intent: pi });
+
+test('a lifetime purchase lost in a dispute is not restored, one the seller won still is', async () => {
+  reset({ sessions: [lifetimeSession('pi_1')], charges: { pi_1: { refunded: false, disputed: true } }, disputes: { pi_1: [{ status: 'lost' }] } });
+  assert.equal((await sync()).body.subscription_tier, 'free');
+  assert.equal(state.updates.length, 0);
+  assert.deepEqual((await askMyPlan('good-token')).body, { plan: null, status: null, trial_end: null });
+
+  reset({ sessions: [lifetimeSession('pi_1')], charges: { pi_1: { refunded: false, disputed: true } }, disputes: { pi_1: [{ status: 'won' }] } });
+  assert.equal((await sync()).body.subscription_tier, 'lifetime');
+});
+
+test('verify-session never brings back a refunded lifetime or an ended subscription', async () => {
+  reset({
+    charges: { pi_r: { refunded: true } },
+    sessionToVerify: { client_reference_id: USER, customer: 'cus_1', mode: 'payment', payment_status: 'paid', metadata: { user_id: USER, tier: 'lifetime' }, payment_intent: 'pi_r' },
+  });
+  let res = fakeRes();
+  await verifySession({ body: { session_id: 'cs_old' } }, res);
+  assert.equal(res.body.success, false);
+  assert.equal(state.updates.length, 0);
+
+  reset({
+    sessionToVerify: {
+      client_reference_id: USER,
+      customer: 'cus_1',
+      payment_status: 'paid',
+      metadata: { user_id: USER, tier: 'gold' },
+      subscription: { status: 'canceled', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } },
+    },
+  });
+  res = fakeRes();
+  await verifySession({ body: { session_id: 'cs_old' } }, res);
+  assert.equal(res.body.success, false);
+  assert.equal(state.updates.length, 0);
+});
+
+test('a late checkout event for a subscription that already ended records only the customer', async () => {
+  reset({ subscriptionById: { sub_1: { status: 'canceled', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } } } });
+  const res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(checkoutEvent({ user_id: USER, tier: 'gold' }))) }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(state.updates, [{ stripe_customer_id: 'cus_1' }]);
+});
+
+test('a profile write that fails makes the webhook answer 500, so Stripe sends it again', async () => {
+  reset({
+    updateError: { message: 'connection reset' },
+    subscriptionById: { sub_1: { status: 'trialing', trial_end: 1760000000, items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } } },
+  });
+  const res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(checkoutEvent({ user_id: USER, tier: 'gold' }))) }, res);
+  assert.equal(res.statusCode, 500);
+});
+
+test('a lifetime profile stays lifetime when a later checkout adds Gold', async () => {
+  reset({
+    profile: { id: USER, subscription_tier: 'lifetime', subscription_status: 'active', stripe_customer_id: 'cus_1' },
+    subscriptionById: { sub_1: { status: 'trialing', trial_end: 1760000000, items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } } },
+  });
+  const res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(checkoutEvent({ user_id: USER, tier: 'gold' }))) }, res);
+  assert.equal(state.updates[0].subscription_tier, 'lifetime');
+  assert.equal(state.updates[0].trial_end, null);
+});
+
+function subscriptionEvent(type, status) {
+  return { type, data: { object: { id: 'sub_old', customer: 'cus_1', status, items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } } } };
+}
+
+test('when a subscription ends, the profile gets the plan Stripe still holds, or free', async () => {
+  reset({
+    profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' },
+    sessions: [lifetimeSession('pi_life')],
+    charges: { pi_life: { refunded: false } },
+  });
+  let res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(subscriptionEvent('customer.subscription.deleted', 'canceled'))) }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.updates[0].subscription_tier, 'lifetime');
+
+  reset({
+    profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' },
+    subscriptions: [{ id: 'sub_second', status: 'active', items: { data: [{ price: { id: 'price_gold_yearly', product: 'prod_gold' } }] } }],
+  });
+  res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(subscriptionEvent('customer.subscription.updated', 'canceled'))) }, res);
+  assert.equal(state.updates[0].subscription_tier, 'gold', 'a second Gold subscription is still live');
+
+  reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' } });
+  res = webhookRes();
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(subscriptionEvent('customer.subscription.deleted', 'canceled'))) }, res);
+  assert.equal(state.updates[0].subscription_tier, 'free');
+});
+
+test("checkout doesn't open when the new customer id can't be saved", async () => {
+  reset({ profile: { email: 'a@example.com', stripe_customer_id: null }, updateError: { message: 'permission denied' } });
+  const res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 500);
+  assert.equal(state.created, undefined);
+});
+
+test('an App Store expiry keeps a web plan Stripe still holds', async () => {
+  reset({
+    profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' },
+    subscriptions: [{ id: 'sub_web', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+  });
+  const res = fakeRes();
+  await router.revenueCatWebhookHandler({ headers: {}, body: { event: { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' } } }, res);
+  assert.equal(state.updates[0].subscription_tier, 'gold');
+
+  reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' } });
+  await router.revenueCatWebhookHandler({ headers: {}, body: { event: { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_gold_monthly' } } }, fakeRes());
+  assert.equal(state.updates[0].subscription_tier, 'free');
 });
