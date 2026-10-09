@@ -522,9 +522,11 @@ async function logPriceToSupabase(prices, source) {
 // One live fetch at a time. Anyone who asks while one runs, the minute cron,
 // startup, or a burst of questions right after a deploy, shares it instead of
 // running the whole Yahoo and MetalPriceAPI chain again. A fetch still running
-// after 30 seconds is taken as hung, and the next caller starts a fresh one.
-// The hung one can still finish later, so each fetch gets a number and only
-// the newest one writes. A late finish can't put back older prices.
+// 30 seconds after it started is taken as hung. Everyone waiting on it gets
+// the cached prices then, however late they joined, and the next caller starts
+// a fresh one. The hung one can still finish later, so each fetch gets a
+// number and only the newest one writes. A late finish can't put back older
+// prices.
 const LIVE_FETCH_STALL_MS = 30 * 1000;
 let liveFetch = null;
 let liveFetchStartedAt = 0;
@@ -537,7 +539,20 @@ function fetchLiveSpotPrices() {
   if (!liveFetch) {
     liveFetchStartedAt = Date.now();
     liveFetchGeneration += 1;
-    const current = fetchLiveSpotPricesNow(liveFetchGeneration).finally(() => {
+    const fetching = fetchLiveSpotPricesNow(liveFetchGeneration);
+    // The deadline runs from the fetch's start, not from when a caller joined.
+    // The timer's cleared if the fetch settles first, and unref keeps it from
+    // holding the process open.
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        console.log('   [Price Fetcher] Live fetch still running after 30s, its callers get the cached prices');
+        resolve(spotPriceCache);
+      }, LIVE_FETCH_STALL_MS);
+      timer.unref?.();
+    });
+    const current = Promise.race([fetching, deadline]).finally(() => {
+      clearTimeout(timer);
       if (liveFetch === current) liveFetch = null;
     });
     liveFetch = current;
