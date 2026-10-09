@@ -127,7 +127,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 
 Troy's fixed persona and knowledge prompt sections live in `src/services/troy-prompt.js` (`TROY_PERSONA`, `TROY_KNOWLEDGE`), shared with the visitor chat below. They were moved there byte for byte.
 
-Both the signed-in chat and the visitor chat add the day's market context from `src/services/troy-context.js` to the dynamic part of the prompt: each metal's move since the last close, Troy's latest Stack Signal and the newest Signal headlines, so Troy can say what moved metals.
+Both the signed-in chat and the visitor chat add the day's market context from `src/services/troy-context.js` to the dynamic part of the prompt: the date and time, each metal's move today, Troy's latest Stack Signal and the newest Signal headlines, so Troy can say what moved metals.
 
 ### src/routes/troy-ask.js
 - **Purpose:** Troy for visitors on troystack.ai who haven't signed in. Single answers, no saved history; the page sends back the last few turns for context
@@ -1195,9 +1195,9 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 - **Crons:** YouTube every 4h (`0 */4 * * *`), Twitter every 2h (`0 */2 * * *`), Reddit every 3h (`0 */3 * * *`)
 
 ### src/services/troy-context.js
-- **Purpose:** What Troy knows about today before anyone asks. Each metal's move since the last close (from `getSpotPrices().change`), the latest Stack Signal synthesis and the newest Signal headlines from `stack_signal_articles`, as one prompt block. Move lines carry no price, since each route's own part of the prompt already has spot, so the prompt never shows two prices for one metal. Long dashes become commas and cut-off one-liners fall back to the commentary. Any part that fails is left out
-- **Exports:** `buildMarketBlock({ spot, signal, headlines })` (pure), `createMarketContext({ fetchSpot, db, now })`, `sharedMarketBlock()` (one shared instance for troy-ask and troy-chat), `plain()`, `usableOneLiner()`
-- **Cache:** the moves are read with every question from the price cache (refreshed each minute by the price cron). The Signal and headline reads are kept 5 minutes, or 30 seconds when both failed. Questions that arrive during a read share it
+- **Purpose:** What Troy knows about today before anyone asks. The date and time in New York, each metal's move today (from `getSpotPrices().change`, the same figure the app shows), the latest Stack Signal synthesis dated to the minute and the newest Signal headlines from `stack_signal_articles`, as one prompt block. Move lines carry no price, since each route's own CURRENT SPOT already has it, and Troy is told the Signal's figures are as of publication. Long dashes become commas and cut-off one-liners fall back to the commentary. Any part that fails is left out
+- **Exports:** `buildMarketBlock({ spot, signal, headlines, now })` (pure), `createMarketContext({ fetchSpot, db, now })`, `sharedMarketBlock()` (one shared instance for troy-ask and troy-chat), `plain()`, `usableOneLiner()`
+- **Cache:** the moves are read with every question from the price cache (refreshed each minute by the price cron). The Signal read and the headlines read are each kept 5 minutes. A read that fails keeps the last good answer and is tried again after 30 seconds. Questions that arrive during a read share it
 - **Tests:** `test/troy-context.test.js`
 - **Last modified:** 2026-10-09
 
