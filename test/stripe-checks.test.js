@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { safeRedirect, cleanCampaign, signedInUserId, liveSubscription, paidLifetimeSession } = require('../src/lib/stripe-checks');
+const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions } = require('../src/lib/stripe-checks');
 
 const FALLBACK = 'https://troystack.ai/settings';
 
@@ -63,20 +63,29 @@ test('no token, a bad token or a failed lookup is a 401', async () => {
   assert.equal(thrown.status, 401);
 });
 
-test('only an active or trialing subscription restores Gold', () => {
-  assert.equal(liveSubscription([{ status: 'canceled' }, { status: 'incomplete_expired' }]), null);
-  assert.equal(liveSubscription([{ status: 'canceled' }, { id: 's2', status: 'trialing' }]).id, 's2');
-  assert.equal(liveSubscription([{ id: 's1', status: 'active' }]).id, 's1');
-  assert.equal(liveSubscription(undefined), null);
+test('only active or trialing subscriptions are live', () => {
+  assert.deepEqual(liveSubscriptions([{ status: 'canceled' }, { status: 'incomplete_expired' }]), []);
+  assert.deepEqual(liveSubscriptions([{ status: 'canceled' }, { id: 's2', status: 'trialing' }, { id: 's3', status: 'active' }]).map((s) => s.id), ['s2', 's3']);
+  assert.deepEqual(liveSubscriptions(undefined), []);
 });
 
-test('a paid, completed lifetime checkout counts, nothing else does', () => {
+test('only a Gold price, or a price on a Gold product, gives a plan', () => {
+  const map = (id) => ({ price_monthly: 'gold', price_yearly: 'gold' })[id] || 'free';
+  const gold = new Set(['prod_gold']);
+  assert.equal(subscriptionTier({ id: 'price_monthly', product: 'prod_gold' }, map, gold), 'gold');
+  assert.equal(subscriptionTier({ id: 'price_2025_monthly', product: 'prod_gold' }, map, gold), 'gold', 'an older Gold price still counts');
+  assert.equal(subscriptionTier({ id: 'price_2025_monthly', product: { id: 'prod_gold' } }, map, gold), 'gold');
+  assert.equal(subscriptionTier({ id: 'price_other', product: 'prod_other' }, map, gold), null);
+  assert.equal(subscriptionTier(undefined, map, gold), null);
+  assert.equal(subscriptionTier({ id: 'price_other', product: 'prod_other' }, map, new Set()), null);
+});
+
+test('every paid, completed lifetime checkout is found, nothing else is', () => {
   const paid = { id: 'cs_life', mode: 'payment', status: 'complete', payment_status: 'paid', metadata: { tier: 'lifetime' } };
-  assert.equal(paidLifetimeSession([paid]).id, 'cs_life');
-  assert.equal(paidLifetimeSession([{ ...paid, metadata: {} }]).id, 'cs_life', 'older sessions without a tier still count, as in the webhook');
-  assert.equal(paidLifetimeSession([{ ...paid, payment_status: 'unpaid' }]), null);
-  assert.equal(paidLifetimeSession([{ ...paid, status: 'expired' }]), null);
-  assert.equal(paidLifetimeSession([{ ...paid, mode: 'subscription' }]), null);
-  assert.equal(paidLifetimeSession([{ ...paid, metadata: { tier: 'gold' } }]), null);
-  assert.equal(paidLifetimeSession(undefined), null);
+  assert.deepEqual(paidLifetimeSessions([paid, { ...paid, id: 'cs_old', metadata: {} }]).map((s) => s.id), ['cs_life', 'cs_old'], 'older sessions without a tier count, as in the webhook');
+  assert.deepEqual(paidLifetimeSessions([{ ...paid, payment_status: 'unpaid' }]), []);
+  assert.deepEqual(paidLifetimeSessions([{ ...paid, status: 'expired' }]), []);
+  assert.deepEqual(paidLifetimeSessions([{ ...paid, mode: 'subscription' }]), []);
+  assert.deepEqual(paidLifetimeSessions([{ ...paid, metadata: { tier: 'gold' } }]), []);
+  assert.deepEqual(paidLifetimeSessions(undefined), []);
 });
