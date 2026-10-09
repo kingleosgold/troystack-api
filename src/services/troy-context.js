@@ -8,11 +8,15 @@
 // the prompt's only current prices are its CURRENT SPOT. The Signal is dated
 // to the minute and Troy is told its figures are as of then. The Signal and
 // the headlines come from the database, each kept for five minutes, and a
-// read that fails keeps the last good one and tries again in 30 seconds.
-// Every part is optional: a missing piece is left out, never guessed.
+// read that fails keeps the last good one and tries again in 30 seconds. No
+// part may hold a question up for more than a second and a half: a read that
+// runs longer gives way to the last good answer and finishes in the
+// background. Every part is optional: a missing piece is left out, never
+// guessed.
 
 const TTL_MS = 5 * 60 * 1000;
 const EMPTY_TTL_MS = 30 * 1000;
+const WAIT_MS = 1500;
 const METALS = ['gold', 'silver', 'platinum', 'palladium'];
 
 // The Signal is written by a pipeline that sometimes uses long dashes, and
@@ -79,7 +83,11 @@ function buildMarketBlock({ spot, signal, headlines, now } = {}) {
   const sections = [];
 
   const prices = spot?.prices || {};
-  const moves = METALS.map((m) => moveLine(m, Number(prices[m]), spot?.change?.[m])).filter(Boolean);
+  // When the live price sources fail, the fetcher falls back to cached or
+  // built-in prices, and its change is then measured from prices that aren't
+  // today's. Those moves would be wrong, so they're left out.
+  const trusted = !/fallback/i.test(String(spot?.source || ''));
+  const moves = trusted ? METALS.map((m) => moveLine(m, Number(prices[m]), spot?.change?.[m])).filter(Boolean) : [];
   if (moves.length) {
     sections.push(`TODAY'S MARKET:\n${moves.join('\n')}${spot?.marketsClosed ? "\nMarkets are closed right now, so these are the last session's moves." : ''}`);
   }
@@ -105,7 +113,7 @@ function buildMarketBlock({ spot, signal, headlines, now } = {}) {
   if (!sections.length) return '';
   const head = Number.isFinite(now) ? `${nowLine(now)}\n\n` : '';
   const asOf = hasSignal
-    ? " Prices and moves in the Signal are as of when it was published. For where prices are now and how they've moved today, use only CURRENT SPOT and TODAY'S MARKET."
+    ? ` Prices and moves in the Signal are as of when it was published. For where prices are now${moves.length ? " and how they've moved today, use only CURRENT SPOT and TODAY'S MARKET" : ', use only CURRENT SPOT'}.`
     : '';
   return `${head}${sections.join('\n\n')}\n\nWhen someone asks what moved metals or what's in the news, answer from these, and say how recent they are when it matters.${asOf} Don't invent headlines, numbers or dates beyond them.\n\n`;
 }
@@ -113,9 +121,19 @@ function buildMarketBlock({ spot, signal, headlines, now } = {}) {
 /**
  * The block for one question: the moves read now, the Signal and headlines
  * from a read kept for five minutes.
- * @param {{ fetchSpot: () => Promise<object>, db: object, now?: () => number }} deps
+ * @param {{ fetchSpot: () => Promise<object>, db: object, now?: () => number, waitMs?: number }} deps
  */
-function createMarketContext({ fetchSpot, db, now = () => Date.now() }) {
+function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = WAIT_MS }) {
+  // The read's answer, or the fallback once `waitMs` have passed. The read
+  // carries on either way and updates what's kept when it lands.
+  function waitAtMost(promise, fallback) {
+    let timer;
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(fallback()), waitMs);
+    });
+    return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+  }
+
   async function latestSignal() {
     const { data, error } = await db
       .from('stack_signal_articles')
@@ -169,7 +187,7 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now() }) {
             inFlight = null;
           });
       }
-      return inFlight;
+      return waitAtMost(inFlight, () => value);
     };
   }
 
@@ -189,7 +207,7 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now() }) {
           spotInFlight = null;
         });
     }
-    return spotInFlight;
+    return waitAtMost(spotInFlight, () => null);
   }
 
   return async function getMarketBlock() {
