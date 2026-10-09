@@ -44,6 +44,17 @@ test('the block names each move, the latest Signal and the newest headlines', ()
   assert.match(block, /Don't invent headlines/);
 });
 
+test('dates are New York dates, so an evening article keeps its own day', () => {
+  // Stack Signal writes in the evening ET, after midnight UTC.
+  const block = buildMarketBlock({
+    spot: SPOT,
+    signal: { ...SIGNAL, published_at: '2026-10-09T00:30:00Z' },
+    headlines: [{ title: 'Oil surge revives inflation fears', published_at: '2026-10-09T00:45:00Z' }],
+  });
+  assert.match(block, /YOUR LATEST STACK SIGNAL \(published Oct 8, 2026, 8:30 PM ET\):/);
+  assert.match(block, /- Oil surge revives inflation fears \(Oct 8, 2026\)/);
+});
+
 test('a cut-off one-liner falls back to the commentary, and closed markets are said', () => {
   const block = buildMarketBlock({ spot: { ...SPOT, marketsClosed: true }, signal: { ...SIGNAL, troy_one_liner: 'Fed' }, headlines: [] });
   assert.match(block, /Long commentary\./);
