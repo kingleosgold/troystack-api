@@ -296,3 +296,21 @@ test('a temporary grant leaves an account that already has a plan alone', withSe
   assert.strictEqual(res.body.kept, 'gold');
   assert.deepStrictEqual(db.writes, []);
 }));
+
+test('a reversed refund gives back what was refunded, unless its period has run out', withSecret(SECRET, async () => {
+  const rows = { [USER]: { subscription_tier: 'free', subscription_status: null, subscription_expires_at: null } };
+  const { revenueCatWebhookHandler } = loadHandler(fakeSupabase(rows));
+  const later = Date.now() + 20 * 24 * 3600 * 1000;
+  await send(revenueCatWebhookHandler, { type: 'REFUND_REVERSED', app_user_id: USER, product_id: 'stacktracker_gold_yearly', expiration_at_ms: later });
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+  assert.strictEqual(rows[USER].subscription_expires_at, new Date(later).toISOString());
+
+  rows[USER] = { subscription_tier: 'free', subscription_status: null, subscription_expires_at: null };
+  await send(revenueCatWebhookHandler, { type: 'REFUND_REVERSED', app_user_id: USER, product_id: 'stacktracker_lifetime', expiration_at_ms: null });
+  assert.strictEqual(rows[USER].subscription_tier, 'lifetime');
+
+  rows[USER] = { subscription_tier: 'free', subscription_status: null, subscription_expires_at: null };
+  const res = await send(revenueCatWebhookHandler, { type: 'REFUND_REVERSED', app_user_id: USER, product_id: 'stacktracker_gold_monthly', expiration_at_ms: Date.now() - 3600 * 1000 });
+  assert.strictEqual(res.body.skipped, 'already_expired');
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+}));
