@@ -519,24 +519,69 @@ test('a startup read of the Friday close that comes back late keeps a newer clos
   await init;
 });
 
-test('a stored Friday close still replaces one saved since startup on built-in prices', async (t) => {
-  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-09T21:30:00Z') }); // Friday, 5:30 PM in New York
+test('built-in prices never become the Friday close, and the stored one stands', async (t) => {
+  // Friday, 5:30 PM in New York, right after a restart, with the feeds down.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-09T21:30:00Z') });
   const db = fridayCloseDb(STORED_AT_3PM);
   const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: offline });
 
-  // With the feeds down, the request's fetch can only save a close on built-in prices.
+  // A price request's fetch runs before the startup read is back, and startup's own fetch after it.
   const releaseLoad = db.holdRead('close');
-  const releasePtPd = db.holdRead('ptpd');
   const init = fetcher.initPriceFetcher();
   await fetcher.getSpotPrices();
-  assert.strictEqual(fetcher.getPriceSnapshot().source, 'static-fallback (friday-close)');
-
   releaseLoad();
-  await settle();
-  assert.strictEqual(fetcher.getPriceSnapshot().prices.gold, 4200, 'prices read live at 3 PM beat built-in ones');
-
-  releasePtPd();
   await init;
+  await settle();
+
+  // Both fetches had only built-in prices, so neither saved a close.
+  assert.deepStrictEqual(db.landed, []);
+  const snap = fetcher.getPriceSnapshot();
+  assert.strictEqual(snap.source, 'yahoo_finance (friday-close)');
+  assert.strictEqual(snap.prices.gold, 4200);
+});
+
+// A close saved on built-in prices, from before they stopped being saved.
+const STORED_BUILT_IN = {
+  prices: { gold: 5150, silver: 87, platinum: 2170, palladium: 1780 },
+  change: { gold: {}, silver: {}, platinum: {}, palladium: {}, source: 'unavailable' },
+  source: 'static-fallback',
+  timestamp: '2026-10-09T20:45:00.000Z',
+  quotedAt: null,
+  savedAt: '2026-10-09T20:45:00.000Z',
+};
+
+test('a stored close on built-in prices goes unused, and a weekend reading never stands built-in prices in for one', async (t) => {
+  // Saturday, noon in New York, right after a restart, with the feeds down.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-10T16:00:00Z') });
+  const db = fridayCloseDb(STORED_BUILT_IN);
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: offline });
+  await fetcher.initPriceFetcher();
+
+  const reading = await fetcher.getSpotPrices();
+  assert.strictEqual(reading.source, 'static-fallback', 'the built-in prices, not passed off as a Friday close');
+  assert.deepStrictEqual(db.landed, []);
+});
+
+test('a weekend reading before the startup read is back leaves the stored close to it', async (t) => {
+  // Saturday, noon in New York, right after a restart. The feeds answer with Friday's last trade.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-10T16:00:00Z') });
+  const db = fridayCloseDb(FRIDAY);
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios({ ...FRIDAY_QUOTES, 'GC=F': 4310 }) });
+
+  // Two price requests come in while the startup read of the stored close is slow.
+  const releaseLoad = db.holdRead('close');
+  const init = fetcher.initPriceFetcher();
+  await fetcher.getSpotPrices();
+  await fetcher.getSpotPrices();
+  releaseLoad();
+  await init;
+  await settle();
+
+  // Nothing stood in for the close, so the weekend reads Friday's close and its moves, not a flat day.
+  assert.deepStrictEqual(db.landed, []);
+  const snap = fetcher.getPriceSnapshot();
+  assert.deepStrictEqual(snap.prices, FRIDAY.prices);
+  assert.deepStrictEqual(snap.change, FRIDAY.change);
 });
 
 test('failed fetches keep the time of the last live price, and the reading reports it', async (t) => {
