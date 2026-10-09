@@ -1529,10 +1529,10 @@ async function runPipelineOnce() {
     await rememberPassedLinks(scoredArticles.map(a => a.link).filter(link => !inFresh.has(link)), now);
 
     // Phase 3: Write synthesis articles (one per run, while a slot is open).
-    // A draft that comes back empty or short hands the slot to the next fresh
-    // cluster, up to MAX_DRAFTS_PER_RUN drafts, and its cluster sits out for
-    // an hour. Otherwise the top cluster could take every run's slot and fail
-    // each time while the stories behind it never got a turn.
+    // A draft that comes back empty or short, or whose call fails, hands the
+    // slot to the next fresh cluster, up to MAX_DRAFTS_PER_RUN drafts, and its
+    // cluster sits out for an hour. Otherwise the top cluster could take every
+    // run's slot and fail each time while the stories behind it never got a turn.
     const wanted = Math.min(open - commentaryToday, MAX_PER_RUN);
 
     console.log(`\n[Pipeline] Phase 3: Writing ${wanted} synthesis article from ${fresh.length} fresh clusters (${commentaryToday} already today, ${open}/${DAILY_CAP} open)...`);
@@ -1558,9 +1558,21 @@ async function runPipelineOnce() {
       drafts += 1;
       console.log(`[Synthesis] Draft ${drafts}/${MAX_DRAFTS_PER_RUN}: "${cluster.theme.slice(0, 50)}" (${cluster.articles.length} sources, importance: ${cluster.importance})`);
 
-      const articleText = await writeFeedReaction(cluster, prices);
+      // A draft call that fails, like a timeout, a quota error or a dropped
+      // connection, is handled like an empty draft. Left to throw, it would end
+      // the run before the cluster was set aside, and the next tick would draft
+      // the same cluster first again.
+      let articleText = null;
+      let callError = null;
+      try {
+        articleText = await writeFeedReaction(cluster, prices);
+      } catch (err) {
+        callError = err?.message || String(err);
+      }
       if (!articleText || articleText.length < MIN_ARTICLE_CHARS) {
-        const why = articleText ? `${articleText.length} chars, under ${MIN_ARTICLE_CHARS}` : 'no output from the model';
+        const why = callError ? `the draft call failed (${callError})`
+          : articleText ? `${articleText.length} chars, under ${MIN_ARTICLE_CHARS}`
+          : 'no output from the model';
         console.log(`[Synthesis] Skipped "${cluster.theme.slice(0, 50)}": ${why}. The slot stays open and its articles sit out an hour`);
         await rememberPassedLinks(cluster.articles.map(a => a.link), now, RETRY_TTL_MS);
         continue;
