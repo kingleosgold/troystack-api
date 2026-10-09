@@ -961,3 +961,21 @@ test('an account whose profile already shows Gold from the App Store is not sold
     assert.equal(state.created, undefined);
   }
 });
+
+test('a web subscription that ends leaves an App Store plan that still runs', async () => {
+  const running = new Date(Date.now() + 20 * 86400000).toISOString();
+  for (const type of ['customer.subscription.deleted', 'customer.subscription.updated']) {
+    reset({
+      profile: { id: USER, subscription_tier: 'gold', subscription_status: null, stripe_customer_id: 'cus_1', subscription_expires_at: running },
+      subscriptionById: { sub_old: { id: 'sub_old', customer: 'cus_1', status: 'canceled', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } } },
+    });
+    const res = webhookRes();
+    await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(subscriptionEvent(type, 'canceled'))) }, res);
+    assert.equal(res.statusCode, 200, type);
+    assert.equal(state.updates.length, 0, `${type} leaves the Apple plan`);
+  }
+  // Once the App Store plan has run out, the web subscription's end does count.
+  reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: null, stripe_customer_id: 'cus_1', subscription_expires_at: new Date(Date.now() - 86400000).toISOString() } });
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(subscriptionEvent('customer.subscription.deleted', 'canceled'))) }, webhookRes());
+  assert.equal(state.updates[0].subscription_tier, 'free');
+});
