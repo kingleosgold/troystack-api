@@ -10,8 +10,12 @@
 // liveSubscriptions: the subscriptions that are active or trialing.
 // subscriptionTier: the plan a subscription's price gives, or null when the
 //   price isn't a Gold price and isn't on a Gold product.
-// paidLifetimeSessions: completed, paid lifetime checkouts. Lifetime is a
-//   one-time payment, so Stripe keeps no subscription for it.
+// paidLifetimeSessions: completed, paid one-time checkouts recorded as
+//   lifetime, or recorded with no tier at all. Lifetime is a one-time payment,
+//   so Stripe keeps no subscription for it. One with no tier still has to pass
+//   soldLifetime before it counts.
+// soldLifetime: whether a checkout's line items include the lifetime price or
+//   a one-time price on a Gold product.
 
 const SITE_ORIGINS = [
   'https://troystack.ai',
@@ -80,4 +84,15 @@ function paidLifetimeSessions(sessions) {
   );
 }
 
-module.exports = { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions, SITE_ORIGINS };
+function soldLifetime(lineItems, lifetimePriceId, goldProducts) {
+  const list = Array.isArray(lineItems) ? lineItems : [];
+  return list.some((item) => {
+    const price = item?.price;
+    if (!price) return false;
+    if (lifetimePriceId && price.id === lifetimePriceId) return true;
+    const product = typeof price.product === 'string' ? price.product : price.product?.id;
+    return price.type === 'one_time' && Boolean(product) && Boolean(goldProducts && goldProducts.has(product));
+  });
+}
+
+module.exports = { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions, soldLifetime, SITE_ORIGINS };
