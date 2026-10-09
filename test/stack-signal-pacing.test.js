@@ -95,7 +95,7 @@ const fakeSupabase = {
 
 // ---- fake model calls ---------------------------------------------------------
 
-const calls = { gemini: [], claude: 0, rss: 0 };
+const calls = { gemini: [], claude: 0, claudePrompts: [], rss: 0 };
 let clusterReply = '[]';
 let scoreValue = 80;
 let draft = null; // what the feed writer returns; null means the long article
@@ -135,7 +135,7 @@ let rssItems = rssArticles;
 stub('src/lib/supabase', fakeSupabase);
 stub('src/services/ai-router', {
   callGemini: fakeGemini,
-  callClaude: async () => { calls.claude += 1; return longArticle; },
+  callClaude: async (system) => { calls.claude += 1; calls.claudePrompts.push(system); return longArticle; },
   generateImage: async () => { throw new Error('no images in tests'); },
   MODELS: { flash: 'flash', editorial: 'editorial' },
 });
@@ -151,6 +151,7 @@ function freshRun() {
   resetDb();
   calls.gemini = [];
   calls.claude = 0;
+  calls.claudePrompts = [];
   calls.rss = 0;
   rssItems = rssArticles;
   clusterReply = '[]';
@@ -453,4 +454,13 @@ test('the run no longer pays Claude for the editorial that could never save', as
   const result = await ssp.runStackSignalPipeline();
   assert.strictEqual(result.synthesized, 1);
   assert.strictEqual(calls.claude, 0);
+});
+
+test("the flagship gets today's spot written as dollars and is told the articles' prices may be stale", async () => {
+  db.recentFeed = [{ title: 'Perth Mint backlog tightens silver', published_at: '2026-10-09T09:00:00.000Z' }];
+  await ssp.generateStackSignal('morning');
+  assert.strictEqual(calls.claudePrompts.length, 1);
+  const prompt = calls.claudePrompts[0];
+  assert.match(prompt, /Current spot: Gold \$4,000\.00, Silver \$48\.00\./);
+  assert.match(prompt, /prices in them may be stale/);
 });
