@@ -166,3 +166,54 @@ test('on a Saturday the sparkline skips weekend rows and ends at Friday close', 
   assert.strictEqual(body.timestamps[95], '2026-09-25T20:59:00.000Z', 'last point is Friday 4:59 PM ET');
   assert.ok(body.timestamps.every((t) => !t.startsWith('2026-09-26')), 'no Saturday rows');
 });
+
+// ---------- one reading for Troy ----------
+
+// A Supabase stand-in that answers every chain. app_state gives the saved
+// Friday close and every other table has nothing.
+function chainable(fridayClose) {
+  return {
+    from(table) {
+      const result = table === 'app_state' ? { data: { value: fridayClose }, error: null } : { data: null, error: null };
+      const q = new Proxy({}, {
+        get(_, prop) {
+          if (prop === 'then') return (resolve, reject) => Promise.resolve(result).then(resolve, reject);
+          return () => q;
+        },
+      });
+      return q;
+    },
+  };
+}
+
+const FRIDAY = {
+  prices: { gold: 4210.5, silver: 61.2, platinum: 1690, palladium: 1160 },
+  change: { gold: { amount: 12.3, percent: 0.29 }, silver: { amount: -0.4, percent: -0.65 }, platinum: {}, palladium: {}, source: 'calculated' },
+  source: 'yahoo_finance',
+  timestamp: '2026-10-09T20:59:00.000Z',
+};
+const offline = { get: async () => { throw new Error('offline'); } };
+
+test("over a weekend Troy's price reading is the Friday close, the same one the app gets", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-10T16:00:00Z') }); // Saturday, noon in New York
+  const fetcher = loadWith('services/price-fetcher', { supabase: chainable(FRIDAY), axios: offline });
+  await fetcher.initPriceFetcher();
+  const snap = fetcher.getPriceSnapshot();
+  assert.deepStrictEqual(snap.prices, FRIDAY.prices);
+  assert.deepStrictEqual(snap.change, FRIDAY.change);
+  assert.strictEqual(snap.source, 'yahoo_finance (friday-close)');
+  assert.strictEqual(snap.marketsClosed, true);
+  const app = await fetcher.getSpotPrices();
+  assert.deepStrictEqual(app.prices, snap.prices);
+  assert.deepStrictEqual(app.change, snap.change);
+});
+
+test('on a trading day the reading is the live cache, whatever Friday left', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T16:00:00Z') }); // Thursday
+  const fetcher = loadWith('services/price-fetcher', { supabase: chainable(FRIDAY), axios: offline });
+  await fetcher.initPriceFetcher();
+  const snap = fetcher.getPriceSnapshot();
+  assert.strictEqual(snap.marketsClosed, false);
+  assert.strictEqual(snap.source, 'static-fallback');
+  assert.notDeepStrictEqual(snap.prices, FRIDAY.prices);
+});
