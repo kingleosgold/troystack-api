@@ -39,6 +39,20 @@ const PURCHASING_POWER_BENCHMARKS = {
 // HELPERS
 // ============================================
 
+// The purchasing power card that can show under Troy's answer. It divides by
+// the same benchmarks his instructions use, so the card and what he says
+// about oil, rent and labor agree. It used $85 oil, $1,850 rent and $29 an
+// hour while the prompt said $70, $1,800 and $30.
+function purchasingPowerCard(prices, totalValue, B = PURCHASING_POWER_BENCHMARKS) {
+  return {
+    goldPerBarrelOfOil: prices.gold / B.oil_per_barrel,
+    silverPerGallonOfGas: prices.silver / B.gas_per_gallon,
+    stackBarrelsOfOil: totalValue / B.oil_per_barrel,
+    stackMonthsOfRent: totalValue / B.rent_monthly,
+    stackHoursOfLabor: totalValue / B.labor_hourly,
+  };
+}
+
 function isUUID(str) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 }
@@ -516,13 +530,7 @@ router.post('/conversations/:id/messages', async (req, res) => {
       goldPrice: prices.gold,
       silverPrice: prices.silver,
       goldSilverRatio: prices.silver > 0 ? prices.gold / prices.silver : null,
-      purchasingPower: {
-        goldPerBarrelOfOil: prices.gold / 85,
-        silverPerGallonOfGas: prices.silver / 3.50,
-        stackBarrelsOfOil: totalValue / 85,
-        stackMonthsOfRent: totalValue / 1850,
-        stackHoursOfLabor: totalValue / 29,
-      },
+      purchasingPower: purchasingPowerCard(prices, totalValue),
       purchasingPowerComparison: {
         gold: {
           oz: goldOzTotal,
@@ -1290,3 +1298,6 @@ module.exports = router;
 // reuses the exact /speak sanitizer so spoken output policy stays single-
 // sourced here (alongside SANITIZER_VERSION). Function body unchanged.
 module.exports.sanitizeTTSText = sanitizeTTSText;
+// For tests: the card's figures and the benchmarks Troy is told.
+module.exports.purchasingPowerCard = purchasingPowerCard;
+module.exports.PURCHASING_POWER_BENCHMARKS = PURCHASING_POWER_BENCHMARKS;
