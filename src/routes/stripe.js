@@ -1,5 +1,6 @@
 const express = require('express');
 const supabase = require('../lib/supabase');
+const { safeRedirect, cleanCampaign, signedInUserId, liveSubscription } = require('../lib/stripe-checks');
 
 const router = express.Router();
 
@@ -201,6 +202,14 @@ router.post('/create-checkout-session', async (req, res) => {
       return res.status(400).json({ error: 'price_id is required' });
     }
 
+    // Checkout opens only for the account that's signed in.
+    const auth = await signedInUserId(req, supabase);
+    if (auth.error) return res.status(auth.status).json({ error: auth.error });
+    if (auth.userId !== user_id) {
+      return res.status(403).json({ error: 'That account is not the one signed in' });
+    }
+    const campaign = cleanCampaign(req.body.campaign);
+
     // Look up user profile
     let { data: profile } = await supabase
       .from('profiles')
@@ -244,10 +253,10 @@ router.post('/create-checkout-session', async (req, res) => {
       mode: isLifetime ? 'payment' : 'subscription',
       customer: customerId,
       line_items: [{ price: price_id, quantity: 1 }],
-      success_url: success_url || 'https://troystack.ai/settings?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: cancel_url || 'https://troystack.ai/settings',
+      success_url: safeRedirect(success_url, 'https://troystack.ai/settings?session_id={CHECKOUT_SESSION_ID}'),
+      cancel_url: safeRedirect(cancel_url, 'https://troystack.ai/settings'),
       client_reference_id: user_id,
-      metadata: { user_id, tier },
+      metadata: campaign ? { user_id, tier, campaign } : { user_id, tier },
     };
 
     if (isLifetime) {
@@ -260,6 +269,7 @@ router.post('/create-checkout-session', async (req, res) => {
         trial_settings: {
           end_behavior: { missing_payment_method: 'cancel' },
         },
+        ...(campaign ? { metadata: { campaign } } : {}),
       };
     }
 
@@ -359,6 +369,14 @@ router.post('/customer-portal', async (req, res) => {
       return res.status(400).json({ error: 'Valid user_id is required' });
     }
 
+    // The billing page shows payment details and can cancel a plan, so it
+    // opens only for the account that's signed in.
+    const auth = await signedInUserId(req, supabase);
+    if (auth.error) return res.status(auth.status).json({ error: auth.error });
+    if (auth.userId !== user_id) {
+      return res.status(403).json({ error: 'That account is not the one signed in' });
+    }
+
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('stripe_customer_id')
@@ -371,7 +389,7 @@ router.post('/customer-portal', async (req, res) => {
 
     const session = await stripe.billingPortal.sessions.create({
       customer: profile.stripe_customer_id,
-      return_url: return_url || 'https://troystack.ai/settings',
+      return_url: safeRedirect(return_url, 'https://troystack.ai/settings'),
     });
 
     console.log(`💳 [Stripe] Customer portal session created for user ${user_id}`);
@@ -394,7 +412,7 @@ router.get('/sync-subscription', async (req, res) => {
 
     const { data: profile, error } = await supabase
       .from('profiles')
-      .select('subscription_tier, subscription_status')
+      .select('subscription_tier, subscription_status, stripe_customer_id')
       .eq('id', user_id)
       .single();
 
@@ -402,10 +420,37 @@ router.get('/sync-subscription', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    let tier = profile.subscription_tier || 'free';
+    let status = profile.subscription_status || null;
+
+    // The iPhone app writes its own tier to the profile, and when RevenueCat
+    // has nothing for someone it writes free, even over Gold they pay for on
+    // the web. Stripe is the record for web plans, so a free profile with a
+    // live Stripe subscription gets its Gold back here.
+    if (tier === 'free' && stripe && profile.stripe_customer_id) {
+      try {
+        const subs = await stripe.subscriptions.list({ customer: profile.stripe_customer_id, status: 'all', limit: 10 });
+        const live = liveSubscription(subs.data);
+        if (live) {
+          const mapped = mapStripePriceToTier(live.items?.data?.[0]?.price?.id);
+          tier = mapped === 'free' ? 'gold' : mapped;
+          status = live.status;
+          const trialEnd = live.trial_end ? new Date(live.trial_end * 1000).toISOString() : null;
+          await supabase
+            .from('profiles')
+            .update({ subscription_tier: tier, subscription_status: status, trial_end: trialEnd })
+            .eq('id', user_id);
+          console.log(`🔁 [Sync Subscription] Restored ${tier} from Stripe for ${user_id}`);
+        }
+      } catch (healErr) {
+        console.error('[Sync Subscription] Stripe check failed:', healErr.message);
+      }
+    }
+
     return res.json({
       user_id,
-      subscription_tier: profile.subscription_tier || 'free',
-      subscription_status: profile.subscription_status || null,
+      subscription_tier: tier,
+      subscription_status: status,
     });
 
   } catch (error) {
