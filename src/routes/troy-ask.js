@@ -68,9 +68,9 @@ Reference these community discussions naturally when relevant.` : '';
 /**
  * @param {object} deps
  * @param {object} deps.llm - { isConfigured(), generateTroyReply(args) }
- * @param {() => Promise<object>} deps.getPrices - resolves { gold, silver, platinum, palladium }
+ * @param {() => Promise<object>} deps.getPrices - resolves a price snapshot { prices, change, source }, or bare { gold, silver, platinum, palladium }
  * @param {() => Promise<string>} [deps.getIntel] - community chatter, '' when none
- * @param {() => Promise<string>} [deps.getMarket] - the day's moves and Signal, '' when none
+ * @param {(snapshot?: object) => Promise<string>} [deps.getMarket] - the day's moves and Signal from the same snapshot, '' when none
  * @param {() => number} [deps.now]
  * @param {object} [deps.env]
  */
@@ -134,9 +134,13 @@ function createTroyAskRouter({ llm, getPrices, getIntel = async () => '', getMar
     };
 
     try {
+      // One price reading for CURRENT SPOT and for the day's moves, so they agree.
+      let snapshot = null;
       let prices = {};
       try {
-        prices = (await getPrices()) || {};
+        const read = (await getPrices()) || {};
+        snapshot = read.prices ? read : null;
+        prices = read.prices || read;
       } catch (e) {
         console.error('[Troy Ask] Price fetch failed:', e.message);
       }
@@ -148,7 +152,7 @@ function createTroyAskRouter({ llm, getPrices, getIntel = async () => '', getMar
       }
       let market = '';
       try {
-        market = (await getMarket()) || '';
+        market = (await getMarket(snapshot || undefined)) || '';
       } catch (e) {
         console.log(`[Troy Ask] Market context error (non-fatal): ${e.message}`);
       }

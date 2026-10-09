@@ -3,7 +3,7 @@ const converter = require('number-to-words');
 const multer = require('multer');
 const { PassThrough } = require('node:stream');
 const supabase = require('../lib/supabase');
-const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
+const { getPriceSnapshot, getSpotPrices } = require('../services/price-fetcher');
 const { getTopIntelligence } = require('../services/intelligence-scraper');
 const { sharedMarketBlock } = require('../services/troy-context');
 const { getTTSProvider, getSTTProvider } = require('../services/voice-providers');
@@ -440,17 +440,18 @@ router.post('/conversations/:id/messages', async (req, res) => {
 
     const userHoldings = holdings || [];
 
-    // Get current spot prices from in-memory cache (same source as /v1/prices)
-    let prices = getCachedPrices();
-    if (!prices.gold || !prices.silver) {
-      // Cache cold (server just started) — fetch fresh
+    // One reading of the price cache feeds both CURRENT SPOT and today's
+    // moves in the market block, so the two always agree. A cache still on
+    // the built-in prices from startup is read fresh first.
+    let snapshot = getPriceSnapshot();
+    if (snapshot.source === 'static-fallback' || !snapshot.prices.gold || !snapshot.prices.silver) {
       try {
-        const fresh = await getSpotPrices();
-        prices = fresh.prices;
+        snapshot = await getSpotPrices();
       } catch (e) {
         console.error('[Troy Chat] Price fetch fallback failed:', e.message);
       }
     }
+    const prices = snapshot.prices || {};
 
     // Build portfolio summary
     const metalTotals = { gold: { oz: 0, cost: 0 }, silver: { oz: 0, cost: 0 }, platinum: { oz: 0, cost: 0 }, palladium: { oz: 0, cost: 0 } };
@@ -565,7 +566,7 @@ router.post('/conversations/:id/messages', async (req, res) => {
     // he can say what moved metals, the same as on troystack.ai.
     let marketBlock = '';
     try {
-      marketBlock = (await sharedMarketBlock()) || '';
+      marketBlock = (await sharedMarketBlock(snapshot)) || '';
     } catch (marketErr) {
       console.log(`[Troy Chat] Market context error (non-fatal): ${marketErr.message}`);
     }
