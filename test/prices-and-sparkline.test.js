@@ -217,3 +217,23 @@ test('on a trading day the reading is the live cache, whatever Friday left', asy
   assert.strictEqual(snap.source, 'static-fallback');
   assert.notDeepStrictEqual(snap.prices, FRIDAY.prices);
 });
+
+test('price reads that arrive together share one live fetch', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T16:00:00Z') }); // Thursday
+  let goldQuotes = 0;
+  const axios = fakeAxios({ 'GC=F': 4320.9, 'SI=F': 64.69, 'PL=F': 1797.7, 'PA=F': 1276 });
+  const counting = {
+    get: async (url) => {
+      if (url.endsWith('GC=F')) goldQuotes += 1;
+      return axios.get(url);
+    },
+  };
+  const fetcher = loadWith('services/price-fetcher', { supabase: chainable(null), axios: counting });
+  const [a, b, c] = await Promise.all([fetcher.getSpotPrices(), fetcher.getSpotPrices(), fetcher.fetchLiveSpotPrices()]);
+  assert.strictEqual(goldQuotes, 1, 'one trip to Yahoo for all three');
+  assert.strictEqual(a.prices.gold, 4320.9);
+  assert.deepStrictEqual(a.prices, b.prices);
+  assert.deepStrictEqual(c.prices, a.prices, 'the cron and the reads get the same fetch');
+  await fetcher.fetchLiveSpotPrices();
+  assert.strictEqual(goldQuotes, 2, 'a later fetch goes out again');
+});
