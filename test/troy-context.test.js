@@ -30,12 +30,14 @@ test('the block names each move, the latest Signal and the newest headlines', ()
       { title: 'Mexico silver output slips again', published_at: '2026-10-07T15:00:00Z' },
     ],
   });
-  assert.match(block, /Gold: up \$17\.20 \(0\.41%\) since the last close/);
-  assert.match(block, /Silver: up \$0\.62 \(1\.04%\) since the last close/);
-  assert.match(block, /Platinum: down \$3\.10 \(0\.18%\) since the last close/);
-  assert.match(block, /Palladium: change since the last close unavailable/);
+  assert.match(block, /Gold: up \$17\.20 \(0\.41%\) today/);
+  assert.match(block, /Silver: up \$0\.62 \(1\.04%\) today/);
+  assert.match(block, /Platinum: down \$3\.10 \(0\.18%\) today/);
+  assert.match(block, /Palladium: today's change unavailable/);
   assert.ok(!block.includes('4,198') && !block.includes('60.35'), "spot itself is left to the route's part of the prompt");
-  assert.match(block, /YOUR LATEST STACK SIGNAL \(published Oct 8, 2026\):/);
+  assert.match(block, /YOUR LATEST STACK SIGNAL \(published Oct 8, 2026, 5:30 PM ET\):/);
+  assert.match(block, /Prices and moves in the Signal are as of when it was published/);
+  assert.match(block, /use only CURRENT SPOT and TODAY'S MARKET/);
   assert.match(block, /physical buyers in Beijing bought the dip/);
   assert.match(block, /- Mexico silver output slips again \(Oct 7, 2026\)/);
   assert.ok(!/[\u2014]/.test(block), 'no long dashes reach Troy');
@@ -47,6 +49,12 @@ test('a cut-off one-liner falls back to the commentary, and closed markets are s
   assert.match(block, /Long commentary\./);
   assert.match(block, /Markets are closed right now/);
   assert.ok(!block.includes('NEWEST HEADLINES'));
+});
+
+test('the block opens with the date and time in New York', () => {
+  const block = buildMarketBlock({ spot: SPOT, now: Date.parse('2026-10-09T18:05:00Z') });
+  assert.ok(block.startsWith('RIGHT NOW: Friday, October 9, 2026, 2:05 PM ET.'));
+  assert.ok(!block.includes('as of when it was published'), 'no Signal, so nothing to warn about');
 });
 
 test('nothing fetched means no block at all', () => {
@@ -63,6 +71,8 @@ test('helpers keep words and drop long dashes', () => {
 
 function fakeDb({ fail = false, syntheses = 0 } = {}) {
   const calls = [];
+  // Which reads fail right now. Tests can change these between questions.
+  const failing = { signal: fail, headlines: fail };
   // Newest first: a run of synthesis editions, then an ordinary story.
   const rows = [
     ...Array.from({ length: syntheses }, (_, i) => ({ ...SIGNAL, title: `Edition ${i}`, is_stack_signal: true })),
@@ -78,8 +88,9 @@ function fakeDb({ fail = false, syntheses = 0 } = {}) {
       or(expr) { q.orFilter = expr; return q; },
       order() { return q; },
       limit(n) {
-        calls.push(q.filters.is_stack_signal === true ? 'signal' : 'headlines');
-        if (fail) return Promise.resolve({ data: null, error: { message: 'db down' } });
+        const kind = q.filters.is_stack_signal === true ? 'signal' : 'headlines';
+        calls.push(kind);
+        if (failing[kind]) return Promise.resolve({ data: null, error: { message: 'db down' } });
         let data = rows;
         if (q.filters.is_stack_signal === true) data = rows.filter((r) => r.is_stack_signal);
         if (q.orFilter === 'is_stack_signal.is.null,is_stack_signal.eq.false') data = rows.filter((r) => !r.is_stack_signal);
@@ -88,7 +99,7 @@ function fakeDb({ fail = false, syntheses = 0 } = {}) {
     };
     return q;
   }
-  return { calls, from: () => query() };
+  return { calls, failing, from: () => query() };
 }
 
 test('moves are read with every question, the Signal reads are kept for five minutes', async () => {
@@ -128,6 +139,40 @@ test('failed parts are left out, and an empty read is retried soon', async () =>
   t = 31 * 1000;
   await get();
   assert.equal(db.calls.length, 4);
+});
+
+test('a read that fails keeps the last good answer and is tried again soon', async () => {
+  let t = 0;
+  const db = fakeDb();
+  const get = createMarketContext({ fetchSpot: async () => SPOT, db, now: () => t });
+  await get();
+  db.failing.signal = true;
+  db.failing.headlines = true;
+  t = 6 * 60 * 1000;
+  const block = await get();
+  assert.match(block, /YOUR LATEST STACK SIGNAL/);
+  assert.match(block, /A headline that matters today/);
+  assert.equal(db.calls.length, 4);
+  db.failing.signal = false;
+  db.failing.headlines = false;
+  t += 31 * 1000;
+  await get();
+  assert.equal(db.calls.length, 6, 'tried again after half a minute');
+});
+
+test('one read failing does not hold the other back', async () => {
+  let t = 0;
+  const db = fakeDb();
+  db.failing.signal = true;
+  const get = createMarketContext({ fetchSpot: async () => SPOT, db, now: () => t });
+  const first = await get();
+  assert.ok(!first.includes('STACK SIGNAL ('), 'no Signal yet');
+  assert.match(first, /A headline that matters today/);
+  db.failing.signal = false;
+  t = 31 * 1000;
+  const second = await get();
+  assert.match(second, /YOUR LATEST STACK SIGNAL/);
+  assert.deepEqual(db.calls, ['signal', 'headlines', 'signal'], 'only the failed read went again');
 });
 
 test('the moves still come through when the database is down', async () => {
