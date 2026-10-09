@@ -179,3 +179,21 @@ test('status reports a fresh visitor with nothing used', async () => {
     assert.strictEqual(status.questionsLimit, 5);
   });
 });
+
+test("the day's moves and the Signal reach Troy's prompt, and a failure there doesn't stop the answer", async () => {
+  const llm = fakeLlm();
+  const market = "TODAY'S MARKET:\nSilver: $60.35, up $0.62 (1.04%) since the last close\n\n";
+  let router = createTroyAskRouter({ llm, getPrices: async () => PRICES, getMarket: async () => market, env: {} });
+  await withApp(router, async (base) => {
+    assert.strictEqual((await ask(base, { message: 'What moved silver today?' })).status, 200);
+  });
+  assert.ok(llm.calls[0].prompt.stack.startsWith(visitorBlock(PRICES)));
+  assert.ok(llm.calls[0].prompt.stack.endsWith(market));
+
+  const llm2 = fakeLlm();
+  router = createTroyAskRouter({ llm: llm2, getPrices: async () => PRICES, getMarket: async () => { throw new Error('db down'); }, env: {} });
+  await withApp(router, async (base) => {
+    assert.strictEqual((await ask(base, { message: 'What moved silver today?' })).status, 200);
+  });
+  assert.strictEqual(llm2.calls[0].prompt.stack, visitorBlock(PRICES));
+});
