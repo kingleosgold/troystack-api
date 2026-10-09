@@ -203,3 +203,39 @@ test('questions that arrive during a refresh share it', async () => {
   assert.equal(a, b);
   assert.equal(b, c);
 });
+
+test('moves are left out when prices come from a fallback, not a live source', () => {
+  for (const source of ['static-fallback', 'cached-fallback', 'static-fallback (friday-close)']) {
+    const block = buildMarketBlock({ spot: { ...SPOT, source }, signal: SIGNAL });
+    assert.ok(!block.includes("TODAY'S MARKET"), source);
+    assert.match(block, /For where prices are now, use only CURRENT SPOT\./);
+    assert.match(block, /YOUR LATEST STACK SIGNAL/, 'the rest still comes through');
+  }
+  assert.match(buildMarketBlock({ spot: { ...SPOT, source: 'yahoo_finance' } }), /Gold: up \$17\.20/);
+});
+
+test('a stalled read gives way to the last good answer instead of holding the question', async () => {
+  let t = 0;
+  let hang = false;
+  const db = fakeDb();
+  const never = new Promise(() => {});
+  const stalling = {
+    from(table) {
+      const q = db.from(table);
+      const limit = q.limit;
+      q.limit = (n) => (hang ? never : limit(n));
+      return q;
+    },
+  };
+  const get = createMarketContext({ fetchSpot: async () => (hang ? never : SPOT), db: stalling, now: () => t, waitMs: 20 });
+  const first = await get();
+  assert.match(first, /YOUR LATEST STACK SIGNAL/);
+  hang = true;
+  t += 6 * 60 * 1000;
+  const started = Date.now();
+  const second = await get();
+  assert.ok(Date.now() - started < 1000, 'answered without waiting on the stalled reads');
+  assert.match(second, /YOUR LATEST STACK SIGNAL/, 'the last good Signal is kept');
+  assert.match(second, /A headline that matters today/);
+  assert.ok(!second.includes("TODAY'S MARKET"), 'no moves while spot is stalled');
+});
