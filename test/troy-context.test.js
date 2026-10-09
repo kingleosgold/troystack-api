@@ -225,8 +225,12 @@ test('moves are left out when prices come from a fallback, and Troy is told pric
   }
   const placeholder = buildMarketBlock({ spot: { ...SPOT, source: 'static-fallback' } });
   assert.match(placeholder, /placeholder numbers, not market prices\. Don't quote them\./);
-  const cached = buildMarketBlock({ spot: { ...SPOT, source: 'cached-fallback', timestamp: '2026-10-09T13:40:00Z' } });
+  // The time given is when the prices were last read live, not when the last failed fetch rebuilt the cache.
+  const cached = buildMarketBlock({ spot: { ...SPOT, source: 'cached-fallback', timestamp: '2026-10-09T15:02:00Z', quotedAt: '2026-10-09T13:40:00Z' } });
   assert.match(cached, /CURRENT SPOT is the last price read, Oct 9, 2026, 9:40 AM ET, and may be out of date/);
+  assert.ok(!cached.includes('11:02'), 'not the time of the last failed fetch');
+  const unknown = buildMarketBlock({ spot: { ...SPOT, source: 'cached-fallback (friday-close)', quotedAt: null } });
+  assert.match(unknown, /CURRENT SPOT is the last price read, and may be out of date/, "no time when it isn't known");
   const live = buildMarketBlock({ spot: { ...SPOT, source: 'yahoo_finance' } });
   assert.match(live, /Gold: up \$17\.20/);
   assert.ok(!live.includes('PRICES RIGHT NOW'));

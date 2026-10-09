@@ -11,6 +11,7 @@ process.env.SUPABASE_URL ||= 'http://localhost:54321';
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-dummy-service-role-key';
 
 const SRC = path.join(__dirname, '..', 'src');
+const { buildMarketBlock } = require(path.join(SRC, 'services', 'troy-context'));
 const SUPABASE_PATH = require.resolve(path.join(SRC, 'lib', 'supabase'));
 const AXIOS_PATH = require.resolve('axios');
 
@@ -203,6 +204,7 @@ test("over a weekend Troy's price reading is the Friday close, the same one the 
   assert.deepStrictEqual(snap.change, FRIDAY.change);
   assert.strictEqual(snap.source, 'yahoo_finance (friday-close)');
   assert.strictEqual(snap.marketsClosed, true);
+  assert.strictEqual(snap.quotedAt, FRIDAY.timestamp, "an older live close without quotedAt gives the time it was saved");
   const app = await fetcher.getSpotPrices();
   assert.deepStrictEqual(app.prices, snap.prices);
   assert.deepStrictEqual(app.change, snap.change);
@@ -245,4 +247,82 @@ test("built-in prices stay labeled built-in when the next fetch fails too", asyn
   assert.strictEqual(fetcher.getPriceSnapshot().source, 'static-fallback');
   await fetcher.fetchLiveSpotPrices();
   assert.strictEqual(fetcher.getPriceSnapshot().source, 'static-fallback', 'never relabeled as a cached reading');
+});
+
+// A database whose first read of yesterday's prices hangs until the test lets
+// it go. Rows written to price_log are kept so the test can check them.
+function stallingDb() {
+  let reached;
+  let release;
+  const stalled = new Promise((resolve) => { reached = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  const logged = [];
+  let reads = 0;
+  const query = {
+    select: () => query, gte: () => query, lte: () => query, order: () => query, limit: () => query,
+    single: () => {
+      reads += 1;
+      if (reads > 1) return Promise.resolve({ data: null, error: null });
+      reached();
+      return gate.then(() => ({ data: null, error: null }));
+    },
+    insert: (row) => { logged.push(row); return Promise.resolve({ error: null }); },
+    upsert: () => Promise.resolve({ error: null }),
+  };
+  return { stalled, release: () => release(), logged, from: () => query };
+}
+
+test('a replaced fetch that finishes late leaves the newer prices alone', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T21:30:00Z') }); // Friday, 5:30 PM in New York
+  const quotes = { 'GC=F': 5140.5, 'SI=F': 86.9, 'PL=F': 2160, 'PA=F': 1775 };
+  const db = stallingDb();
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios(quotes) });
+
+  // The first fetch reads gold at $5,140.50, then hangs on the database.
+  const slow = fetcher.fetchLiveSpotPrices();
+  await db.stalled;
+
+  // Half a minute later the next caller replaces it and reads $5,160.25.
+  quotes['GC=F'] = 5160.25;
+  t.mock.timers.tick(31 * 1000);
+  await fetcher.fetchLiveSpotPrices();
+
+  // Then the first fetch comes back.
+  db.release();
+  await slow;
+  assert.strictEqual(fetcher.getCachedPrices().gold, 5160.25, 'the cache keeps the newer price');
+  assert.strictEqual(fetcher.getPriceSnapshot().prices.gold, 5160.25, 'so does the Friday close');
+  assert.deepStrictEqual(db.logged.map((row) => row.gold_price), [5160.25], 'only the newer price went to price_log');
+});
+
+test('failed fetches keep the time of the last live price, and the reading reports it', async (t) => {
+  // Friday, 4 PM in New York. The feeds answer once, then stay down through the close.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T20:00:00Z') });
+  let online = true;
+  const live = fakeAxios({ 'GC=F': 4320.9, 'SI=F': 64.69, 'PL=F': 1797.7, 'PA=F': 1276 });
+  const fetcher = loadWith('services/price-fetcher', {
+    supabase: chainable(null),
+    axios: { get: (url) => (online ? live : offline).get(url) },
+  });
+  await fetcher.fetchLiveSpotPrices();
+  online = false;
+  for (let i = 0; i < 3; i++) {
+    t.mock.timers.tick(60 * 1000);
+    await fetcher.fetchLiveSpotPrices();
+  }
+
+  const snap = fetcher.getPriceSnapshot();
+  assert.strictEqual(snap.source, 'cached-fallback');
+  assert.strictEqual(snap.prices.gold, 4320.9);
+  assert.strictEqual(snap.timestamp, '2026-10-09T20:03:00.000Z', 'the cache was rebuilt by the last failed fetch');
+  assert.strictEqual(snap.quotedAt, '2026-10-09T20:00:00.000Z', 'but its prices were read at 4 PM');
+  assert.strictEqual((await fetcher.getSpotPrices()).quotedAt, snap.quotedAt, "the app's reading says the same");
+  assert.match(buildMarketBlock({ spot: snap }), /the last price read, Oct 9, 2026, 4:00 PM ET,/, 'and so does Troy');
+
+  // Still down after the close, so the weekend reading is a Friday close saved from the cache.
+  t.mock.timers.tick(90 * 60 * 1000);
+  await fetcher.fetchLiveSpotPrices();
+  const weekend = fetcher.getPriceSnapshot();
+  assert.strictEqual(weekend.source, 'cached-fallback (friday-close)');
+  assert.strictEqual(weekend.quotedAt, '2026-10-09T20:00:00.000Z');
 });
