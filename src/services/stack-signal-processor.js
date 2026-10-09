@@ -1375,7 +1375,26 @@ async function generateClaudeDailySynthesis() {
  * Phase 5: Save feed articles to database
  * Phase 6: Push notification for top article
  */
+// One run at a time in this process. A run takes a minute or two, but a slow
+// model call could still be going when the next 15-minute tick starts, and
+// both runs would see the same open slot and write an article each. Like the
+// daily brief and the podcast, the crons assume a single API instance.
+let pipelineRunning = false;
+
 async function runStackSignalPipeline() {
+  if (pipelineRunning) {
+    console.log('[Pipeline] The previous run is still going, skipping this tick');
+    return { articles: 0, scored: 0, clusters: 0, synthesized: 0, saved: 0, skipped: true };
+  }
+  pipelineRunning = true;
+  try {
+    return await runPipelineOnce();
+  } finally {
+    pipelineRunning = false;
+  }
+}
+
+async function runPipelineOnce() {
   const startTime = Date.now();
   console.log(`\n${'━'.repeat(50)}`);
   console.log(`  Stack Signal v2 Pipeline — ${new Date().toISOString()}`);
