@@ -78,7 +78,7 @@ function nowLine(at) {
 
 /**
  * The prompt block, from what was fetched. Pure, for tests.
- * @param {{ spot?: { prices?: object, change?: object, marketsClosed?: boolean } | null,
+ * @param {{ spot?: { prices?: object, change?: object, marketsClosed?: boolean, source?: string, quotedAt?: string | null } | null,
  *           signal?: object | null, headlines?: object[], now?: number }} parts
  */
 function buildMarketBlock({ spot, signal, headlines, now } = {}) {
@@ -96,10 +96,11 @@ function buildMarketBlock({ spot, signal, headlines, now } = {}) {
   }
   // The live feeds are down, so CURRENT SPOT isn't today's price. Built-in
   // prices aren't market prices at all, and cached ones are only as fresh as
-  // when they were read.
+  // when they were last read live, the reading's quotedAt. Its timestamp
+  // moves with every failed fetch, so it isn't used here.
   const stale = Boolean(spot) && !trusted;
   if (stale) {
-    const when = /static/i.test(source) ? '' : dayAndTime(spot.timestamp);
+    const when = /static/i.test(source) || !spot.quotedAt ? '' : dayAndTime(spot.quotedAt);
     sections.push(
       /static/i.test(source)
         ? "PRICES RIGHT NOW: The live price feeds are down, so CURRENT SPOT holds placeholder numbers, not market prices. Don't quote them. If someone asks where prices are, say live prices aren't available this minute and to check back shortly."

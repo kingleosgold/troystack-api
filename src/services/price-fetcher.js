@@ -10,6 +10,10 @@ const CACHE_TTL_MS = 90 * 1000; // 90 seconds (Yahoo Finance is free, so we poll
 let spotPriceCache = {
   prices: { gold: 5150, silver: 87, platinum: 2170, palladium: 1780 },
   lastUpdated: null,
+  // When the prices were last read from a live source, as an ISO string, or
+  // null if they never were. lastUpdated moves with every fetch, failed ones
+  // too, so it can't say how old the prices are.
+  quotedAt: null,
   source: 'static-fallback',
   change: { gold: {}, silver: {}, platinum: {}, palladium: {}, source: 'unavailable' },
   marketsClosed: false,
@@ -74,8 +78,10 @@ function getLastTradingDay() {
 /**
  * Get yesterday's prices for change calculation.
  * Checks in-memory cache first, then falls back to price_log in Supabase.
+ * `isCurrent` is false once the fetch asking has been replaced by a newer
+ * one, and then what it read isn't kept.
  */
-async function getYesterdayPrices() {
+async function getYesterdayPrices(isCurrent = () => true) {
   const today = new Date().toISOString().split('T')[0];
 
   // Check in-memory first
@@ -106,7 +112,7 @@ async function getYesterdayPrices() {
         palladium: data.palladium_price ? parseFloat(data.palladium_price) : 0,
         date: lastTradingDay,
       };
-      previousDayPrices = result;
+      if (isCurrent()) previousDayPrices = result;
       return result;
     }
   } catch (err) {
@@ -194,6 +200,14 @@ function getFridayClose() {
   return fridayCloseData;
 }
 
+// When a saved Friday close's prices were read live. A close saved before
+// quotedAt was kept has only the time it was saved. That's the same time
+// when its source was live, and unknown when it was a fallback.
+function fridayQuotedAt(friday) {
+  if (friday.quotedAt !== undefined) return friday.quotedAt;
+  return /fallback/.test(String(friday.source || '')) ? null : friday.timestamp || null;
+}
+
 // ============================================
 // LAST KNOWN Pt/Pd FROM PRICE_LOG
 // ============================================
@@ -233,7 +247,7 @@ async function getLastKnownPtPd() {
  * value. They used to come only from MetalPriceAPI, polled every minute,
  * and when that stopped answering they froze at a months-old price.
  */
-async function fetchFromYahooFinance() {
+async function fetchFromYahooFinance(isCurrent = () => true) {
   console.log('   Attempting Yahoo Finance (primary)...');
   const headers = { 'User-Agent': 'Mozilla/5.0 (compatible; TroyStack/1.0)' };
   const quote = (symbol) => axios
@@ -260,9 +274,12 @@ async function fetchFromYahooFinance() {
   }
 
   // Remember live values, so a later miss falls back to today's price
-  // rather than whatever price_log held when the server started.
-  if (platinum) lastKnownPtPd.platinum = platinum;
-  if (palladium) lastKnownPtPd.palladium = palladium;
+  // rather than whatever price_log held when the server started. A fetch
+  // that's been replaced by a newer one leaves them alone.
+  if (isCurrent()) {
+    if (platinum) lastKnownPtPd.platinum = platinum;
+    if (palladium) lastKnownPtPd.palladium = palladium;
+  }
 
   return {
     gold: round2(goldPrice),
@@ -332,8 +349,12 @@ async function fetchFromMetalPriceAPI() {
  * Fetch live spot prices with priority fallback chain.
  * Updates the in-memory cache, logs to price_log, handles Friday close.
  * Callers use fetchLiveSpotPrices below, which shares a fetch in progress.
+ * `generation` is the number fetchLiveSpotPrices gave this fetch. A fetch
+ * that's been replaced still runs to the end, so it checks before it writes
+ * and writes nothing once a newer fetch has started.
  */
-async function fetchLiveSpotPricesNow() {
+async function fetchLiveSpotPricesNow(generation) {
+  const isCurrent = () => generation === liveFetchGeneration;
   try {
     console.log('\n💰 [Price Fetcher] Fetching live spot prices...');
 
@@ -341,7 +362,7 @@ async function fetchLiveSpotPricesNow() {
 
     // Priority 1: Yahoo Finance (free, unlimited)
     try {
-      fetched = await fetchFromYahooFinance();
+      fetched = await fetchFromYahooFinance(isCurrent);
       console.log(`   Yahoo Finance: Gold $${fetched.gold}, Silver $${fetched.silver}, Pt $${fetched.platinum}, Pd $${fetched.palladium}`);
     } catch (err) {
       console.log(`   Yahoo Finance failed: ${err.message}`);
@@ -377,7 +398,15 @@ async function fetchLiveSpotPricesNow() {
     }
 
     // Always self-calculate change from last trading day's price_log entry
-    const yesterday = await getYesterdayPrices();
+    const yesterday = await getYesterdayPrices(isCurrent);
+
+    // A newer fetch started while this one waited, and its prices are newer.
+    // This one leaves the cache, the Friday close and price_log to it.
+    if (!isCurrent()) {
+      console.log('   Replaced by a newer fetch, so these prices are dropped');
+      return spotPriceCache;
+    }
+
     const changeData = calculateChanges(fetched, yesterday);
 
     // Save for tomorrow's change calc
@@ -388,10 +417,16 @@ async function fetchLiveSpotPricesNow() {
     // Snapshot previous prices for spike guard (before cache update)
     const prevPrices = { ...spotPriceCache.prices };
 
-    // Update cache
+    // Update cache. A fallback to the cached prices keeps the time they were
+    // read live, and built-in prices were never read live at all.
+    const now = new Date();
+    let quotedAt = now.toISOString();
+    if (fetched.source === 'cached-fallback') quotedAt = spotPriceCache.quotedAt;
+    else if (fetched.source === 'static-fallback') quotedAt = null;
     spotPriceCache = {
       prices: { gold: fetched.gold, silver: fetched.silver, platinum: fetched.platinum, palladium: fetched.palladium },
-      lastUpdated: new Date(),
+      lastUpdated: now,
+      quotedAt,
       source: fetched.source,
       change: changeData,
       marketsClosed,
@@ -408,10 +443,14 @@ async function fetchLiveSpotPricesNow() {
       await saveFridayClose({
         prices: spotPriceCache.prices,
         timestamp: spotPriceCache.lastUpdated.toISOString(),
+        quotedAt: spotPriceCache.quotedAt,
         source: spotPriceCache.source,
         change: spotPriceCache.change,
       });
     }
+
+    // A newer fetch may have started while the Friday close was saving.
+    if (!isCurrent()) return spotPriceCache;
 
     // Log to price_log (non-blocking) — skip fallback data to avoid polluting the log
     if (fetched.source === 'static-fallback' || fetched.source === 'cached-fallback') {
@@ -435,7 +474,7 @@ async function fetchLiveSpotPricesNow() {
   } catch (error) {
     console.error('   Failed to fetch spot prices:', error.message);
 
-    if (spotPriceCache.lastUpdated) {
+    if (spotPriceCache.lastUpdated || !isCurrent()) {
       console.log('   Using last cached prices (fetch error)');
       return spotPriceCache;
     }
@@ -484,9 +523,12 @@ async function logPriceToSupabase(prices, source) {
 // startup, or a burst of questions right after a deploy, shares it instead of
 // running the whole Yahoo and MetalPriceAPI chain again. A fetch still running
 // after 30 seconds is taken as hung, and the next caller starts a fresh one.
+// The hung one can still finish later, so each fetch gets a number and only
+// the newest one writes. A late finish can't put back older prices.
 const LIVE_FETCH_STALL_MS = 30 * 1000;
 let liveFetch = null;
 let liveFetchStartedAt = 0;
+let liveFetchGeneration = 0;
 function fetchLiveSpotPrices() {
   if (liveFetch && Date.now() - liveFetchStartedAt >= LIVE_FETCH_STALL_MS) {
     console.log('   [Price Fetcher] Live fetch still running after 30s, starting another');
@@ -494,7 +536,8 @@ function fetchLiveSpotPrices() {
   }
   if (!liveFetch) {
     liveFetchStartedAt = Date.now();
-    const current = fetchLiveSpotPricesNow().finally(() => {
+    liveFetchGeneration += 1;
+    const current = fetchLiveSpotPricesNow(liveFetchGeneration).finally(() => {
       if (liveFetch === current) liveFetch = null;
     });
     liveFetch = current;
@@ -518,6 +561,7 @@ async function getSpotPrices() {
       await saveFridayClose({
         prices: spotPriceCache.prices,
         timestamp: spotPriceCache.lastUpdated.toISOString(),
+        quotedAt: spotPriceCache.quotedAt,
         source: spotPriceCache.source,
         change: spotPriceCache.change,
       });
@@ -528,6 +572,7 @@ async function getSpotPrices() {
       return {
         prices: friday.prices,
         timestamp: friday.timestamp,
+        quotedAt: fridayQuotedAt(friday),
         source: friday.source + ' (friday-close)',
         cacheAgeMinutes: 0,
         change: friday.change || { gold: {}, silver: {}, platinum: {}, palladium: {}, source: 'unavailable' },
@@ -546,6 +591,7 @@ async function getSpotPrices() {
     return {
       prices: spotPriceCache.prices,
       timestamp: spotPriceCache.lastUpdated.toISOString(),
+      quotedAt: spotPriceCache.quotedAt,
       source: spotPriceCache.source,
       cacheAgeMinutes: Math.round((cacheAge / 60000) * 10) / 10,
       change: spotPriceCache.change,
@@ -559,6 +605,7 @@ async function getSpotPrices() {
   return {
     prices: spotPriceCache.prices,
     timestamp: spotPriceCache.lastUpdated ? spotPriceCache.lastUpdated.toISOString() : new Date().toISOString(),
+    quotedAt: spotPriceCache.quotedAt,
     source: spotPriceCache.source,
     cacheAgeMinutes: 0,
     change: spotPriceCache.change,
@@ -579,6 +626,8 @@ function getCachedPrices() {
  * markets are closed it's the Friday close, the same reading getSpotPrices
  * gives the app. A weekend fetch measures its change against Friday's own
  * last price, so the live cache would read the last session as flat.
+ * timestamp is when the reading was last rebuilt, and quotedAt is when its
+ * prices were last read from a live source, which a failed fetch doesn't move.
  */
 function getPriceSnapshot() {
   const friday = areMarketsClosed() ? getFridayClose() : null;
@@ -589,6 +638,7 @@ function getPriceSnapshot() {
       source: `${friday.source} (friday-close)`,
       marketsClosed: true,
       timestamp: friday.timestamp || null,
+      quotedAt: fridayQuotedAt(friday),
     };
   }
   return {
@@ -597,6 +647,7 @@ function getPriceSnapshot() {
     source: spotPriceCache.source,
     marketsClosed: areMarketsClosed(),
     timestamp: spotPriceCache.lastUpdated ? spotPriceCache.lastUpdated.toISOString() : null,
+    quotedAt: spotPriceCache.quotedAt,
   };
 }
 
