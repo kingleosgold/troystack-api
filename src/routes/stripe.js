@@ -1,6 +1,6 @@
 const express = require('express');
 const supabase = require('../lib/supabase');
-const { safeRedirect, cleanCampaign, signedInUserId, liveSubscription } = require('../lib/stripe-checks');
+const { safeRedirect, cleanCampaign, signedInUserId, liveSubscription, paidLifetimeSession } = require('../lib/stripe-checks');
 
 const router = express.Router();
 
@@ -35,6 +35,33 @@ function mapStripePriceToTier(priceId) {
 
 function isLifetimePrice(priceId) {
   return priceId === STRIPE_GOLD_LIFETIME_PRICE_ID;
+}
+
+// What Stripe says a customer paid for, or null. A live subscription gives
+// Gold. Lifetime is a one-time payment with no subscription, so a paid
+// lifetime checkout counts unless its charge was refunded in full.
+async function planFromStripe(customerId) {
+  const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 10 });
+  const live = liveSubscription(subs.data);
+  if (live) {
+    const mapped = mapStripePriceToTier(live.items?.data?.[0]?.price?.id);
+    return {
+      tier: mapped === 'free' ? 'gold' : mapped,
+      status: live.status,
+      trialEnd: live.trial_end ? new Date(live.trial_end * 1000).toISOString() : null,
+    };
+  }
+
+  const sessions = await stripe.checkout.sessions.list({ customer: customerId, limit: 20 });
+  const lifetime = paidLifetimeSession(sessions.data);
+  if (!lifetime) return null;
+  const intentId = typeof lifetime.payment_intent === 'string' ? lifetime.payment_intent : lifetime.payment_intent?.id;
+  if (intentId) {
+    const intent = await stripe.paymentIntents.retrieve(intentId, { expand: ['latest_charge'] });
+    const charge = intent.latest_charge;
+    if (charge && typeof charge === 'object' && charge.refunded) return null;
+  }
+  return { tier: 'lifetime', status: 'active', trialEnd: null };
 }
 
 // ============================================
@@ -424,23 +451,25 @@ router.get('/sync-subscription', async (req, res) => {
     let status = profile.subscription_status || null;
 
     // The iPhone app writes its own tier to the profile, and when RevenueCat
-    // has nothing for someone it writes free, even over Gold they pay for on
-    // the web. Stripe is the record for web plans, so a free profile with a
-    // live Stripe subscription gets its Gold back here.
+    // has nothing for someone it writes free, even over Gold or Lifetime they
+    // paid for on the web. Stripe is the record for web plans, so a free
+    // profile with a live subscription or a paid lifetime purchase gets it
+    // back here. The answer only changes once the profile update succeeds.
     if (tier === 'free' && stripe && profile.stripe_customer_id) {
       try {
-        const subs = await stripe.subscriptions.list({ customer: profile.stripe_customer_id, status: 'all', limit: 10 });
-        const live = liveSubscription(subs.data);
-        if (live) {
-          const mapped = mapStripePriceToTier(live.items?.data?.[0]?.price?.id);
-          tier = mapped === 'free' ? 'gold' : mapped;
-          status = live.status;
-          const trialEnd = live.trial_end ? new Date(live.trial_end * 1000).toISOString() : null;
-          await supabase
+        const restored = await planFromStripe(profile.stripe_customer_id);
+        if (restored) {
+          const { error: updateError } = await supabase
             .from('profiles')
-            .update({ subscription_tier: tier, subscription_status: status, trial_end: trialEnd })
+            .update({ subscription_tier: restored.tier, subscription_status: restored.status, trial_end: restored.trialEnd })
             .eq('id', user_id);
-          console.log(`🔁 [Sync Subscription] Restored ${tier} from Stripe for ${user_id}`);
+          if (updateError) {
+            console.error(`[Sync Subscription] Could not restore ${restored.tier} for ${user_id}:`, updateError.message);
+          } else {
+            tier = restored.tier;
+            status = restored.status;
+            console.log(`🔁 [Sync Subscription] Restored ${tier} from Stripe for ${user_id}`);
+          }
         }
       } catch (healErr) {
         console.error('[Sync Subscription] Stripe check failed:', healErr.message);
