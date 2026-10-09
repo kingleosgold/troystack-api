@@ -30,10 +30,11 @@ test('the block names each move, the latest Signal and the newest headlines', ()
       { title: 'Mexico silver output slips again', published_at: '2026-10-07T15:00:00Z' },
     ],
   });
-  assert.match(block, /Gold: \$4,198\.40, up \$17\.20 \(0\.41%\) since the last close/);
-  assert.match(block, /Silver: \$60\.35, up \$0\.62 \(1\.04%\) since the last close/);
-  assert.match(block, /Platinum: \$1,679\.70, down \$3\.10 \(0\.18%\) since the last close/);
-  assert.match(block, /Palladium: \$1,155\.00, change since the last close unavailable/);
+  assert.match(block, /Gold: up \$17\.20 \(0\.41%\) since the last close/);
+  assert.match(block, /Silver: up \$0\.62 \(1\.04%\) since the last close/);
+  assert.match(block, /Platinum: down \$3\.10 \(0\.18%\) since the last close/);
+  assert.match(block, /Palladium: change since the last close unavailable/);
+  assert.ok(!block.includes('4,198') && !block.includes('60.35'), "spot itself is left to the route's part of the prompt");
   assert.match(block, /YOUR LATEST STACK SIGNAL \(published Oct 8, 2026\):/);
   assert.match(block, /physical buyers in Beijing bought the dip/);
   assert.match(block, /- Mexico silver output slips again \(Oct 7, 2026\)/);
@@ -90,31 +91,50 @@ function fakeDb({ fail = false, syntheses = 0 } = {}) {
   return { calls, from: () => query() };
 }
 
-test('the block is built once and kept for five minutes', async () => {
+test('moves are read with every question, the Signal reads are kept for five minutes', async () => {
   let t = 0;
+  let spot = SPOT;
   let spotCalls = 0;
   const db = fakeDb();
-  const get = createMarketContext({ fetchSpot: async () => { spotCalls += 1; return SPOT; }, db, now: () => t });
+  const get = createMarketContext({ fetchSpot: async () => { spotCalls += 1; return spot; }, db, now: () => t });
   const first = await get();
   assert.match(first, /TODAY'S MARKET/);
   assert.match(first, /A headline that matters today/);
   assert.ok(!/- Fed minutes/.test(first), 'the synthesis is not listed again as a headline');
-  t = 4 * 60 * 1000;
-  assert.equal(await get(), first);
-  assert.equal(spotCalls, 1);
+  assert.equal(db.calls.length, 2);
+
+  // A minute later the price cron has moved silver. The next answer says so,
+  // without reading the database again.
+  t = 60 * 1000;
+  spot = { ...SPOT, change: { ...SPOT.change, silver: { amount: 0.91, percent: 1.52 } } };
+  const second = await get();
+  assert.match(second, /Silver: up \$0\.91 \(1\.52%\)/);
+  assert.equal(spotCalls, 2);
+  assert.equal(db.calls.length, 2);
+
   t = 6 * 60 * 1000;
   await get();
-  assert.equal(spotCalls, 2);
+  assert.equal(db.calls.length, 4);
 });
 
-test('failed parts are left out, and an empty block is retried soon', async () => {
+test('failed parts are left out, and an empty read is retried soon', async () => {
   let t = 0;
-  let spotCalls = 0;
-  const get = createMarketContext({ fetchSpot: async () => { spotCalls += 1; throw new Error('feed down'); }, db: fakeDb({ fail: true }), now: () => t });
+  const db = fakeDb({ fail: true });
+  const get = createMarketContext({ fetchSpot: async () => { throw new Error('feed down'); }, db, now: () => t });
   assert.equal(await get(), '');
+  t = 20 * 1000;
+  await get();
+  assert.equal(db.calls.length, 2, 'not yet');
   t = 31 * 1000;
   await get();
-  assert.equal(spotCalls, 2);
+  assert.equal(db.calls.length, 4);
+});
+
+test('the moves still come through when the database is down', async () => {
+  const get = createMarketContext({ fetchSpot: async () => SPOT, db: fakeDb({ fail: true }), now: () => 0 });
+  const block = await get();
+  assert.match(block, /Gold: up \$17\.20/);
+  assert.ok(!block.includes('STACK SIGNAL'));
 });
 
 test('headlines come through even after a run of synthesis editions', async () => {
@@ -133,7 +153,7 @@ test('questions that arrive during a refresh share it', async () => {
   const answers = Promise.all([get(), get(), get()]);
   release();
   const [a, b, c] = await answers;
-  assert.equal(spotCalls, 1);
+  assert.equal(spotCalls, 1, 'one spot read');
   assert.equal(db.calls.length, 2, 'one signal read and one headlines read');
   assert.equal(a, b);
   assert.equal(b, c);
