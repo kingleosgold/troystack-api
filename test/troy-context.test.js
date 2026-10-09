@@ -60,23 +60,29 @@ test('helpers keep words and drop long dashes', () => {
   assert.equal(usableOneLiner('Silver broke out of its range today.'), 'Silver broke out of its range today.');
 });
 
-function fakeDb({ fail = false } = {}) {
+function fakeDb({ fail = false, syntheses = 0 } = {}) {
   const calls = [];
+  // Newest first: a run of synthesis editions, then an ordinary story.
   const rows = [
+    ...Array.from({ length: syntheses }, (_, i) => ({ ...SIGNAL, title: `Edition ${i}`, is_stack_signal: true })),
     { title: 'A headline that matters today', published_at: '2026-10-08T20:00:00Z', is_stack_signal: false },
     { ...SIGNAL, is_stack_signal: true },
   ];
   function query() {
     const q = {
       filters: {},
+      orFilter: null,
       select() { return q; },
       eq(col, val) { q.filters[col] = val; return q; },
+      or(expr) { q.orFilter = expr; return q; },
       order() { return q; },
-      limit() {
+      limit(n) {
         calls.push(q.filters.is_stack_signal === true ? 'signal' : 'headlines');
         if (fail) return Promise.resolve({ data: null, error: { message: 'db down' } });
-        const data = q.filters.is_stack_signal === true ? rows.filter((r) => r.is_stack_signal) : rows;
-        return Promise.resolve({ data, error: null });
+        let data = rows;
+        if (q.filters.is_stack_signal === true) data = rows.filter((r) => r.is_stack_signal);
+        if (q.orFilter === 'is_stack_signal.is.null,is_stack_signal.eq.false') data = rows.filter((r) => !r.is_stack_signal);
+        return Promise.resolve({ data: data.slice(0, n), error: null });
       },
     };
     return q;
@@ -109,4 +115,26 @@ test('failed parts are left out, and an empty block is retried soon', async () =
   t = 31 * 1000;
   await get();
   assert.equal(spotCalls, 2);
+});
+
+test('headlines come through even after a run of synthesis editions', async () => {
+  const get = createMarketContext({ fetchSpot: async () => SPOT, db: fakeDb({ syntheses: 12 }), now: () => 0 });
+  const block = await get();
+  assert.match(block, /- A headline that matters today/);
+  assert.ok(!/- Edition/.test(block), 'syntheses are not listed as headlines');
+});
+
+test('questions that arrive during a refresh share it', async () => {
+  let spotCalls = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const db = fakeDb();
+  const get = createMarketContext({ fetchSpot: async () => { spotCalls += 1; await gate; return SPOT; }, db, now: () => 0 });
+  const answers = Promise.all([get(), get(), get()]);
+  release();
+  const [a, b, c] = await answers;
+  assert.equal(spotCalls, 1);
+  assert.equal(db.calls.length, 2, 'one signal read and one headlines read');
+  assert.equal(a, b);
+  assert.equal(b, c);
 });
