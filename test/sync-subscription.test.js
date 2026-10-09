@@ -44,6 +44,7 @@ function reset(over = {}) {
     expired: [],
   }, over);
   router.resetGoldProductCache();
+  router.resetCustomerSearchCache();
 }
 
 const fakeSupabase = {
@@ -301,11 +302,31 @@ test('a gold profile with nothing in Stripe has no web plan', async () => {
   assert.deepEqual(res.body, { plan: null, status: null, trial_end: null });
 });
 
-test('an account that never went to web checkout has no web plan and Stripe is not asked', async () => {
+test('an account that never went to web checkout has no web plan, and Stripe is searched once in ten minutes', async () => {
   reset({ profile: { subscription_tier: 'free', subscription_status: null, stripe_customer_id: null } });
-  const res = await askMyPlan('good-token');
+  let res = await askMyPlan('good-token');
   assert.deepEqual(res.body, { plan: null, status: null, trial_end: null });
-  assert.deepEqual(state.stripeCalls, []);
+  assert.deepEqual(state.stripeCalls, ['customers.search']);
+  res = await askMyPlan('good-token');
+  assert.deepEqual(res.body, { plan: null, status: null, trial_end: null });
+  assert.deepEqual(state.stripeCalls, ['customers.search'], 'the empty search is kept');
+});
+
+test("a paid web plan is found even when its customer id never reached the profile", async () => {
+  const lost = {
+    profile: { subscription_tier: 'free', subscription_status: null, stripe_customer_id: null },
+    customers: [{ id: 'cus_lost', metadata: { supabase_user_id: USER } }],
+    subscriptions: [{ id: 'sub_lost', customer: 'cus_lost', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+  };
+  reset(lost);
+  const res = await askMyPlan('good-token');
+  assert.equal(res.body.plan, 'gold');
+  assert.equal(state.updates.length, 0, 'asking never writes');
+
+  reset(lost);
+  const synced = await sync();
+  assert.equal(synced.body.subscription_tier, 'gold');
+  assert.equal(state.updates[0].stripe_customer_id, 'cus_lost', 'the profile gets its customer back');
 });
 
 test('my-plan needs the account to be signed in', async () => {
