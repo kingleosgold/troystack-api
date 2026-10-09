@@ -6,6 +6,12 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 const USER = '7b1c6c1e-1111-4a2b-9c3d-000000000001';
+const OTHER = '8c2d7d2f-2222-4b3c-8d4e-000000000002';
+// The session tokens the stand-in knows, and the account each one signs in.
+const TOKENS = new Map([
+  ['good-token', USER],
+  ['other-token', OTHER],
+]);
 
 // What the stand-ins answer, changed per test.
 const state = {
@@ -50,6 +56,8 @@ function reset(over = {}) {
     updateNoRow: false,
     // app_state values by key, where the RevenueCat webhook keeps its purchase record.
     appState: {},
+    // Promises by account that hold that account's new checkout until they settle.
+    holdCreate: {},
   }, over);
   router.resetGoldProductCache();
   router.resetCustomerSearchCache();
@@ -71,7 +79,7 @@ const appStateTable = {
 
 const fakeSupabase = {
   auth: {
-    getUser: async (token) => (token === 'good-token' ? { data: { user: { id: USER } }, error: null } : { data: { user: null }, error: { message: 'invalid JWT' } }),
+    getUser: async (token) => (TOKENS.has(token) ? { data: { user: { id: TOKENS.get(token) } }, error: null } : { data: { user: null }, error: { message: 'invalid JWT' } }),
     admin: {
       getUserById: async (id) => ({ data: { user: { id, email: 'a@example.com' } }, error: null }),
     },
@@ -218,12 +226,20 @@ fakeStripe.billingPortal = {
 fakeStripe.checkout.sessions.expire = async (id) => {
   state.stripeCalls.push('checkout.sessions.expire');
   state.expired.push(id);
+  // An expired checkout isn't open to the next list.
+  const session = state.sessions.find((x) => x.id === id);
+  if (session) session.status = 'expired';
   return { id, status: 'expired' };
 };
 fakeStripe.checkout.sessions.create = async (params) => {
   state.stripeCalls.push('checkout.sessions.create');
   state.created = params;
-  return { url: 'https://checkout.stripe.com/c/pay/test' };
+  const hold = state.holdCreate[params.client_reference_id];
+  if (hold) await hold;
+  // The new checkout is open, and the next list sees it first, like Stripe.
+  const id = `cs_opened_${state.sessions.length + 1}`;
+  state.sessions.unshift({ id, customer: params.customer, status: 'open', mode: params.mode });
+  return { id, url: 'https://checkout.stripe.com/c/pay/test' };
 };
 
 // Load the router with the stand-ins in place of the real clients.
@@ -415,10 +431,10 @@ test('my-plan answers no web plan when there is no profile row', async () => {
   assert.deepEqual(res.body, { plan: null, status: null, trial_end: null });
 });
 
-async function checkout(priceId, campaign) {
+async function checkout(priceId, campaign, { user = USER, token = 'good-token' } = {}) {
   const res = fakeRes();
   await createCheckout(
-    { headers: { authorization: 'Bearer good-token' }, body: { user_id: USER, price_id: priceId, success_url: 'https://troystack.ai/settings?session_id={CHECKOUT_SESSION_ID}', ...(campaign ? { campaign } : {}) } },
+    { headers: { authorization: `Bearer ${token}` }, body: { user_id: user, price_id: priceId, success_url: 'https://troystack.ai/settings?session_id={CHECKOUT_SESSION_ID}', ...(campaign ? { campaign } : {}) } },
     res,
   );
   return res;
@@ -1055,4 +1071,81 @@ test('a web subscription that ends leaves an App Store plan that still runs', as
   reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: null, stripe_customer_id: 'cus_1', subscription_expires_at: new Date(Date.now() - 86400000).toISOString() } });
   await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(subscriptionEvent('customer.subscription.deleted', 'canceled'))) }, webhookRes());
   assert.equal(state.updates[0].subscription_tier, 'free');
+});
+
+async function openPortal() {
+  const res = fakeRes();
+  await portalHandler({ headers: { authorization: 'Bearer good-token' }, body: { user_id: USER, return_url: 'https://troystack.ai/settings' } }, res);
+  return res;
+}
+
+test('the billing page opens for a profile with no customer id when the search finds its customer', async () => {
+  reset({
+    profile: { stripe_customer_id: null },
+    customers: [{ id: 'cus_old', metadata: { supabase_user_id: USER } }],
+    subscriptions: [{ id: 'sub_old', customer: 'cus_old', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+  });
+  const res = await openPortal();
+  assert.equal(res.statusCode, 200);
+  assert.ok(state.stripeCalls.includes('customers.search'));
+  assert.equal(state.portal.customer, 'cus_old');
+});
+
+test('the billing page still answers 404 when the profile has no customer id and the search finds none', async () => {
+  // A profile with no customer id, and no profile row at all.
+  for (const profile of [{ stripe_customer_id: null }, null]) {
+    reset({ profile });
+    const res = await openPortal();
+    assert.equal(res.statusCode, 404, JSON.stringify(profile));
+    assert.deepEqual(res.body, { error: 'No Stripe customer found for this user' });
+    assert.ok(state.stripeCalls.includes('customers.search'));
+    assert.ok(!state.stripeCalls.includes('billingPortal.sessions.create'));
+  }
+
+  // A search that fails isn't an answer that there's none.
+  reset({ profile: { stripe_customer_id: null }, searchFails: true });
+  const res = await openPortal();
+  assert.equal(res.statusCode, 500);
+  assert.ok(!state.stripeCalls.includes('billingPortal.sessions.create'));
+});
+
+test('two checkouts at once for one account open one after the other, and the first is closed before the second opens', async () => {
+  reset({ profile: { stripe_customer_id: 'cus_1' } });
+  const [first, second] = await Promise.all([checkout('price_gold_monthly'), checkout('price_gold_yearly')]);
+  assert.equal(first.statusCode, 200);
+  assert.equal(second.statusCode, 200);
+  const creates = state.stripeCalls.flatMap((call, i) => (call === 'checkout.sessions.create' ? [i] : []));
+  const expire = state.stripeCalls.indexOf('checkout.sessions.expire');
+  assert.equal(creates.length, 2);
+  assert.deepEqual(state.expired, ['cs_opened_1'], "the second request closed the first one's checkout");
+  assert.ok(creates[0] < expire && expire < creates[1], 'closed after the first opened and before the second opened');
+});
+
+test("checkouts for two different accounts don't wait on each other", async () => {
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  // The stand-in's one profile row answers for both accounts.
+  reset({ profile: { stripe_customer_id: 'cus_1' }, holdCreate: { [USER]: held } });
+  const first = checkout('price_gold_monthly');
+  let timer;
+  try {
+    // The first account's checkout gets as far as Stripe and is held there.
+    // The stand-ins answer at once, so waiting a step at a time is enough.
+    for (let i = 0; i < 1000 && !state.stripeCalls.includes('checkout.sessions.create'); i += 1) {
+      await null;
+    }
+    assert.ok(state.stripeCalls.includes('checkout.sessions.create'));
+    const second = checkout('price_gold_monthly', null, { user: OTHER, token: 'other-token' });
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve('timed out'), 1000);
+    });
+    assert.equal(await Promise.race([second.then(() => 'finished'), timeout]), 'finished');
+    assert.equal((await second).statusCode, 200);
+  } finally {
+    clearTimeout(timer);
+    release();
+  }
+  assert.equal((await first).statusCode, 200);
 });
