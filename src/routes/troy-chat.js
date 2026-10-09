@@ -5,6 +5,7 @@ const { PassThrough } = require('node:stream');
 const supabase = require('../lib/supabase');
 const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
 const { getTopIntelligence } = require('../services/intelligence-scraper');
+const { sharedMarketBlock } = require('../services/troy-context');
 const { getTTSProvider, getSTTProvider } = require('../services/voice-providers');
 const ttsCache = require('../services/tts-cache');
 const troyLlm = require('../services/troy-llm');
@@ -560,6 +561,15 @@ router.post('/conversations/:id/messages', async (req, res) => {
         return `${m.charAt(0).toUpperCase() + m.slice(1)}: ${v.oz.toFixed(2)} oz, Value $${val.toFixed(2)}, Cost $${v.cost.toFixed(2)}, ${gl >= 0 ? '+' : ''}$${gl.toFixed(2)}`;
       }).join('\n');
 
+    // The day's moves, Troy's latest Stack Signal and the newest headlines, so
+    // he can say what moved metals, the same as on troystack.ai.
+    let marketBlock = '';
+    try {
+      marketBlock = (await sharedMarketBlock()) || '';
+    } catch (marketErr) {
+      console.log(`[Troy Chat] Market context error (non-fatal): ${marketErr.message}`);
+    }
+
     // Fetch community intelligence (YouTube, X, Reddit) for context injection
     let communityIntel = '';
     try {
@@ -610,7 +620,7 @@ Reference these community discussions naturally when relevant — "Schiff pointe
       message,
       prompt: {
         persona: promptPersona,
-        stack: promptStack,
+        stack: promptStack + marketBlock,
         knowledge: promptKnowledge,
         community: promptCommunity,
       },
