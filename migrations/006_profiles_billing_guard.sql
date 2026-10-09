@@ -20,6 +20,14 @@
 -- deployed. It applies the one-time lifetime purchase and answers 500 on a
 -- failed write so RevenueCat retries. The old handler did neither, and with
 -- the app's own writes blocked a new App Store lifetime buyer would stay free.
+--
+-- And run it only once POST /v1/revenuecat/sync is live with
+-- REVENUECAT_SECRET_KEY set, and the app version that calls it after
+-- Purchases.logIn and after a restore is the one people have. A purchase made
+-- as a guest, or moved to another account by a restore, reaches no webhook
+-- under the account's id, so until the app calls the sync, its own profile
+-- write is the only way such a purchase reaches profiles, and this guard
+-- blocks that write.
 
 create or replace function public.profiles_keep_plan()
 returns trigger
