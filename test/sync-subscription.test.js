@@ -32,7 +32,11 @@ function reset(over = {}) {
     profileError: null,
     stripeCalls: [],
     created: undefined,
+    priceFails: false,
+    subscriptionById: {},
+    sessionToVerify: null,
   }, over);
+  router.resetGoldProductCache();
 }
 
 const fakeSupabase = {
@@ -85,13 +89,26 @@ const fakeStripe = {
     },
   },
   prices: {
-    // The Gold prices sit on one product. Anything named other is elsewhere.
+    // The Gold prices sit on one product. Anything named other is elsewhere,
+    // and anything named once is a one-time price.
     retrieve: async (id) => {
       state.stripeCalls.push('prices.retrieve');
       if (id === 'price_missing') throw new Error('No such price');
-      return { id, product: id.includes('other') ? 'prod_other' : 'prod_gold' };
+      if (state.priceFails) throw new Error('Stripe is having a moment');
+      return { id, product: id.includes('other') ? 'prod_other' : 'prod_gold', type: id.includes('once') ? 'one_time' : 'recurring' };
     },
   },
+  webhooks: {
+    constructEvent: (body) => JSON.parse(Buffer.isBuffer(body) ? body.toString('utf8') : body),
+  },
+};
+fakeStripe.subscriptions.retrieve = async (id) => {
+  state.stripeCalls.push('subscriptions.retrieve');
+  return state.subscriptionById[id];
+};
+fakeStripe.checkout.sessions.retrieve = async () => {
+  state.stripeCalls.push('checkout.sessions.retrieve');
+  return state.sessionToVerify;
 };
 fakeStripe.checkout.sessions.create = async (params) => {
   state.stripeCalls.push('checkout.sessions.create');
@@ -111,6 +128,7 @@ const routeHandler = (p) => router.stack.find((l) => l.route && l.route.path ===
 const handler = routeHandler('/sync-subscription');
 const myPlan = routeHandler('/my-plan');
 const createCheckout = routeHandler('/create-checkout-session');
+const verifySession = routeHandler('/verify-session');
 
 function fakeRes() {
   return {
@@ -290,4 +308,81 @@ test('checkout sells Gold prices and turns away anything else', async () => {
 
   reset({ profile: { email: 'a@example.com', stripe_customer_id: 'cus_1' } });
   assert.equal((await checkout('price_missing')).statusCode, 400);
+});
+
+test('when a Gold price cannot be read, my-plan says it could not check', async () => {
+  reset({
+    profile: { subscription_tier: 'free', subscription_status: null, stripe_customer_id: 'cus_1' },
+    subscriptions: [{ status: 'active', items: { data: [{ price: { id: 'price_2025_monthly', product: 'prod_gold' } }] } }],
+    priceFails: true,
+  });
+  const res = await askMyPlan('good-token');
+  assert.equal(res.statusCode, 500);
+  // and the repair leaves the profile alone rather than answering from half a list
+  const synced = await sync();
+  assert.equal(synced.body.subscription_tier, 'free');
+  assert.equal(state.updates.length, 0);
+});
+
+test('checkout sells another Gold-product price as Gold, or as lifetime when it is one-time', async () => {
+  reset({ profile: { email: 'a@example.com', stripe_customer_id: 'cus_1' } });
+  const promo = await checkout('price_gold_promo');
+  assert.equal(promo.statusCode, 200);
+  assert.equal(state.created.mode, 'subscription');
+  assert.equal(state.created.metadata.tier, 'gold');
+
+  reset({ profile: { email: 'a@example.com', stripe_customer_id: 'cus_1' } });
+  const once = await checkout('price_gold_once_promo');
+  assert.equal(once.statusCode, 200);
+  assert.equal(state.created.mode, 'payment');
+  assert.equal(state.created.metadata.tier, 'lifetime');
+  assert.equal(state.created.subscription_data, undefined);
+});
+
+test('the checkout webhook records a Gold-product price as Gold', async () => {
+  reset({
+    subscriptionById: { sub_1: { status: 'trialing', trial_end: 1760000000, items: { data: [{ price: { id: 'price_gold_promo', product: 'prod_gold' } }] } } },
+  });
+  const event = {
+    type: 'checkout.session.completed',
+    data: { object: { client_reference_id: USER, subscription: 'sub_1', customer: 'cus_1', metadata: { user_id: USER, tier: 'gold' } } },
+  };
+  const res = fakeRes();
+  res.send = function send(body) {
+    this.body = body;
+    return this;
+  };
+  await router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(event)) }, res);
+  assert.equal(state.updates.length, 1);
+  assert.equal(state.updates[0].subscription_tier, 'gold');
+  assert.equal(state.updates[0].subscription_status, 'trialing');
+});
+
+test('verify-session records a Gold-product price as Gold and anything else as free', async () => {
+  reset({
+    sessionToVerify: {
+      client_reference_id: USER,
+      customer: 'cus_1',
+      payment_status: 'no_payment_required',
+      metadata: { user_id: USER, tier: 'gold' },
+      subscription: { status: 'trialing', trial_end: 1760000000, items: { data: [{ price: { id: 'price_gold_promo', product: 'prod_gold' } }] } },
+    },
+  });
+  let res = fakeRes();
+  await verifySession({ body: { session_id: 'cs_1' } }, res);
+  assert.equal(res.body.tier, 'gold');
+  assert.equal(state.updates[0].subscription_tier, 'gold');
+
+  reset({
+    sessionToVerify: {
+      client_reference_id: USER,
+      customer: 'cus_1',
+      payment_status: 'no_payment_required',
+      metadata: { user_id: USER, tier: 'gold' },
+      subscription: { status: 'active', items: { data: [{ price: { id: 'price_other', product: 'prod_other' } }] } },
+    },
+  });
+  res = fakeRes();
+  await verifySession({ body: { session_id: 'cs_2' } }, res);
+  assert.equal(res.body.tier, 'free');
 });
