@@ -199,14 +199,34 @@ async function customersFor(userId, profileCustomerId, { strict = false } = {}) 
   return ids;
 }
 
+// Accounts whose profile has no customer and whose search found none, kept
+// ten minutes, so asking about a free account again doesn't search Stripe
+// every time.
+const NO_CUSTOMER_TTL_MS = 10 * 60 * 1000;
+const noCustomerSeen = new Map();
+// For tests. Set on the router, which is what this module exports.
+router.resetCustomerSearchCache = () => noCustomerSeen.clear();
+
 // What Stripe holds for an account across all its customers. Lifetime on any
-// of them wins, then the first live Gold subscription. Only asked when the
-// profile has a customer, since an account that never reached web checkout
-// has nothing in Stripe.
+// of them wins, then the first live Gold subscription. A profile with no
+// customer can still have one, when an older checkout's id never reached the
+// profile, so the account's customers are searched for it too.
 async function planForUser(userId, profileCustomerId) {
-  if (!profileCustomerId) return null;
+  let customers;
+  if (profileCustomerId) {
+    customers = await customersFor(userId, profileCustomerId, { strict: true });
+  } else {
+    const seen = noCustomerSeen.get(userId);
+    if (seen && Date.now() - seen < NO_CUSTOMER_TTL_MS) return null;
+    customers = await customersFor(userId, null, { strict: true });
+    if (customers.length === 0) {
+      if (noCustomerSeen.size > 10000) noCustomerSeen.clear();
+      noCustomerSeen.set(userId, Date.now());
+      return null;
+    }
+  }
   let found = null;
-  for (const customerId of await customersFor(userId, profileCustomerId, { strict: true })) {
+  for (const customerId of customers) {
     const plan = await planFromStripe(customerId);
     if (plan?.tier === 'lifetime') return { ...plan, customerId };
     if (plan && !found) found = { ...plan, customerId };
@@ -843,9 +863,7 @@ router.get('/my-plan', async (req, res) => {
       console.error('❌ [Stripe] my-plan profile lookup failed:', error.message);
       return res.status(503).json({ error: 'Could not check the web plan' });
     }
-    if (!profile?.stripe_customer_id) return res.json({ plan: null, status: null, trial_end: null });
-
-    const found = await planForUser(auth.userId, profile.stripe_customer_id);
+    const found = await planForUser(auth.userId, profile?.stripe_customer_id || null);
     if (!found) return res.json({ plan: null, status: null, trial_end: null });
     return res.json({ plan: found.tier, status: found.status, trial_end: found.trialEnd });
   } catch (error) {
@@ -881,13 +899,19 @@ router.get('/sync-subscription', async (req, res) => {
     // paid for on the web. Stripe is the record for web plans, so a free
     // profile with a live subscription or a paid lifetime purchase gets it
     // back here. The answer only changes once the profile update succeeds.
-    if (tier === 'free' && stripe && profile.stripe_customer_id) {
+    if (tier === 'free' && stripe) {
       try {
-        const restored = await planForUser(user_id, profile.stripe_customer_id);
+        const restored = await planForUser(user_id, profile.stripe_customer_id || null);
         if (restored) {
+          // A profile that lost its customer id gets back the one holding the plan.
           const { error: updateError } = await supabase
             .from('profiles')
-            .update({ subscription_tier: restored.tier, subscription_status: restored.status, trial_end: restored.trialEnd })
+            .update({
+              subscription_tier: restored.tier,
+              subscription_status: restored.status,
+              trial_end: restored.trialEnd,
+              ...(profile.stripe_customer_id ? {} : { stripe_customer_id: restored.customerId }),
+            })
             .eq('id', user_id);
           if (updateError) {
             console.error(`[Sync Subscription] Could not restore ${restored.tier} for ${user_id}:`, updateError.message);

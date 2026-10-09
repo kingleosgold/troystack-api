@@ -47,6 +47,8 @@ const GRANTS = new Set([
   'UNCANCELLATION',
   'NON_RENEWING_PURCHASE',
   'SUBSCRIPTION_EXTENDED',
+  // Apple reversed a refund, so what was refunded is owned again.
+  'REFUND_REVERSED',
 ]);
 
 // RevenueCat grants up to a day of access when it can't validate a purchase
@@ -126,6 +128,10 @@ async function applyEvent(event) {
 
   if (GRANTS.has(type)) {
     if (tier === 'free') return { skipped: 'unknown_product' };
+    // A refund reversed after the subscription's period ran out gives nothing back.
+    if (type === 'REFUND_REVERSED' && tier !== 'lifetime' && expires && Date.parse(expires) <= Date.now()) {
+      return { skipped: 'already_expired' };
+    }
     const profile = await readProfile(id);
     if (!profile) return { skipped: 'no_profile' };
     // A subscription bought after lifetime doesn't replace it.
