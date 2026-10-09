@@ -428,6 +428,33 @@ router.post('/customer-portal', async (req, res) => {
   }
 });
 
+// GET /v1/stripe/my-plan
+// The web plan Stripe holds for the signed-in account. A plan bought on
+// troystack.ai lives in Stripe, not RevenueCat, so the iPhone app asks here
+// before it treats an account with no App Store plan as free. Answers
+// { plan: 'gold' | 'lifetime' | null, status, trial_end }.
+router.get('/my-plan', async (req, res) => {
+  try {
+    const auth = await signedInUserId(req, supabase);
+    if (auth.error) return res.status(auth.status).json({ error: auth.error });
+    if (!stripe) return res.json({ plan: null, status: null, trial_end: null });
+
+    const { data: profile, error } = await supabase
+      .from('profiles')
+      .select('stripe_customer_id')
+      .eq('id', auth.userId)
+      .single();
+    if (error || !profile?.stripe_customer_id) return res.json({ plan: null, status: null, trial_end: null });
+
+    const found = await planFromStripe(profile.stripe_customer_id);
+    if (!found) return res.json({ plan: null, status: null, trial_end: null });
+    return res.json({ plan: found.tier, status: found.status, trial_end: found.trialEnd });
+  } catch (error) {
+    console.error('❌ [Stripe] my-plan error:', error.message);
+    return res.status(500).json({ error: 'Could not check the web plan' });
+  }
+});
+
 // GET /sync-subscription?user_id=xxx — mounted at /v1 in index.js
 router.get('/sync-subscription', async (req, res) => {
   try {
