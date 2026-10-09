@@ -157,6 +157,30 @@ async function getRecentFeed(hours = 24) {
 }
 
 /**
+ * Which of these links a saved article already lists in its sources, looked
+ * up across the whole table. The RSS fetch only checks the last week, and a
+ * feed can re-date an old item so it looks new. Each link is its own small
+ * query, so the pipeline only asks about the few headed for scoring. A failed
+ * lookup throws.
+ */
+async function findWrittenLinks(links) {
+  const unique = [...new Set(links.filter(Boolean))];
+  const found = await Promise.all(unique.map(async url => {
+    // sources is jsonb. Handed an array, the client writes a Postgres array
+    // like {a,b}, which isn't JSON and fails, so the value goes as JSON text.
+    const { data, error } = await supabase
+      .from('stack_signal_articles')
+      .select('id')
+      .contains('sources', JSON.stringify([{ url }]))
+      .limit(1);
+
+    if (error) throw new Error(`Could not look up written links: ${error.message}`);
+    return data?.length ? url : null;
+  }));
+  return new Set(found.filter(Boolean));
+}
+
+/**
  * Check if we can generate another DALL-E image today (hard cap via app_state).
  * The value column is JSONB — access as object, not string.
  */
@@ -1453,9 +1477,34 @@ async function runPipelineOnce() {
       return { articles: rawArticles.length, scored: 0, clusters: 0, synthesized: 0, saved: 0 };
     }
 
+    // The fetch only checks the last week of articles, and a feed can re-date
+    // an old item so it looks new. Look up the ones headed for scoring across
+    // the whole table and drop any already written up. They sit out a day like
+    // other passed links, and nothing takes their place this run. Only these
+    // few get looked up, so it stays cheap. A failed lookup stops the run,
+    // since scoring blind could repeat a story.
+    let written;
+    try {
+      written = await findWrittenLinks(articlesToProcess.map(a => a.link));
+    } catch (err) {
+      console.log(`[Pipeline] ${err.message}, stopping before scoring`);
+      return { articles: rawArticles.length, scored: 0, clusters: 0, synthesized: 0, saved: 0 };
+    }
+
+    const toScore = articlesToProcess.filter(a => !written.has(a.link));
+    if (written.size) {
+      console.log(`[Pipeline] Left out ${articlesToProcess.length - toScore.length} articles already written up, they sit out a day`);
+      await rememberPassedLinks([...written], now);
+    }
+
+    if (!toScore.length) {
+      console.log('[Pipeline] Every article headed for scoring was already written up. Pipeline complete.');
+      return { articles: rawArticles.length, scored: 0, clusters: 0, synthesized: 0, saved: 0 };
+    }
+
     // Phase 1: Score with Gemini (detailed scoring on the filtered set)
     console.log('\n[Pipeline] Phase 1: Scoring articles...');
-    const scoredArticles = await scoreArticles(articlesToProcess);
+    const scoredArticles = await scoreArticles(toScore);
 
     // Phase 2: Cluster by theme, against what the feed ran in the last 24 hours
     console.log('\n[Pipeline] Phase 2: Clustering articles by theme...');
@@ -1620,4 +1669,5 @@ module.exports = {
   sanitizeTweetText,
   parseJsonObject,
   generateArticleMetadata,
+  findWrittenLinks,
 };

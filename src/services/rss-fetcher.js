@@ -227,7 +227,10 @@ async function fetchNewArticles() {
   // table hit the API's 1,000-row cap, in no set order, so links already
   // written up came back as new. Only items from the last 24 hours are kept
   // below, so a week of articles covers them with room for feeds that re-date
-  // an item or leave the date off, and it's well under the cap.
+  // an item or leave the date off, and it's well under the cap. An item
+  // re-dated more than a week after it was written up gets past this, so the
+  // pipeline looks up the few it's about to score across the whole table
+  // (findWrittenLinks in stack-signal-processor.js).
   let existingUrls = new Set();
   let existingTitles = new Set();
   try {
