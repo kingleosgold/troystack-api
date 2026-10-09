@@ -50,6 +50,13 @@ function fakeSupabase(rows, opts = {}) {
     writes,
     state,
     stateWrites,
+    // Session tokens and the account each signs in, from opts.users.
+    auth: {
+      async getUser(token) {
+        const id = opts.users?.[token];
+        return id ? { data: { user: { id } }, error: null } : { data: { user: null }, error: { message: 'invalid JWT' } };
+      },
+    },
     from(table) {
       if (table === 'app_state') return appState();
       assert.strictEqual(table, 'profiles');
@@ -108,6 +115,82 @@ async function send(handler, event, { auth = `Bearer ${SECRET}` } = {}) {
   await handler({ headers: auth == null ? {} : { authorization: auth }, body: { event } }, res);
   return res;
 }
+
+const OTHER = '8c2d7d2f-2222-4b3c-8d4e-000000000002';
+// A stand-in for the RevenueCat REST key. It must never show up in a log or
+// an answer.
+const REST_KEY = 'rc-rest-test-key';
+
+// Sets environment variables for the length of fn, and puts them back after.
+// A value of null or undefined unsets the variable.
+async function withEnv(vars, fn) {
+  const before = {};
+  for (const [name, value] of Object.entries(vars)) {
+    before[name] = process.env[name];
+    if (value == null) delete process.env[name];
+    else process.env[name] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [name, value] of Object.entries(before)) {
+      if (value == null) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+// RevenueCat's REST API as a stand-in: subscribers by app user id, an answer
+// status, and the requests it was sent. An id it doesn't know has bought
+// nothing.
+function revenueCatApi(subscribers = {}, { status = 200 } = {}) {
+  const calls = [];
+  async function fetch(url, init = {}) {
+    calls.push({ url: String(url), authorization: init.headers?.Authorization });
+    const id = decodeURIComponent(String(url).split('/subscribers/')[1] || '');
+    const subscriber = subscribers[id] || { subscriptions: {}, non_subscriptions: {} };
+    return { ok: status >= 200 && status < 300, status, json: async () => ({ subscriber }) };
+  }
+  return { calls, fetch };
+}
+
+// Runs fn with the REST key set and the stand-in answering in place of fetch.
+async function withRevenueCatApi(api, fn) {
+  const before = global.fetch;
+  global.fetch = api.fetch;
+  try {
+    return await withEnv({ REVENUECAT_SECRET_KEY: REST_KEY }, fn);
+  } finally {
+    global.fetch = before;
+  }
+}
+
+// Everything fn writes to the console, as lines, with the console kept quiet.
+async function captureLogs(fn) {
+  const lines = [];
+  const before = { log: console.log, warn: console.warn, error: console.error };
+  for (const name of Object.keys(before)) console[name] = (...args) => lines.push(args.map(String).join(' '));
+  try {
+    await fn();
+  } finally {
+    Object.assign(console, before);
+  }
+  return lines;
+}
+
+// Calls the sync route as the app would, with a session token or none.
+async function syncAs(handler, token) {
+  const res = {
+    code: 200,
+    body: null,
+    status(c) { res.code = c; return res; },
+    json(b) { res.body = b; return res; },
+  };
+  await handler({ headers: token ? { authorization: `Bearer ${token}` } : {} }, res);
+  return res;
+}
+
+const inDays = (days) => new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 
 function withSecret(value, fn) {
   return async () => {
@@ -361,7 +444,8 @@ test('a profile with no customer id still has Stripe asked, with a null customer
 test("a temporary grant during a store outage gives Gold for a day, then the real purchase or the expiry decides", withSecret(SECRET, async () => {
   const at = Date.UTC(2026, 9, 9, 12);
   const rows = { [USER]: { subscription_tier: 'free', subscription_status: null, subscription_expires_at: null, stripe_customer_id: null } };
-  const { revenueCatWebhookHandler } = loadHandler(fakeSupabase(rows));
+  const db = fakeSupabase(rows);
+  const { revenueCatWebhookHandler } = loadHandler(db);
   // The grant names no product.
   let res = await send(revenueCatWebhookHandler, { type: 'TEMPORARY_ENTITLEMENT_GRANT', app_user_id: USER, store: 'APP_STORE', event_timestamp_ms: at });
   assert.strictEqual(res.code, 200);
@@ -375,8 +459,10 @@ test("a temporary grant during a store outage gives Gold for a day, then the rea
   assert.strictEqual(rows[USER].subscription_status, 'active');
 
   // Another account's grant fails validation, and the expiry ends it even
-  // though it names the lifetime product.
+  // though it names the lifetime product. That account has no purchase on
+  // record, so the lifetime purchase above is taken off it.
   rows[USER] = { subscription_tier: 'free', subscription_status: null, subscription_expires_at: null, stripe_customer_id: null };
+  delete db.state[`revenuecat_grant:${USER}`];
   await send(revenueCatWebhookHandler, { type: 'TEMPORARY_ENTITLEMENT_GRANT', app_user_id: USER, store: 'APP_STORE', event_timestamp_ms: at });
   res = await send(revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'stacktracker_lifetime' });
   assert.strictEqual(res.body.temporary, true);
@@ -454,7 +540,7 @@ test('a refund of the current period still ends it, though its expiry reads as t
   const db = fakeSupabase(rows);
   const { revenueCatWebhookHandler } = loadHandler(db);
   await send(revenueCatWebhookHandler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: bought, expiration_at_ms: bought + 30 * DAY });
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought, subscriptionUntil: bought + 30 * DAY });
 
   const res = await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'monthly', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: bought, expiration_at_ms: refundedAt });
   assert.strictEqual(res.code, 200);
@@ -471,20 +557,21 @@ test('grants record their purchase time, and a late older grant leaves a newer r
   const first = Date.now() - DAY;
   const second = first + 30 * DAY;
   await send(revenueCatWebhookHandler, { type: 'INITIAL_PURCHASE', app_user_id: USER, product_id: 'monthly', purchased_at_ms: first, expiration_at_ms: second });
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: first });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: first, subscriptionUntil: second });
   await send(revenueCatWebhookHandler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: second, expiration_at_ms: second + 30 * DAY });
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: second });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: second, subscriptionUntil: second + 30 * DAY });
 
   // The first purchase's event comes again on a retry.
   const res = await send(revenueCatWebhookHandler, { type: 'INITIAL_PURCHASE', app_user_id: USER, product_id: 'monthly', purchased_at_ms: first, expiration_at_ms: second });
   assert.strictEqual(res.code, 200);
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: second });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: second, subscriptionUntil: second + 30 * DAY });
 
-  // A grant without a purchase time leaves the record as it is.
+  // A grant without a purchase time changes no purchase time on record, and
+  // this one's expiry is the one already there.
   await send(revenueCatWebhookHandler, { type: 'UNCANCELLATION', app_user_id: USER, product_id: 'monthly', expiration_at_ms: second + 30 * DAY });
   assert.deepStrictEqual(db.stateWrites, [
-    { key: GRANT_KEY, value: { purchasedAt: first } },
-    { key: GRANT_KEY, value: { purchasedAt: second } },
+    { key: GRANT_KEY, value: { purchasedAt: first, subscriptionUntil: second } },
+    { key: GRANT_KEY, value: { purchasedAt: second, subscriptionUntil: second + 30 * DAY } },
   ]);
 }));
 
@@ -507,7 +594,7 @@ test("a purchase record that can't be read or written answers 500 so RevenueCat 
     const retry = await send(revenueCatWebhookHandler, purchase);
     assert.strictEqual(retry.code, 200, fail);
     assert.strictEqual(rows[USER].subscription_tier, 'gold', fail);
-    assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: at }, fail);
+    assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: at, subscriptionUntil: at + 30 * DAY }, fail);
   }
 
   // A refund whose record can't be read ends nothing until it can be.
@@ -576,7 +663,7 @@ test('a grant sent again after its purchase was refunded gives nothing back, and
   const res = await send(revenueCatWebhookHandler, { ...purchase, type: 'RENEWAL', purchased_at_ms: again, expiration_at_ms: again + 30 * DAY });
   assert.strictEqual(res.body.tier, 'gold');
   assert.strictEqual(rows[USER].subscription_expires_at, new Date(again + 30 * DAY).toISOString());
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: again, endedAt: bought });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: again, endedAt: bought, subscriptionUntil: again + 30 * DAY });
 }));
 
 test('a purchase that lands after its own refund gives nothing back', withSecret(SECRET, async () => {
@@ -611,7 +698,7 @@ test('a reversed refund gives the refunded purchase back and clears its end, so 
   assert.strictEqual(res.body.tier, 'gold');
   assert.strictEqual(rows[USER].subscription_tier, 'gold');
   assert.strictEqual(rows[USER].subscription_expires_at, new Date(until).toISOString());
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought, subscriptionUntil: until });
 
   // Turning auto-renew back on applies as it would have before the refund.
   const uncancel = await send(revenueCatWebhookHandler, { ...purchase, type: 'UNCANCELLATION' });
@@ -628,7 +715,7 @@ test('a reversed refund leaves the end of a later refunded purchase in place', w
   const { revenueCatWebhookHandler } = loadHandler(db);
   const res = await send(revenueCatWebhookHandler, { type: 'REFUND_REVERSED', app_user_id: USER, product_id: 'monthly', purchased_at_ms: first, expiration_at_ms: first + 30 * DAY });
   assert.strictEqual(res.body.tier, 'gold');
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: later, endedAt: later });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: later, endedAt: later, subscriptionUntil: first + 30 * DAY });
 
   // The later purchase's grant sent again still gives nothing.
   const retried = await send(revenueCatWebhookHandler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: later, expiration_at_ms: later + 30 * DAY });
@@ -672,8 +759,9 @@ test('a lifetime refund records its end, and the lifetime purchase sent again gi
 
 test("a refund whose end can't be recorded answers 500 so RevenueCat sends it again", withSecret(SECRET, async () => {
   const bought = Date.now() - 2 * DAY;
-  // A lifetime refund reads the record only to record its end, after the
-  // profile write, so a read that fails there counts the same way.
+  // A lifetime refund reads the record before the profile write, to see
+  // whether an App Store subscription still runs, so a read that fails there
+  // changes nothing yet.
   for (const [product, tier, fail] of [['monthly', 'gold', 'failStateWrite'], ['lifetime_gold', 'lifetime', 'failStateRead']]) {
     const rows = { [USER]: { ...freeRow(), subscription_tier: tier } };
     const opts = { [fail]: true, state: { [GRANT_KEY]: { purchasedAt: bought } } };
@@ -682,7 +770,7 @@ test("a refund whose end can't be recorded answers 500 so RevenueCat sends it ag
     const refund = { type: 'CANCELLATION', app_user_id: USER, product_id: product, cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: bought };
     const res = await send(revenueCatWebhookHandler, refund);
     assert.strictEqual(res.code, 500, fail);
-    assert.strictEqual(rows[USER].subscription_tier, 'free', `${fail}: the profile write came first`);
+    assert.strictEqual(rows[USER].subscription_tier, fail === 'failStateRead' ? tier : 'free', fail);
     assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought }, fail);
 
     // The retry repeats the profile write, which does no harm, and records the end.
@@ -717,7 +805,7 @@ test('an older RENEWAL sent again after a newer one changes nothing', withSecret
   assert.strictEqual(rows[USER].subscription_expires_at, new Date(olderEnd + 30 * DAY).toISOString(), 'the expiry stays where the newer month put it');
   assert.strictEqual(db.writes.length, profileWrites, 'no profile write');
   assert.strictEqual(db.stateWrites.length, recordWrites, 'no record write');
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: newer.purchased_at_ms });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: newer.purchased_at_ms, subscriptionUntil: olderEnd + 30 * DAY });
 }));
 
 test('a lifetime grant older than the purchase on record still applies', withSecret(SECRET, async () => {
@@ -735,7 +823,7 @@ test('a lifetime grant older than the purchase on record still applies', withSec
     assert.strictEqual(res.body.tier, 'lifetime', event.type);
     assert.strictEqual(rows[USER].subscription_tier, 'lifetime', event.type);
     assert.strictEqual(rows[USER].subscription_expires_at, null, event.type);
-    assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: newer }, `${event.type}: the newer purchase stays on record`);
+    assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: newer, lifetime: true }, `${event.type}: the newer purchase stays on record`);
   }
 }));
 
@@ -746,7 +834,7 @@ test('a grant with the same purchase time as the record still applies', withSecr
   const db = fakeSupabase(rows);
   const { revenueCatWebhookHandler } = loadHandler(db);
   await send(revenueCatWebhookHandler, { ...period, type: 'RENEWAL' });
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: renewed });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: renewed, subscriptionUntil: renewed + 30 * DAY });
 
   // Turning auto-renew back on, then Apple extending the same period.
   const uncancel = await send(revenueCatWebhookHandler, { ...period, type: 'UNCANCELLATION' });
@@ -754,4 +842,235 @@ test('a grant with the same purchase time as the record still applies', withSecr
   const extended = await send(revenueCatWebhookHandler, { ...period, type: 'SUBSCRIPTION_EXTENDED', expiration_at_ms: renewed + 37 * DAY });
   assert.strictEqual(extended.body.tier, 'gold');
   assert.strictEqual(rows[USER].subscription_expires_at, new Date(renewed + 37 * DAY).toISOString());
+}));
+
+test('a sandbox lifetime purchase applies only for an account listed in REVENUECAT_SANDBOX_LIFETIME_USERS', withSecret(SECRET, async () => {
+  const purchase = { type: 'NON_RENEWING_PURCHASE', app_user_id: USER, product_id: 'lifetime_gold', environment: 'SANDBOX', purchased_at_ms: Date.now() - DAY };
+  for (const listed of [undefined, OTHER]) {
+    const rows = { [USER]: freeRow() };
+    const db = fakeSupabase(rows);
+    const { revenueCatWebhookHandler } = loadHandler(db);
+    let res;
+    const logs = await captureLogs(() => withEnv({ REVENUECAT_SANDBOX_LIFETIME_USERS: listed }, async () => {
+      res = await send(revenueCatWebhookHandler, purchase);
+    }));
+    assert.strictEqual(res.code, 200, String(listed));
+    assert.strictEqual(res.body.skipped, 'sandbox_lifetime', String(listed));
+    assert.deepStrictEqual(rows[USER], freeRow(), String(listed));
+    assert.deepStrictEqual(db.writes, [], String(listed));
+    assert.deepStrictEqual(db.stateWrites, [], String(listed));
+    assert.ok(logs.some((line) => line.includes('REVENUECAT_SANDBOX_LIFETIME_USERS')), 'the skip is logged with what would allow it');
+  }
+
+  // Listed, with others and spaces around it, the purchase applies.
+  const rows = { [USER]: freeRow() };
+  const { revenueCatWebhookHandler } = loadHandler(fakeSupabase(rows));
+  await withEnv({ REVENUECAT_SANDBOX_LIFETIME_USERS: `${OTHER}, ${USER}` }, async () => {
+    const res = await send(revenueCatWebhookHandler, purchase);
+    assert.strictEqual(res.body.tier, 'lifetime');
+  });
+  assert.strictEqual(rows[USER].subscription_tier, 'lifetime');
+
+  // A sandbox subscription still applies for anyone, since it runs out on its own.
+  const subscriber = { [USER]: freeRow() };
+  const sub = loadHandler(fakeSupabase(subscriber));
+  const res = await send(sub.revenueCatWebhookHandler, { type: 'INITIAL_PURCHASE', app_user_id: USER, product_id: 'monthly', environment: 'SANDBOX', expiration_at_ms: Date.now() + 5 * 60 * 1000 });
+  assert.strictEqual(res.body.tier, 'gold');
+}));
+
+test("a sandbox lifetime refund ends nothing for an account that isn't listed", withSecret(SECRET, async () => {
+  const rows = { [USER]: { ...freeRow(), subscription_tier: 'lifetime' } };
+  const db = fakeSupabase(rows);
+  const { revenueCatWebhookHandler } = loadHandler(db);
+  await withEnv({ REVENUECAT_SANDBOX_LIFETIME_USERS: undefined }, async () => {
+    const res = await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', environment: 'SANDBOX', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: Date.now() - DAY });
+    assert.strictEqual(res.body.skipped, 'sandbox_lifetime');
+  });
+  assert.strictEqual(rows[USER].subscription_tier, 'lifetime');
+  assert.deepStrictEqual(db.writes, []);
+}));
+
+test('a yearly App Store subscriber who buys lifetime and refunds it keeps Gold until the yearly ends', withSecret(SECRET, async () => {
+  const yearlyBought = Date.now() - 10 * DAY;
+  const yearlyEnds = yearlyBought + 365 * DAY;
+  const lifetimeBought = Date.now() - 2 * DAY;
+  const rows = { [USER]: freeRow() };
+  const db = fakeSupabase(rows);
+  const { revenueCatWebhookHandler } = loadHandler(db);
+  await send(revenueCatWebhookHandler, { type: 'INITIAL_PURCHASE', app_user_id: USER, product_id: 'yearly_gold', purchased_at_ms: yearlyBought, expiration_at_ms: yearlyEnds });
+  await send(revenueCatWebhookHandler, { type: 'NON_RENEWING_PURCHASE', app_user_id: USER, product_id: 'lifetime_gold', purchased_at_ms: lifetimeBought });
+  assert.strictEqual(rows[USER].subscription_tier, 'lifetime');
+
+  const res = await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: lifetimeBought });
+  assert.strictEqual(res.body.refunded, true);
+  assert.strictEqual(res.body.tier, 'gold');
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+  assert.strictEqual(rows[USER].subscription_expires_at, new Date(yearlyEnds).toISOString());
+  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: lifetimeBought, endedAt: lifetimeBought, subscriptionUntil: yearlyEnds });
+}));
+
+test('a subscription renewed while lifetime holds still counts after a lifetime refund, and one refunded or expired meanwhile does not', withSecret(SECRET, async () => {
+  const lifetimeBought = Date.now() - 20 * DAY;
+  const renewed = Date.now() - 2 * DAY;
+  const renewalEnds = renewed + 30 * DAY;
+  const lifetimeRow = () => ({ ...freeRow(), subscription_tier: 'lifetime' });
+  const lifetimeRefund = { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: lifetimeBought };
+  const renewal = { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: renewed, expiration_at_ms: renewalEnds };
+
+  // The renewal is kept on record while lifetime holds, and Gold runs to its end.
+  let rows = { [USER]: lifetimeRow() };
+  let db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: lifetimeBought, lifetime: true } } });
+  let handler = loadHandler(db).revenueCatWebhookHandler;
+  assert.deepStrictEqual((await send(handler, renewal)).body.kept, 'lifetime');
+  assert.strictEqual(rows[USER].subscription_tier, 'lifetime');
+  await send(handler, lifetimeRefund);
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+  assert.strictEqual(rows[USER].subscription_expires_at, new Date(renewalEnds).toISOString());
+
+  // Refunded while lifetime held, the subscription leaves nothing to fall back on.
+  rows = { [USER]: lifetimeRow() };
+  db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: lifetimeBought, lifetime: true } } });
+  handler = loadHandler(db).revenueCatWebhookHandler;
+  await send(handler, renewal);
+  assert.strictEqual((await send(handler, { ...renewal, type: 'CANCELLATION', cancel_reason: 'CUSTOMER_SUPPORT', expiration_at_ms: renewed + DAY })).body.kept, 'lifetime');
+  await send(handler, lifetimeRefund);
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+
+  // Expired while lifetime held, the same.
+  rows = { [USER]: lifetimeRow() };
+  db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: lifetimeBought, lifetime: true, subscriptionUntil: Date.now() + DAY } } });
+  handler = loadHandler(db).revenueCatWebhookHandler;
+  await send(handler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', expiration_at_ms: Date.now() + DAY });
+  assert.strictEqual(db.state[GRANT_KEY].subscriptionUntil, undefined);
+  await send(handler, lifetimeRefund);
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+}));
+
+test('a guest purchase goes to the account its aliases name, and two named accounts change nothing', withSecret(SECRET, async () => {
+  const guest = '$RCAnonymousID:4f1c2b';
+  const rows = { [USER]: freeRow(), [OTHER]: freeRow() };
+  const db = fakeSupabase(rows);
+  const { revenueCatWebhookHandler } = loadHandler(db);
+  const purchase = { type: 'INITIAL_PURCHASE', app_user_id: guest, product_id: 'monthly', expiration_at_ms: Date.now() + 30 * DAY };
+
+  let res = await send(revenueCatWebhookHandler, { ...purchase, aliases: [guest, USER] });
+  assert.strictEqual(res.body.tier, 'gold');
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+
+  rows[USER] = freeRow();
+  res = await send(revenueCatWebhookHandler, { ...purchase, aliases: [guest, USER, OTHER] });
+  assert.strictEqual(res.body.skipped, 'ambiguous_user');
+  res = await send(revenueCatWebhookHandler, { ...purchase, aliases: [guest] });
+  assert.strictEqual(res.body.skipped, 'anonymous_user');
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+  assert.strictEqual(rows[OTHER].subscription_tier, 'free');
+}));
+
+test('a TRANSFER moves the plan: the account it left loses Gold and the one it reached gets it', withSecret(SECRET, async () => {
+  const until = Date.now() + 200 * DAY;
+  const rows = {
+    [OTHER]: { ...freeRow(), subscription_tier: 'gold', subscription_expires_at: new Date(until).toISOString() },
+    [USER]: freeRow(),
+  };
+  const db = fakeSupabase(rows, { state: { [`revenuecat_grant:${OTHER}`]: { purchasedAt: Date.now() - 100 * DAY, subscriptionUntil: until } } });
+  const { revenueCatWebhookHandler } = loadHandler(db);
+  // After the restore, RevenueCat holds the yearly for USER and nothing for OTHER.
+  const api = revenueCatApi({
+    [USER]: { subscriptions: { yearly_gold: { expires_date: new Date(until).toISOString(), refunded_at: null, is_sandbox: false } }, non_subscriptions: {} },
+  });
+  await withRevenueCatApi(api, async () => {
+    const res = await send(revenueCatWebhookHandler, { type: 'TRANSFER', transferred_from: [OTHER, '$RCAnonymousID:9d'], transferred_to: [USER] });
+    assert.strictEqual(res.code, 200);
+  });
+  assert.deepStrictEqual(api.calls.map((call) => call.url).sort(), [OTHER, USER].map((id) => `https://api.revenuecat.com/v1/subscribers/${id}`).sort());
+  assert.ok(api.calls.every((call) => call.authorization === `Bearer ${REST_KEY}`));
+  assert.strictEqual(rows[OTHER].subscription_tier, 'free', 'the old account keeps nothing');
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+  assert.strictEqual(rows[USER].subscription_expires_at, new Date(until).toISOString());
+  assert.strictEqual(db.state[`revenuecat_grant:${OTHER}`].subscriptionUntil, undefined);
+}));
+
+test('without REVENUECAT_SECRET_KEY a TRANSFER is only logged and the sync route answers 503', withSecret(SECRET, async () => {
+  const rows = { [USER]: freeRow() };
+  const db = fakeSupabase(rows, { users: { 'good-token': USER } });
+  const mod = loadHandler(db);
+  await withEnv({ REVENUECAT_SECRET_KEY: undefined }, async () => {
+    const transfer = await send(mod.revenueCatWebhookHandler, { type: 'TRANSFER', transferred_from: [OTHER], transferred_to: [USER] });
+    assert.strictEqual(transfer.code, 200);
+    assert.strictEqual(transfer.body.skipped, 'transfer');
+    const sync = await syncAs(mod.revenueCatSyncHandler, 'good-token');
+    assert.strictEqual(sync.code, 503);
+  });
+  assert.deepStrictEqual(db.writes, []);
+}));
+
+test('POST /v1/revenuecat/sync needs a signed-in account and writes the plan RevenueCat holds for it', withSecret(SECRET, async () => {
+  const until = Date.now() + 30 * DAY;
+  const cases = [
+    ['lifetime', { subscriptions: {}, non_subscriptions: { lifetime_gold: [{ is_sandbox: false }] } }, { subscription_tier: 'lifetime', subscription_expires_at: null }],
+    ['a running subscription', { subscriptions: { monthly: { expires_date: new Date(until).toISOString(), refunded_at: null } }, non_subscriptions: {} }, { subscription_tier: 'gold', subscription_expires_at: new Date(until).toISOString() }],
+    ['a refunded subscription', { subscriptions: { monthly: { expires_date: new Date(until).toISOString(), refunded_at: new Date().toISOString() } }, non_subscriptions: {} }, { subscription_tier: 'free', subscription_expires_at: null }],
+    ['an unlisted sandbox lifetime', { subscriptions: {}, non_subscriptions: { lifetime_gold: [{ is_sandbox: true }] } }, { subscription_tier: 'free', subscription_expires_at: null }],
+    ['nothing', { subscriptions: {}, non_subscriptions: {} }, { subscription_tier: 'free', subscription_expires_at: null }],
+  ];
+  for (const [label, subscriber, expected] of cases) {
+    const rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_expires_at: inDays(3) } };
+    const db = fakeSupabase(rows, { users: { 'good-token': USER } });
+    const mod = loadHandler(db);
+    await withRevenueCatApi(revenueCatApi({ [USER]: subscriber }), async () => {
+      assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, null)).code, 401, label);
+      assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'bad-token')).code, 401, label);
+      const res = await syncAs(mod.revenueCatSyncHandler, 'good-token');
+      assert.strictEqual(res.code, 200, label);
+      assert.strictEqual(res.body.tier, expected.subscription_tier, label);
+    });
+    assert.strictEqual(rows[USER].subscription_tier, expected.subscription_tier, label);
+    assert.strictEqual(rows[USER].subscription_expires_at, expected.subscription_expires_at, label);
+  }
+
+  // A plan bought on troystack.ai stays when RevenueCat holds nothing.
+  const rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', stripe_customer_id: 'cus_web' } };
+  const mod = loadHandler(fakeSupabase(rows, { users: { 'good-token': USER } }));
+  mod.setWebPlanCheck(async () => ({ tier: 'gold', status: 'active', trialEnd: null }));
+  await withRevenueCatApi(revenueCatApi({}), async () => {
+    assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).body.tier, 'gold');
+  });
+  assert.strictEqual(rows[USER].subscription_status, 'active');
+}));
+
+test('the sync leaves a running temporary grant alone, and a RevenueCat failure answers 500 and writes nothing', withSecret(SECRET, async () => {
+  const temporary = { ...freeRow(), subscription_tier: 'gold', subscription_status: 'temporary_grant', subscription_expires_at: inDays(1) };
+  let rows = { [USER]: { ...temporary } };
+  let db = fakeSupabase(rows, { users: { 'good-token': USER } });
+  let mod = loadHandler(db);
+  await withRevenueCatApi(revenueCatApi({}), async () => {
+    assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).code, 200);
+  });
+  assert.deepStrictEqual(rows[USER], temporary);
+
+  rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_expires_at: inDays(3) } };
+  db = fakeSupabase(rows, { users: { 'good-token': USER } });
+  mod = loadHandler(db);
+  await captureLogs(() => withRevenueCatApi(revenueCatApi({}, { status: 500 }), async () => {
+    assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).code, 500);
+  }));
+  assert.deepStrictEqual(db.writes, []);
+  assert.deepStrictEqual(db.stateWrites, []);
+}));
+
+test('the RevenueCat secret key stays out of the logs and the answers', withSecret(SECRET, async () => {
+  const rows = { [USER]: freeRow(), [OTHER]: freeRow() };
+  const mod = loadHandler(fakeSupabase(rows, { users: { 'good-token': USER } }));
+  const answers = [];
+  const logs = await captureLogs(async () => {
+    for (const status of [200, 401, 500]) {
+      await withRevenueCatApi(revenueCatApi({}, { status }), async () => {
+        answers.push((await syncAs(mod.revenueCatSyncHandler, 'good-token')).body);
+        answers.push((await send(mod.revenueCatWebhookHandler, { type: 'TRANSFER', transferred_from: [OTHER], transferred_to: [USER] })).body);
+      });
+    }
+  });
+  assert.ok(logs.length > 0);
+  assert.ok(!logs.some((line) => line.includes(REST_KEY)), 'no log line holds the key');
+  assert.ok(!answers.some((body) => JSON.stringify(body).includes(REST_KEY)), 'no answer holds the key');
 }));
