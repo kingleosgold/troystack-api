@@ -226,10 +226,10 @@ Troy's fixed persona and knowledge prompt sections live in `src/services/troy-pr
 - INITIAL_PURCHASE, RENEWAL, PRODUCT_CHANGE (by `new_product_id`), UNCANCELLATION, NON_RENEWING_PURCHASE (the one-time lifetime), SUBSCRIPTION_EXTENDED and REFUND_REVERSED set the tier from the product, gold or lifetime. A subscription never replaces lifetime, and a reversed refund for a subscription whose period has run out gives nothing back.
 - TEMPORARY_ENTITLEMENT_GRANT, sent when RevenueCat can't validate a purchase with the store, names no product. A profile without a plan gets gold with `subscription_status` `temporary_grant`, expiring a day after the event. The INITIAL_PURCHASE that follows a validation sets the real tier and status `active`, and an EXPIRATION ends a temporary grant whatever product it names.
 - CANCELLATION with `cancel_reason` CUSTOMER_SUPPORT is a refund and ends what was refunded now. Any other CANCELLATION only records the expiry date.
-- EXPIRATION leaves a lifetime profile alone and otherwise ends the App Store plan.
+- EXPIRATION leaves a lifetime profile alone and otherwise ends the App Store plan. A retried expiry for a period the stored `subscription_expires_at` has already moved past, after a renewal or a new purchase, ends nothing.
 - When an App Store plan ends, by expiry or refund, the account may still hold a plan bought on the web. Once stripe.js has handed in a check with `setWebPlanCheck`, the profile gets the plan Stripe still holds (a web subscription or lifetime, with its status and trial end) before it gets free. Stripe is asked only when the profile has a `stripe_customer_id`, and a Stripe read that fails answers 500 so RevenueCat sends the event again. With no check handed in, an ended plan writes free.
 - BILLING_ISSUE changes nothing during Apple's grace period. TRANSFER is logged and not applied, since settling it needs RevenueCat's REST API and a secret key the API doesn't hold.
-- Unknown products, anonymous and non-UUID ids, and accounts with no profile are skipped with 200. A failed profile read or write answers 500 so RevenueCat retries.
+- A purchase or grant for an account with no profile row makes a bare row first, as checkout does. Other events for such an account, unknown products, and anonymous and non-UUID ids are skipped with 200. A failed profile read or write answers 500 so RevenueCat retries.
 - Sandbox events are applied, because App Review buys in the sandbox.
 
 ### src/routes/stack-signal.js
