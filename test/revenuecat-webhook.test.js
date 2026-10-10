@@ -161,6 +161,8 @@ const OTHER = '8c2d7d2f-2222-4b3c-8d4e-000000000002';
 // A stand-in for the RevenueCat REST key. It must never show up in a log or
 // an answer.
 const REST_KEY = 'rc-rest-test-key';
+// A web plan check, as stripe.js hands in, that finds no plan bought on the web.
+const noWebPlan = async () => ({ tier: 'free' });
 
 // Sets environment variables for the length of fn, and puts them back after.
 // A value of null or undefined unsets the variable.
@@ -483,7 +485,8 @@ test('a profile with no customer id still has Stripe asked, with a null customer
 }));
 
 test("a temporary grant during a store outage gives Gold for a day, then the real purchase or the expiry decides", withSecret(SECRET, async () => {
-  const at = Date.UTC(2026, 9, 9, 12);
+  // The grant came an hour ago, inside its day.
+  const at = Date.now() - 3600 * 1000;
   const rows = { [USER]: { subscription_tier: 'free', subscription_status: null, subscription_expires_at: null, stripe_customer_id: null } };
   const db = fakeSupabase(rows);
   const { revenueCatWebhookHandler } = loadHandler(db);
@@ -1014,7 +1017,9 @@ test('a TRANSFER moves the plan: the account it left loses Gold and the one it r
     [USER]: freeRow(),
   };
   const db = fakeSupabase(rows, { state: { [`revenuecat_grant:${OTHER}`]: { purchasedAt: Date.now() - 100 * DAY, subscriptionUntil: until } } });
-  const { revenueCatWebhookHandler } = loadHandler(db);
+  const mod = loadHandler(db);
+  mod.setWebPlanCheck(noWebPlan);
+  const { revenueCatWebhookHandler } = mod;
   // After the restore, RevenueCat holds the yearly for USER and nothing for OTHER.
   const api = revenueCatApi({
     [USER]: { subscriptions: { yearly_gold: { expires_date: new Date(until).toISOString(), refunded_at: null, is_sandbox: false } }, non_subscriptions: {} },
@@ -1048,16 +1053,17 @@ test('without REVENUECAT_SECRET_KEY a TRANSFER is only logged and the sync route
 test('POST /v1/revenuecat/sync needs a signed-in account and writes the plan RevenueCat holds for it', withSecret(SECRET, async () => {
   const until = Date.now() + 30 * DAY;
   const cases = [
-    ['lifetime', { subscriptions: {}, non_subscriptions: { lifetime_gold: [{ is_sandbox: false }] } }, { subscription_tier: 'lifetime', subscription_expires_at: null }],
+    ['lifetime', { entitlements: { Gold: { product_identifier: 'lifetime_gold', expires_date: null } }, subscriptions: {}, non_subscriptions: { lifetime_gold: [{ is_sandbox: false }] } }, { subscription_tier: 'lifetime', subscription_expires_at: null }],
     ['a running subscription', { subscriptions: { monthly: { expires_date: new Date(until).toISOString(), refunded_at: null } }, non_subscriptions: {} }, { subscription_tier: 'gold', subscription_expires_at: new Date(until).toISOString() }],
     ['a refunded subscription', { subscriptions: { monthly: { expires_date: new Date(until).toISOString(), refunded_at: new Date().toISOString() } }, non_subscriptions: {} }, { subscription_tier: 'free', subscription_expires_at: null }],
-    ['an unlisted sandbox lifetime', { subscriptions: {}, non_subscriptions: { lifetime_gold: [{ is_sandbox: true }] } }, { subscription_tier: 'free', subscription_expires_at: null }],
+    ['an unlisted sandbox lifetime', { entitlements: { Gold: { product_identifier: 'lifetime_gold', expires_date: null } }, subscriptions: {}, non_subscriptions: { lifetime_gold: [{ is_sandbox: true }] } }, { subscription_tier: 'free', subscription_expires_at: null }],
     ['nothing', { subscriptions: {}, non_subscriptions: {} }, { subscription_tier: 'free', subscription_expires_at: null }],
   ];
   for (const [label, subscriber, expected] of cases) {
     const rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_expires_at: inDays(3) } };
     const db = fakeSupabase(rows, { users: { 'good-token': USER } });
     const mod = loadHandler(db);
+    mod.setWebPlanCheck(noWebPlan);
     await withRevenueCatApi(revenueCatApi({ [USER]: subscriber }), async () => {
       assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, null)).code, 401, label);
       assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'bad-token')).code, 401, label);
@@ -1084,6 +1090,7 @@ test('the sync leaves a running temporary grant alone, and a RevenueCat failure 
   let rows = { [USER]: { ...temporary } };
   let db = fakeSupabase(rows, { users: { 'good-token': USER } });
   let mod = loadHandler(db);
+  mod.setWebPlanCheck(noWebPlan);
   await withRevenueCatApi(revenueCatApi({}), async () => {
     assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).code, 200);
   });
@@ -1092,6 +1099,7 @@ test('the sync leaves a running temporary grant alone, and a RevenueCat failure 
   rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_expires_at: inDays(3) } };
   db = fakeSupabase(rows, { users: { 'good-token': USER } });
   mod = loadHandler(db);
+  mod.setWebPlanCheck(noWebPlan);
   await captureLogs(() => withRevenueCatApi(revenueCatApi({}, { status: 500 }), async () => {
     assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).code, 500);
   }));
@@ -1102,6 +1110,7 @@ test('the sync leaves a running temporary grant alone, and a RevenueCat failure 
 test('the RevenueCat secret key stays out of the logs and the answers', withSecret(SECRET, async () => {
   const rows = { [USER]: freeRow(), [OTHER]: freeRow() };
   const mod = loadHandler(fakeSupabase(rows, { users: { 'good-token': USER } }));
+  mod.setWebPlanCheck(noWebPlan);
   const answers = [];
   const logs = await captureLogs(async () => {
     for (const status of [200, 401, 500]) {
@@ -1172,6 +1181,7 @@ test("an event for an account another instance is applying waits its turn, and a
   let rows = { [USER]: freeRow() };
   let db = fakeSupabase(rows, { users: { 'good-token': USER }, state: { [turnKey]: heldElsewhere() } });
   let mod = loadHandler(db);
+  mod.setWebPlanCheck(noWebPlan);
   mod.accountTurn.waitMs = 250;
   const logs = await captureLogs(async () => {
     assert.strictEqual((await send(mod.revenueCatWebhookHandler, purchase)).code, 500);
@@ -1227,4 +1237,227 @@ test('an App Store grant marks the profile active, or trialing during a free tri
   db.state[GRANT_KEY] = { purchasedAt: lifetimeBought, lifetime: true, subscriptionUntil: until };
   await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: lifetimeBought });
   assert.deepStrictEqual(fields(), { tier: 'gold', status: 'active', trialEnd: null });
+}));
+
+test('a temporary grant delivered after its day is over, or after its expiry was applied, gives nothing', withSecret(SECRET, async () => {
+  // Retried after the day it covered ran out.
+  let rows = { [USER]: freeRow() };
+  let db = fakeSupabase(rows);
+  let handler = loadHandler(db).revenueCatWebhookHandler;
+  let res = await send(handler, { type: 'TEMPORARY_ENTITLEMENT_GRANT', app_user_id: USER, store: 'APP_STORE', event_timestamp_ms: Date.now() - 25 * 3600 * 1000 });
+  assert.strictEqual(res.code, 200);
+  assert.strictEqual(res.body.skipped, 'already_expired');
+  assert.deepStrictEqual(db.writes, []);
+
+  // Delivered again after the expiry that ended it, inside its day.
+  rows = { [USER]: freeRow() };
+  db = fakeSupabase(rows);
+  handler = loadHandler(db).revenueCatWebhookHandler;
+  const grantedAt = Date.now() - 3 * 3600 * 1000;
+  const grant = { type: 'TEMPORARY_ENTITLEMENT_GRANT', app_user_id: USER, store: 'APP_STORE', event_timestamp_ms: grantedAt };
+  await send(handler, grant);
+  assert.strictEqual(rows[USER].subscription_status, 'temporary_grant');
+  await send(handler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', event_timestamp_ms: grantedAt + 3600 * 1000 });
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+  const writes = db.writes.length;
+  res = await send(handler, grant);
+  assert.strictEqual(res.body.skipped, 'superseded');
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+  assert.strictEqual(db.writes.length, writes, 'no profile write');
+
+  // A later outage still gets its day.
+  res = await send(handler, { ...grant, event_timestamp_ms: Date.now() - 60 * 1000 });
+  assert.strictEqual(res.body.temporary, true);
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+}));
+
+test("without the web plan check stripe.js hands in, the sync answers 503 and a TRANSFER changes no one", withSecret(SECRET, async () => {
+  const rows = {
+    [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_web' },
+    [OTHER]: { ...freeRow(), subscription_tier: 'lifetime', subscription_status: 'active', stripe_customer_id: 'cus_other' },
+  };
+  const db = fakeSupabase(rows, { users: { 'good-token': USER } });
+  const mod = loadHandler(db);
+  const api = revenueCatApi({});
+  await captureLogs(() => withRevenueCatApi(api, async () => {
+    assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).code, 503);
+    const transfer = await send(mod.revenueCatWebhookHandler, { type: 'TRANSFER', transferred_from: [OTHER], transferred_to: [USER] });
+    assert.strictEqual(transfer.code, 200);
+    assert.strictEqual(transfer.body.skipped, 'transfer');
+  }));
+  assert.deepStrictEqual(api.calls, []);
+  assert.deepStrictEqual(db.writes, []);
+  assert.strictEqual(rows[USER].subscription_tier, 'gold', 'a web plan is never written over');
+  assert.strictEqual(rows[OTHER].subscription_tier, 'lifetime');
+}));
+
+test('an App Store free trial stays trialing through the sync, and through a lifetime refund that falls back to it', withSecret(SECRET, async () => {
+  const trialEnds = Date.now() + 5 * DAY;
+  const trialSubscriber = (periodType) => ({ subscriptions: { monthly: { expires_date: new Date(trialEnds).toISOString(), period_type: periodType, refunded_at: null } }, non_subscriptions: {} });
+  const rows = { [USER]: freeRow() };
+  const db = fakeSupabase(rows, { users: { 'good-token': USER } });
+  const mod = loadHandler(db);
+  mod.setWebPlanCheck(noWebPlan);
+  const profile = () => ({ tier: rows[USER].subscription_tier, status: rows[USER].subscription_status, trialEnd: rows[USER].trial_end, expires: rows[USER].subscription_expires_at });
+
+  await withRevenueCatApi(revenueCatApi({ [USER]: trialSubscriber('trial') }), async () => {
+    assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).code, 200);
+  });
+  assert.deepStrictEqual(profile(), { tier: 'gold', status: 'trialing', trialEnd: new Date(trialEnds).toISOString(), expires: new Date(trialEnds).toISOString() });
+  // Once the trial has turned into a paid period, the sync says active.
+  await withRevenueCatApi(revenueCatApi({ [USER]: trialSubscriber('normal') }), async () => {
+    assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).code, 200);
+  });
+  assert.deepStrictEqual(profile(), { tier: 'gold', status: 'active', trialEnd: null, expires: new Date(trialEnds).toISOString() });
+
+  // A trial from a webhook grant is kept on record too.
+  rows[USER] = freeRow();
+  delete db.state[GRANT_KEY];
+  const lifetimeBought = Date.now() - DAY;
+  await send(mod.revenueCatWebhookHandler, { type: 'INITIAL_PURCHASE', app_user_id: USER, product_id: 'monthly', period_type: 'TRIAL', purchased_at_ms: Date.now() - 2 * DAY, expiration_at_ms: trialEnds });
+  await send(mod.revenueCatWebhookHandler, { type: 'NON_RENEWING_PURCHASE', app_user_id: USER, product_id: 'lifetime_gold', purchased_at_ms: lifetimeBought });
+  await send(mod.revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: lifetimeBought });
+  assert.deepStrictEqual(profile(), { tier: 'gold', status: 'trialing', trialEnd: new Date(trialEnds).toISOString(), expires: new Date(trialEnds).toISOString() });
+}));
+
+test('App Store Gold past its expiry is settled for stripe.js only by asking RevenueCat, which knows about a billing grace period', withSecret(SECRET, async () => {
+  const periodEnd = Date.now() - DAY;
+  const lapsed = () => ({ ...freeRow(), subscription_tier: 'gold', subscription_status: 'active', subscription_expires_at: new Date(periodEnd).toISOString() });
+  const profile = (rows) => ({ tier: rows[USER].subscription_tier, status: rows[USER].subscription_status, expires: rows[USER].subscription_expires_at });
+
+  // Without the REST key, or without the web plan check, nothing is settled,
+  // since the record can't tell a grace period from a plan that ended.
+  for (const [label, key, webPlan] of [['no key', null, noWebPlan], ['no web plan check', REST_KEY, null]]) {
+    const rows = { [USER]: lapsed() };
+    const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: periodEnd - 30 * DAY, subscriptionUntil: periodEnd } } });
+    const mod = loadHandler(db);
+    if (webPlan) mod.setWebPlanCheck(webPlan);
+    const api = revenueCatApi({});
+    const before = global.fetch;
+    global.fetch = api.fetch;
+    try {
+      await withEnv({ REVENUECAT_SECRET_KEY: key }, async () => {
+        assert.strictEqual(await mod.settleExpiredStorePlan(USER), null, label);
+      });
+    } finally {
+      global.fetch = before;
+    }
+    assert.deepStrictEqual(api.calls, [], label);
+    assert.deepStrictEqual(db.writes, [], label);
+  }
+
+  // With both, RevenueCat answers. A grace period still running keeps Gold,
+  // with the period's own end on the profile.
+  const graceEnds = Date.now() + 10 * DAY;
+  const inGrace = { entitlements: {}, subscriptions: { monthly: { expires_date: new Date(periodEnd).toISOString(), grace_period_expires_date: new Date(graceEnds).toISOString(), period_type: 'normal', refunded_at: null } }, non_subscriptions: {} };
+  const rows = { [USER]: lapsed() };
+  const db = fakeSupabase(rows);
+  const mod = loadHandler(db);
+  mod.setWebPlanCheck(noWebPlan);
+  const api = revenueCatApi({ [USER]: inGrace });
+  await withRevenueCatApi(api, async () => {
+    const plan = await mod.settleExpiredStorePlan(USER);
+    assert.strictEqual(plan.tier, 'gold');
+    assert.strictEqual(plan.expiresAt, periodEnd);
+  });
+  assert.strictEqual(api.calls.length, 1);
+  assert.deepStrictEqual(profile(rows), { tier: 'gold', status: 'active', expires: new Date(periodEnd).toISOString() });
+  // Once RevenueCat holds nothing running for the account, it's free.
+  await withRevenueCatApi(revenueCatApi({}), async () => {
+    assert.strictEqual((await mod.settleExpiredStorePlan(USER)).tier, 'free');
+  });
+  assert.deepStrictEqual(profile(rows), { tier: 'free', status: null, expires: null });
+
+  // An event another instance is still applying goes first.
+  const held = fakeSupabase({ [USER]: lapsed() }, { state: { [`revenuecat_turn:${USER}`]: { until: new Date(Date.now() + 60 * 1000).toISOString(), owner: 'another-instance' } } });
+  const heldMod = loadHandler(held);
+  heldMod.setWebPlanCheck(noWebPlan);
+  heldMod.accountTurn.waitMs = 200;
+  await withRevenueCatApi(revenueCatApi({}), async () => {
+    await assert.rejects(heldMod.settleExpiredStorePlan(USER), /still being applied/);
+  });
+  assert.deepStrictEqual(held.writes, []);
+}));
+
+test("the sync takes Lifetime from RevenueCat's entitlements, so a refunded or revoked lifetime purchase that's still listed doesn't come back", withSecret(SECRET, async () => {
+  const bought = new Date(Date.now() - 20 * DAY).toISOString();
+  const listed = { lifetime_gold: [{ id: 'p1', is_sandbox: false, purchase_date: bought, store: 'app_store' }] };
+  const lifetimeEntitlement = (expires) => ({ Gold: { product_identifier: 'lifetime_gold', expires_date: expires, purchase_date: bought } });
+  const cases = [
+    ['a lifetime entitlement that stands', { entitlements: lifetimeEntitlement(null), subscriptions: {}, non_subscriptions: listed }, 'lifetime'],
+    ['an entitlement named Lifetime', { entitlements: { Lifetime: { product_identifier: 'troystack_forever', expires_date: null, purchase_date: bought } }, subscriptions: {}, non_subscriptions: {} }, 'lifetime'],
+    ['a refunded lifetime, its entitlement ended and the purchase still listed', { entitlements: lifetimeEntitlement(new Date(Date.now() - DAY).toISOString()), subscriptions: {}, non_subscriptions: listed }, 'free'],
+    ['a family share that was revoked', { entitlements: {}, subscriptions: {}, non_subscriptions: listed }, 'free'],
+    ['an unlisted sandbox lifetime', { entitlements: lifetimeEntitlement(null), subscriptions: {}, non_subscriptions: { lifetime_gold: [{ id: 'p2', is_sandbox: true, purchase_date: bought, store: 'app_store' }] } }, 'free'],
+  ];
+  for (const [label, subscriber, tier] of cases) {
+    const rows = { [USER]: freeRow() };
+    const db = fakeSupabase(rows, { users: { 'good-token': USER } });
+    const mod = loadHandler(db);
+    mod.setWebPlanCheck(noWebPlan);
+    await withRevenueCatApi(revenueCatApi({ [USER]: subscriber }), async () => {
+      assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).code, 200, label);
+    });
+    assert.strictEqual(rows[USER].subscription_tier, tier, label);
+    assert.strictEqual(db.state[GRANT_KEY]?.lifetime, tier === 'lifetime' ? true : undefined, label);
+  }
+}));
+
+test('the sync records any Gold product RevenueCat lists, expired or not, so the web knows the account had an App Store plan', withSecret(SECRET, async () => {
+  const lapsedTrial = { entitlements: {}, subscriptions: { monthly: { expires_date: new Date(Date.now() - 60 * DAY).toISOString(), period_type: 'trial', purchase_date: new Date(Date.now() - 67 * DAY).toISOString(), refunded_at: null } }, non_subscriptions: {} };
+  const rows = { [USER]: freeRow() };
+  const db = fakeSupabase(rows, { users: { 'good-token': USER } });
+  const mod = loadHandler(db);
+  mod.setWebPlanCheck(noWebPlan);
+  assert.strictEqual(await mod.hadAppStorePlan(USER), false);
+  await withRevenueCatApi(revenueCatApi({ [USER]: lapsedTrial }), async () => {
+    assert.strictEqual(await mod.revenueCatListsGold(USER), true, 'RevenueCat asked directly');
+    assert.strictEqual(await mod.revenueCatListsGold(OTHER), false, 'nothing listed');
+    assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).code, 200);
+  });
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+  assert.strictEqual(db.state[GRANT_KEY].hadPlan, true);
+  assert.strictEqual(await mod.hadAppStorePlan(USER), true, 'the record knows now');
+  // Without the key there's nobody to ask.
+  await withEnv({ REVENUECAT_SECRET_KEY: null }, async () => {
+    assert.strictEqual(await mod.revenueCatListsGold(USER), null);
+  });
+}));
+
+test("a billing grace period from the sync keeps the period's end on the profile, so the expiry when grace runs out still ends Gold", withSecret(SECRET, async () => {
+  const periodEnd = Date.now() - 2 * DAY;
+  const graceEnds = Date.now() + 14 * DAY;
+  const purchasedAt = periodEnd - 30 * DAY;
+  const inGrace = { entitlements: {}, subscriptions: { monthly: { expires_date: new Date(periodEnd).toISOString(), grace_period_expires_date: new Date(graceEnds).toISOString(), period_type: 'normal', purchase_date: new Date(purchasedAt).toISOString(), refunded_at: null } }, non_subscriptions: {} };
+  const rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_status: 'active', subscription_expires_at: new Date(periodEnd).toISOString() } };
+  const db = fakeSupabase(rows, { users: { 'good-token': USER }, state: { [GRANT_KEY]: { purchasedAt, subscriptionUntil: periodEnd } } });
+  const mod = loadHandler(db);
+  mod.setWebPlanCheck(noWebPlan);
+  await withRevenueCatApi(revenueCatApi({ [USER]: inGrace }), async () => {
+    assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).body.tier, 'gold');
+  });
+  assert.strictEqual(rows[USER].subscription_tier, 'gold', 'Gold holds through the grace period');
+  assert.strictEqual(rows[USER].subscription_expires_at, new Date(periodEnd).toISOString());
+  assert.strictEqual(db.state[GRANT_KEY].subscriptionUntil, periodEnd);
+  assert.strictEqual(db.state[GRANT_KEY].graceUntil, graceEnds);
+
+  // Apple's retries fail, and the EXPIRATION when grace runs out names the period's end.
+  const res = await send(mod.revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', purchased_at_ms: purchasedAt, expiration_at_ms: periodEnd });
+  assert.strictEqual(res.code, 200);
+  assert.notStrictEqual(res.body.skipped, 'superseded');
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+  assert.strictEqual(db.state[GRANT_KEY].subscriptionUntil, undefined);
+  assert.strictEqual(db.state[GRANT_KEY].graceUntil, undefined);
+
+  // If Apple's retry goes through instead, the renewal starts a new period with no grace period.
+  const renewed = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_status: 'active', subscription_expires_at: new Date(periodEnd).toISOString() } };
+  const again = fakeSupabase(renewed, { users: { 'good-token': USER }, state: { [GRANT_KEY]: { purchasedAt, subscriptionUntil: periodEnd } } });
+  const againMod = loadHandler(again);
+  againMod.setWebPlanCheck(noWebPlan);
+  await withRevenueCatApi(revenueCatApi({ [USER]: inGrace }), async () => {
+    await syncAs(againMod.revenueCatSyncHandler, 'good-token');
+  });
+  await send(againMod.revenueCatWebhookHandler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: Date.now() - 60 * 1000, expiration_at_ms: Date.now() + 30 * DAY });
+  assert.strictEqual(again.state[GRANT_KEY].graceUntil, undefined);
+  assert.strictEqual(renewed[USER].subscription_tier, 'gold');
 }));
