@@ -7,6 +7,9 @@ const supabase = require('../lib/supabase');
 
 const CACHE_TTL_MS = 90 * 1000; // 90 seconds (Yahoo Finance is free, so we poll every 60s)
 
+// For a reading where no price was read from a live source this time.
+const NONE_LIVE = Object.freeze({ gold: false, silver: false, platinum: false, palladium: false });
+
 let spotPriceCache = {
   prices: { gold: 5150, silver: 87, platinum: 2170, palladium: 1780 },
   lastUpdated: null,
@@ -16,6 +19,11 @@ let spotPriceCache = {
   quotedAt: null,
   source: 'static-fallback',
   change: { gold: {}, silver: {}, platinum: {}, palladium: {}, source: 'unavailable' },
+  // Which metals' prices the fetch behind these prices read from a live
+  // source. The source above is the one gold and silver came from, and a
+  // metal left out of it falls back to an older price, whose change against
+  // yesterday isn't today's move.
+  live: NONE_LIVE,
   marketsClosed: false,
 };
 
@@ -338,6 +346,8 @@ async function fetchFromYahooFinance(isCurrent = () => true) {
     platinum: platinum || lastKnownPtPd.platinum,
     palladium: palladium || lastKnownPtPd.palladium,
     source: 'yahoo_finance',
+    // A metal that fell back to the last known value wasn't read live this time.
+    live: { gold: true, silver: true, platinum: Boolean(platinum), palladium: Boolean(palladium) },
   };
 }
 
@@ -389,6 +399,7 @@ async function fetchFromMetalPriceAPI() {
     platinum: platinum || lastKnownPtPd.platinum,
     palladium: palladium || lastKnownPtPd.palladium,
     source: 'metalpriceapi',
+    live: { gold: true, silver: true, platinum: Boolean(platinum), palladium: Boolean(palladium) },
   };
 }
 
@@ -436,6 +447,7 @@ async function fetchLiveSpotPricesNow(generation) {
       fetched = {
         ...spotPriceCache.prices,
         source: spotPriceCache.source === 'static-fallback' ? 'static-fallback' : 'cached-fallback',
+        live: NONE_LIVE,
       };
     }
 
@@ -445,6 +457,7 @@ async function fetchLiveSpotPricesNow(generation) {
       fetched = {
         gold: 5150, silver: 87, platinum: 2170, palladium: 1780,
         source: 'static-fallback',
+        live: NONE_LIVE,
       };
     }
 
@@ -480,6 +493,7 @@ async function fetchLiveSpotPricesNow(generation) {
       quotedAt,
       source: fetched.source,
       change: changeData,
+      live: fetched.live,
       marketsClosed,
     };
 
@@ -497,6 +511,7 @@ async function fetchLiveSpotPricesNow(generation) {
         quotedAt: spotPriceCache.quotedAt,
         source: spotPriceCache.source,
         change: spotPriceCache.change,
+        live: spotPriceCache.live,
       }, isCurrent);
     }
 
@@ -530,6 +545,7 @@ async function fetchLiveSpotPricesNow(generation) {
     spotPriceCache.prices = { gold: 5150, silver: 87, platinum: 2170, palladium: 1780 };
     spotPriceCache.lastUpdated = new Date();
     spotPriceCache.source = 'static-fallback';
+    spotPriceCache.live = NONE_LIVE;
     return spotPriceCache;
   }
 }
@@ -630,6 +646,7 @@ async function getSpotPrices() {
         quotedAt: spotPriceCache.quotedAt,
         source: spotPriceCache.source,
         change: spotPriceCache.change,
+        live: spotPriceCache.live,
       });
       friday = getFridayClose();
     }
@@ -642,6 +659,7 @@ async function getSpotPrices() {
         source: friday.source + ' (friday-close)',
         cacheAgeMinutes: 0,
         change: friday.change || { gold: {}, silver: {}, platinum: {}, palladium: {}, source: 'unavailable' },
+        live: friday.live,
         marketsClosed: true,
       };
     }
@@ -661,6 +679,7 @@ async function getSpotPrices() {
       source: spotPriceCache.source,
       cacheAgeMinutes: Math.round((cacheAge / 60000) * 10) / 10,
       change: spotPriceCache.change,
+      live: spotPriceCache.live,
       marketsClosed,
     };
   }
@@ -675,6 +694,7 @@ async function getSpotPrices() {
     source: spotPriceCache.source,
     cacheAgeMinutes: 0,
     change: spotPriceCache.change,
+    live: spotPriceCache.live,
     marketsClosed: spotPriceCache.marketsClosed,
   };
 }
@@ -694,6 +714,8 @@ function getCachedPrices() {
  * last price, so the live cache would read the last session as flat.
  * timestamp is when the reading was last rebuilt, and quotedAt is when its
  * prices were last read from a live source, which a failed fetch doesn't move.
+ * live says which metals' prices that fetch read live. A Friday close saved
+ * before it was kept has none, and every metal counts as live then.
  */
 function getPriceSnapshot() {
   const friday = areMarketsClosed() ? getFridayClose() : null;
@@ -705,6 +727,7 @@ function getPriceSnapshot() {
       marketsClosed: true,
       timestamp: friday.timestamp || null,
       quotedAt: fridayQuotedAt(friday),
+      live: friday.live,
     };
   }
   return {
@@ -714,6 +737,7 @@ function getPriceSnapshot() {
     marketsClosed: areMarketsClosed(),
     timestamp: spotPriceCache.lastUpdated ? spotPriceCache.lastUpdated.toISOString() : null,
     quotedAt: spotPriceCache.quotedAt,
+    live: spotPriceCache.live,
   };
 }
 

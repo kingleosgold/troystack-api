@@ -78,7 +78,8 @@ function nowLine(at) {
 
 /**
  * The prompt block, from what was fetched. Pure, for tests.
- * @param {{ spot?: { prices?: object, change?: object, marketsClosed?: boolean, source?: string, quotedAt?: string | null } | null,
+ * @param {{ spot?: { prices?: object, change?: object, marketsClosed?: boolean, source?: string, quotedAt?: string | null,
+ *                    live?: { gold?: boolean, silver?: boolean, platinum?: boolean, palladium?: boolean } } | null,
  *           signal?: object | null, headlines?: object[], now?: number }} parts
  */
 function buildMarketBlock({ spot, signal, headlines, now } = {}) {
@@ -87,10 +88,15 @@ function buildMarketBlock({ spot, signal, headlines, now } = {}) {
   const prices = spot?.prices || {};
   // When the live price sources fail, the fetcher falls back to cached or
   // built-in prices, and its change is then measured from prices that aren't
-  // today's. Those moves would be wrong, so they're left out.
+  // today's. Those moves would be wrong, so they're left out. The same goes
+  // for one metal whose price wasn't read live this time, like platinum when
+  // Yahoo leaves it out and the fetch falls back to an older price, so its
+  // line says the change is unavailable.
   const source = String(spot?.source || '');
   const trusted = !/fallback/i.test(source);
-  const moves = trusted ? METALS.map((m) => moveLine(m, Number(prices[m]), spot?.change?.[m])).filter(Boolean) : [];
+  const moves = trusted
+    ? METALS.map((m) => moveLine(m, Number(prices[m]), spot?.live?.[m] === false ? null : spot?.change?.[m])).filter(Boolean)
+    : [];
   if (moves.length) {
     sections.push(`TODAY'S MARKET:\n${moves.join('\n')}${spot?.marketsClosed ? "\nMarkets are closed right now, so these are the last session's moves." : ''}`);
   }
