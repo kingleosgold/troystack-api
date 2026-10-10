@@ -67,7 +67,10 @@ test('all four metals come from Yahoo when it answers', async () => {
     axios: fakeAxios({ 'GC=F': 4320.9, 'SI=F': 64.69, 'PL=F': 1797.7, 'PA=F': 1276 }),
   });
   const got = await fetchFromYahooFinance();
-  assert.deepStrictEqual(got, { gold: 4320.9, silver: 64.69, platinum: 1797.7, palladium: 1276, source: 'yahoo_finance' });
+  assert.deepStrictEqual(got, {
+    gold: 4320.9, silver: 64.69, platinum: 1797.7, palladium: 1276, source: 'yahoo_finance',
+    live: { gold: true, silver: true, platinum: true, palladium: true },
+  });
 });
 
 test('a platinum miss on Yahoo falls back to MetalPriceAPI, then to the last live value', async () => {
@@ -82,10 +85,12 @@ test('a platinum miss on Yahoo falls back to MetalPriceAPI, then to the last liv
   const viaMetalPrice = await fetchFromYahooFinance();
   assert.strictEqual(viaMetalPrice.platinum, 1801.5);
   assert.strictEqual(viaMetalPrice.palladium, 1276, 'palladium still comes from Yahoo');
+  assert.strictEqual(viaMetalPrice.live.platinum, true, 'MetalPriceAPI is a live read too');
 
   delete rates.XPT;
   const viaLastKnown = await fetchFromYahooFinance();
   assert.strictEqual(viaLastKnown.platinum, 1801.5, 'falls back to the last live platinum, not the startup value');
+  assert.deepStrictEqual(viaLastKnown.live, { gold: true, silver: true, platinum: false, palladium: true }, "this time's platinum wasn't read live");
 });
 
 test('no gold or silver from Yahoo still fails the source', async () => {
@@ -614,4 +619,64 @@ test('failed fetches keep the time of the last live price, and the reading repor
   const weekend = fetcher.getPriceSnapshot();
   assert.strictEqual(weekend.source, 'cached-fallback (friday-close)');
   assert.strictEqual(weekend.quotedAt, '2026-10-09T20:00:00.000Z');
+});
+
+// Like chainable, with yesterday's prices in price_log so today's moves can be measured.
+function withYesterday(row) {
+  return {
+    from(table) {
+      const result = table === 'price_log' ? { data: row, error: null } : { data: null, error: null };
+      const q = new Proxy({}, {
+        get(_, prop) {
+          if (prop === 'then') return (resolve, reject) => Promise.resolve(result).then(resolve, reject);
+          return () => q;
+        },
+      });
+      return q;
+    },
+  };
+}
+
+test("a metal Yahoo leaves out has no move in Troy's reading, live or as the Friday close", async (t) => {
+  // Friday, 4:30 PM in New York. Yahoo answers for every metal but platinum,
+  // so the fetch falls back to an older platinum price.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-09T20:30:00Z') });
+  const yesterday = { gold_price: 4280, silver_price: 64, platinum_price: 1700, palladium_price: 1250 };
+  const fetcher = loadWith('services/price-fetcher', {
+    supabase: withYesterday(yesterday),
+    axios: fakeAxios({ 'GC=F': 4300, 'SI=F': 64.5, 'PA=F': 1270 }),
+  });
+  await fetcher.fetchLiveSpotPrices();
+
+  const snap = fetcher.getPriceSnapshot();
+  assert.deepStrictEqual(snap.live, { gold: true, silver: true, platinum: false, palladium: true });
+  const block = buildMarketBlock({ spot: snap });
+  assert.match(block, /Gold: up \$20\.00 \(0\.47%\) today/);
+  assert.match(block, /Palladium: up \$20\.00 \(1\.60%\) today/);
+  assert.match(block, /Platinum: today's change unavailable/);
+
+  // The app's reading keeps its numbers and carries the same flags.
+  const app = await fetcher.getSpotPrices();
+  assert.deepStrictEqual(app.change, snap.change);
+  assert.deepStrictEqual(app.live, snap.live);
+
+  // After the close the reading is the Friday close, and platinum still has no move.
+  t.mock.timers.tick(31 * 60 * 1000);
+  const friday = fetcher.getPriceSnapshot();
+  assert.strictEqual(friday.source, 'yahoo_finance (friday-close)');
+  assert.deepStrictEqual(friday.live, snap.live);
+  assert.match(buildMarketBlock({ spot: friday }), /Platinum: today's change unavailable/);
+  assert.deepStrictEqual((await fetcher.getSpotPrices()).live, snap.live);
+});
+
+test('when MetalPriceAPI stands in for Yahoo, a metal it leaves out is marked as not read live', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-08T16:00:00Z') }); // Thursday
+  process.env.METAL_PRICE_API_KEY ||= 'test-key';
+  // Yahoo has nothing, and MetalPriceAPI has every metal but platinum.
+  const rates = { XAU: 1 / 4300, XAG: 1 / 64.5, XPD: 1 / 1270 };
+  const fetcher = loadWith('services/price-fetcher', { supabase: chainable(null), axios: fakeAxios({}, rates) });
+  await fetcher.fetchLiveSpotPrices();
+  const snap = fetcher.getPriceSnapshot();
+  assert.strictEqual(snap.source, 'metalpriceapi');
+  assert.deepStrictEqual(snap.live, { gold: true, silver: true, platinum: false, palladium: true });
 });

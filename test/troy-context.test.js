@@ -236,6 +236,16 @@ test('moves are left out when prices come from a fallback, and Troy is told pric
   assert.ok(!live.includes('PRICES RIGHT NOW'));
 });
 
+test("a metal whose price wasn't read live this time has no move, and the others keep theirs", () => {
+  // Yahoo answered for every metal but platinum, so its price is an older one.
+  const block = buildMarketBlock({ spot: { ...SPOT, source: 'yahoo_finance', live: { gold: true, silver: true, platinum: false, palladium: true } } });
+  assert.match(block, /Gold: up \$17\.20 \(0\.41%\) today/);
+  assert.match(block, /Silver: up \$0\.62 \(1\.04%\) today/);
+  assert.match(block, /Platinum: today's change unavailable/);
+  assert.ok(!block.includes('$3.10'), "platinum's change was measured from an old price");
+  assert.ok(!block.includes('PRICES RIGHT NOW'), 'the reading as a whole is still live');
+});
+
 test('a stalled read gives way to the last good answer instead of holding the question', async () => {
   let t = 0;
   let hang = false;
