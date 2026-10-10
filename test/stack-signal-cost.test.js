@@ -21,6 +21,7 @@ const fakeSupabase = {
       select() { return api; },
       eq(col, val) { q.filters[col] = val; return api; },
       gte() { return api; },
+      contains() { return api; },
       order() { return api; },
       limit() { return Promise.resolve({ data: [], error: null }); },
       single() {
