@@ -374,18 +374,19 @@ async function goldPaymentIssue(userId, customerId) {
   return false;
 }
 
+// The answer when checkout can't be sure it won't sell a second plan: a plan
+// check or closing an earlier checkout didn't finish.
+const CHECK_FAILED = { error: "Checkout couldn't check this account's plan. Try again in a moment." };
+
 // A checkout left open in another tab could still be paid and start a second
-// plan, so the account's open checkouts are closed before a new one opens. One
-// that can't be closed is logged and doesn't stop the new checkout.
+// plan, so every open checkout on the account's customers is closed before a
+// new one opens. A search, list or expiry that fails throws, and checkout
+// stops rather than leave an earlier checkout that can still be paid.
 async function closeOpenCheckouts(userId, customerId) {
-  for (const id of await customersFor(userId, customerId)) {
-    try {
-      const open = [];
-      for await (const session of everyRecord((p) => stripe.checkout.sessions.list(p), { customer: id, status: 'open' })) open.push(session);
-      for (const session of open) await stripe.checkout.sessions.expire(session.id);
-    } catch (e) {
-      console.warn('⚠️ [Stripe] Could not close an open checkout:', e.message);
-    }
+  for (const id of await customersFor(userId, customerId, { strict: true })) {
+    const open = [];
+    for await (const session of everyRecord((p) => stripe.checkout.sessions.list(p), { customer: id, status: 'open' })) open.push(session);
+    for (const session of open) await stripe.checkout.sessions.expire(session.id);
   }
 }
 
@@ -455,15 +456,22 @@ async function checkoutTurn(userId) {
   };
 }
 
-// The customer the billing page opens on: one with a subscription that's
+// The customer the billing page opens on: one with a Gold subscription that's
 // still billing, so it can be cancelled, then the one holding the plan, then
-// the profile's own. With no customer on the profile, the account's customers
-// are found by search, and the answer is null when none of them is billing or
-// holds a plan.
+// the profile's own. A subscription to anything else in the account doesn't
+// count, since its customer's billing page can't manage Gold. Gold means a
+// configured Gold price or another price on the Gold product, as in
+// planFromStripe. With no customer on the profile, the account's customers
+// are found by search, and the answer is null when none of them is billing
+// Gold or holds a plan.
 async function portalCustomerFor(userId, profileCustomerId) {
+  let products = null;
   for (const id of await customersFor(userId, profileCustomerId, { strict: true })) {
     for await (const sub of customerSubscriptions(id)) {
-      if (['active', 'trialing', 'past_due', 'unpaid'].includes(sub.status)) return id;
+      if (!['active', 'trialing', 'past_due', 'unpaid'].includes(sub.status)) continue;
+      const price = sub.items?.data?.[0]?.price;
+      if (!products && mapStripePriceToTier(price?.id) === 'free') products = await goldProductIds();
+      if (subscriptionTier(price, mapStripePriceToTier, products)) return id;
     }
   }
   const plan = await planForUser(userId, profileCustomerId);
@@ -814,28 +822,30 @@ router.post('/create-checkout-session', async (req, res) => {
 
     // A customer an earlier checkout made for this account is used again, so
     // purchases stay together. A new one is made only when there's none.
-    let customerId = profile?.stripe_customer_id || (await customersFor(user_id, null))[0] || null;
-
     // An account that already holds a live web plan isn't sold a second one,
     // and neither is one whose Gold renewal failed, since that subscription
     // bills again once the card works. The check covers the customer checkout
     // is about to use and every other one made for the account. A check that
-    // fails doesn't stop checkout.
-    if (customerId) {
-      let paymentIssue = false;
-      let existing = null;
-      try {
+    // can't finish stops checkout, since a plan it missed would be billed
+    // twice.
+    let customerId;
+    let paymentIssue = false;
+    let existing = null;
+    try {
+      customerId = profile?.stripe_customer_id || (await customersFor(user_id, null, { strict: true }))[0] || null;
+      if (customerId) {
         paymentIssue = await goldPaymentIssue(user_id, customerId);
         if (!paymentIssue) existing = await planForUser(user_id, customerId);
-      } catch (e) {
-        console.warn('⚠️ [Stripe] Could not check for an existing plan:', e.message);
       }
-      if (paymentIssue) {
-        return res.status(409).json(PAYMENT_ISSUE);
-      }
-      if (existing) {
-        return res.status(409).json({ error: 'This account already has Gold. You can manage it from Settings.' });
-      }
+    } catch (e) {
+      console.error('❌ [Stripe] Could not check for an existing plan:', e.message);
+      return res.status(503).json(CHECK_FAILED);
+    }
+    if (paymentIssue) {
+      return res.status(409).json(PAYMENT_ISSUE);
+    }
+    if (existing) {
+      return res.status(409).json({ error: 'This account already has Gold. You can manage it from Settings.' });
     }
 
     const hadCustomer = Boolean(customerId);
@@ -880,7 +890,12 @@ router.post('/create-checkout-session', async (req, res) => {
       }
     }
     if (hadCustomer) {
-      await closeOpenCheckouts(user_id, customerId);
+      try {
+        await closeOpenCheckouts(user_id, customerId);
+      } catch (e) {
+        console.error('❌ [Stripe] Could not close an open checkout:', e.message);
+        return res.status(503).json(CHECK_FAILED);
+      }
     }
 
     const sessionParams = {
