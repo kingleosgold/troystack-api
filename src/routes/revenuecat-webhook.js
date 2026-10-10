@@ -144,6 +144,41 @@ async function profileForPurchase(id) {
   return (await readProfile(id)) || { subscription_tier: null, subscription_status: null, subscription_expires_at: null, stripe_customer_id: null };
 }
 
+// Events and syncs for one account take turns across every instance of the
+// API. Each one reads the profile and the purchase record and then writes
+// them, so two at once could each write over what the other just did: an
+// expiry clearing a renewal that landed meanwhile, or a lifetime refund and a
+// renewal each keeping half of the other's change. The turn is a row in
+// app_state, revenuecat_turn:{id}, that only one request can insert, given
+// back when the work is done. A turn left by a request that died runs out
+// after ttlMs. A request that can't get the turn within waitMs throws, so the
+// event is answered 500 and RevenueCat sends it again later. Tests shorten
+// the wait.
+const accountTurn = { ttlMs: 2 * 60 * 1000, waitMs: 5 * 1000, pollMs: 100 };
+
+async function withAccountTurn(id, work) {
+  const key = `revenuecat_turn:${id}`;
+  const owner = crypto.randomUUID();
+  const giveUpAt = Date.now() + accountTurn.waitMs;
+  for (;;) {
+    const until = new Date(Date.now() + accountTurn.ttlMs).toISOString();
+    const { error } = await supabase.from('app_state').insert({ key, value: { until, owner } });
+    if (!error) break;
+    if (error.code !== '23505') throw new Error(`account turn failed: ${error.message}`);
+    // Taken. A turn whose request died is cleared, and otherwise this waits.
+    const { error: clearError } = await supabase.from('app_state').delete().eq('key', key).lt('value->>until', new Date(Date.now()).toISOString());
+    if (clearError) throw new Error(`account turn clear failed: ${clearError.message}`);
+    if (Date.now() >= giveUpAt) throw new Error('another event for this account is still being applied');
+    await new Promise((resolve) => setTimeout(resolve, accountTurn.pollMs));
+  }
+  try {
+    return await work();
+  } finally {
+    const { error } = await supabase.from('app_state').delete().eq('key', key).eq('value->>owner', owner);
+    if (error) console.warn(`[RevenueCat Webhook] Couldn't give back the turn for ${id}, it runs out on its own:`, error.message);
+  }
+}
+
 // Each account's record is kept in app_state under this key as
 // { purchasedAt, endedAt, subscriptionUntil, lifetime }:
 //   - purchasedAt, the purchase time in ms of the newest App Store purchase
@@ -302,10 +337,19 @@ async function planLeft(id, profile, { ignore = null } = {}) {
   return webPlan || { tier: 'free' };
 }
 
+// The profile fields for a plan, with subscription_status and trial_end set
+// the way the Stripe side sets them: a web plan's own, active for an App Store
+// plan on record, and cleared for free. The queries that count paying
+// subscribers look for subscription_status active.
 function fieldsFor(plan) {
-  if (plan.tier === 'free') return { subscription_tier: 'free', subscription_expires_at: null };
+  if (plan.tier === 'free') return { subscription_tier: 'free', subscription_status: null, trial_end: null, subscription_expires_at: null };
   if (plan.source === 'app_store') {
-    return { subscription_tier: plan.tier, subscription_expires_at: plan.expiresAt ? new Date(plan.expiresAt).toISOString() : null };
+    return {
+      subscription_tier: plan.tier,
+      subscription_status: 'active',
+      trial_end: null,
+      subscription_expires_at: plan.expiresAt ? new Date(plan.expiresAt).toISOString() : null,
+    };
   }
   return { subscription_tier: plan.tier, subscription_status: plan.status ?? null, trial_end: plan.trialEnd ?? null, subscription_expires_at: null };
 }
@@ -359,24 +403,24 @@ function storeHoldings(subscriber, id) {
 }
 
 // Reads what RevenueCat holds for an account and puts it on the record and on
-// the profile, alongside any plan bought on troystack.ai. A temporary grant
-// that's still running is left alone, since RevenueCat may not show it by
-// product. A read or write that fails throws.
+// the profile, alongside any plan bought on troystack.ai, in the account's
+// turn. A temporary grant that's still running is left alone, since
+// RevenueCat may not show it by product. A read or write that fails throws.
 async function syncFromRevenueCat(id) {
-  const store = storeHoldings(await fetchSubscriber(id), id);
-  await updateRecord(id, (record) => {
-    record.lifetime = store.lifetime;
-    record.subscriptionUntil = store.until;
-    return record;
+  return withAccountTurn(id, async () => {
+    const store = storeHoldings(await fetchSubscriber(id), id);
+    await updateRecord(id, (record) => {
+      record.lifetime = store.lifetime;
+      record.subscriptionUntil = store.until;
+      return record;
+    });
+    const profile = await profileForPurchase(id);
+    const temporaryRunning = profile.subscription_status === TEMPORARY && Date.parse(profile.subscription_expires_at || '') > Date.now();
+    if (temporaryRunning && !store.lifetime && store.until == null) return { tier: profile.subscription_tier, temporary: true };
+    const plan = await planLeft(id, profile);
+    await writeProfile(id, fieldsFor(plan));
+    return plan;
   });
-  const profile = await profileForPurchase(id);
-  const temporaryRunning = profile.subscription_status === TEMPORARY && Date.parse(profile.subscription_expires_at || '') > Date.now();
-  if (temporaryRunning && !store.lifetime && store.until == null) return { tier: profile.subscription_tier, temporary: true };
-  const plan = await planLeft(id, profile);
-  const fields = fieldsFor(plan);
-  if (profile.subscription_status === TEMPORARY) fields.subscription_status = plan.tier === 'free' ? null : 'active';
-  await writeProfile(id, fields);
-  return plan;
 }
 
 // The account an event belongs to: its app_user_id when that's an account
@@ -450,11 +494,17 @@ async function applyEvent(event) {
       await recordGrant(id, grant);
       return { kept: 'lifetime' };
     }
+    // The status is active, as the Stripe side writes a paid plan, or trialing
+    // with the trial's end during an App Store free trial, so the queries that
+    // count paying subscribers by subscription_status count App Store ones
+    // too. A purchase that validated after a temporary grant isn't temporary
+    // now.
+    const trial = tier !== 'lifetime' && String(event.period_type || '').toUpperCase() === 'TRIAL';
     await writeProfile(id, {
       subscription_tier: tier,
       subscription_expires_at: tier === 'lifetime' ? null : expires,
-      // A purchase that validated after a temporary grant isn't temporary now.
-      ...(profile.subscription_status === TEMPORARY ? { subscription_status: 'active' } : {}),
+      subscription_status: trial ? 'trialing' : 'active',
+      trial_end: trial ? expires : null,
     });
     await recordGrant(id, grant);
     return { tier };
@@ -519,7 +569,7 @@ async function applyEvent(event) {
     // product the event names, and its status goes with it.
     if (profile.subscription_status === TEMPORARY) {
       const left = await planLeft(id, profile);
-      await writeProfile(id, left.tier === 'free' ? { ...fieldsFor(left), subscription_status: null } : fieldsFor(left));
+      await writeProfile(id, fieldsFor(left));
       return { tier: left.tier, temporary: true };
     }
     if (tier === 'free') return { skipped: 'unknown_product' };
@@ -595,7 +645,7 @@ async function revenueCatWebhookHandler(req, res) {
   if (account !== appUserId) console.log(`[RevenueCat Webhook] ${type} for ${appUserId} goes to account ${account}, named in its aliases`);
 
   try {
-    const outcome = await applyEvent({ ...event, app_user_id: account });
+    const outcome = await withAccountTurn(account, () => applyEvent({ ...event, app_user_id: account }));
     console.log(`[RevenueCat Webhook] ${type} for ${account}: ${JSON.stringify(outcome)}`);
     return res.status(200).json({ success: true, ...outcome });
   } catch (err) {
@@ -664,4 +714,5 @@ module.exports = {
   setWebPlanCheck,
   appStorePlanOnRecord,
   hadAppStorePlan,
+  accountTurn,
 };
