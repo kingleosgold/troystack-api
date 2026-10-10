@@ -66,6 +66,20 @@ function reset(over = {}) {
     subscriptionsFail: false,
     openListFails: false,
     expireFails: false,
+    // The RevenueCat purchase record can't be read, and how many times it was read.
+    recordReadFails: false,
+    recordReads: 0,
+    // Listing subscriptions fails once the purchase record has been read,
+    // which in checkout is the free week's look back through Stripe.
+    historyScanFails: false,
+    // Invoices, each with the subscription it bills and its status, and the
+    // ones voided and subscriptions cancelled, with switches that make
+    // either call fail.
+    invoices: [],
+    voided: [],
+    cancelled: [],
+    voidFails: false,
+    cancelFails: false,
   }, over);
   router.resetGoldProductCache();
   router.resetCustomerSearchCache();
@@ -81,7 +95,13 @@ const appStateTable = {
   select() {
     return {
       eq: (_col, key) => ({
-        maybeSingle: async () => ({ data: Object.hasOwn(state.appState, key) ? { value: state.appState[key] } : null, error: null }),
+        maybeSingle: async () => {
+          if (key.startsWith('revenuecat_grant:')) {
+            state.recordReads += 1;
+            if (state.recordReadFails) return { data: null, error: { message: 'connection reset' } };
+          }
+          return { data: Object.hasOwn(state.appState, key) ? { value: state.appState[key] } : null, error: null };
+        },
       }),
     };
   },
@@ -182,7 +202,7 @@ const fakeStripe = {
     // Newest first and paged by starting_after, like Stripe.
     list: async (params = {}) => {
       state.stripeCalls.push('subscriptions.list');
-      if (state.subscriptionsFail) throw new Error('Stripe is having a moment');
+      if (state.subscriptionsFail || (state.historyScanFails && state.recordReads > 0)) throw new Error('Stripe is having a moment');
       let rows = state.subscriptions.filter((x) => !x.customer || !params.customer || x.customer === params.customer);
       if (params.starting_after) rows = rows.slice(rows.findIndex((x) => x.id === params.starting_after) + 1);
       const page = rows.slice(0, params.limit || 10);
@@ -251,6 +271,32 @@ const fakeStripe = {
   webhooks: {
     constructEvent: (body) => JSON.parse(Buffer.isBuffer(body) ? body.toString('utf8') : body),
   },
+};
+fakeStripe.invoices = {
+  // Filtered by subscription and status, and paged by starting_after, like Stripe.
+  list: async (params = {}) => {
+    state.stripeCalls.push('invoices.list');
+    let rows = state.invoices.filter((x) => (!params.subscription || x.subscription === params.subscription) && (!params.status || x.status === params.status));
+    if (params.starting_after) rows = rows.slice(rows.findIndex((x) => x.id === params.starting_after) + 1);
+    const page = rows.slice(0, params.limit || 10);
+    return { data: page, has_more: rows.length > page.length };
+  },
+  voidInvoice: async (id) => {
+    state.stripeCalls.push('invoices.voidInvoice');
+    if (state.voidFails) throw new Error('Stripe is having a moment');
+    state.voided.push(id);
+    const invoice = state.invoices.find((x) => x.id === id);
+    if (invoice) invoice.status = 'void';
+    return { id, status: 'void' };
+  },
+};
+fakeStripe.subscriptions.cancel = async (id, params) => {
+  state.stripeCalls.push('subscriptions.cancel');
+  if (state.cancelFails) throw new Error('Stripe is having a moment');
+  state.cancelled.push({ id, params });
+  const sub = state.subscriptions.find((x) => x.id === id);
+  if (sub) sub.status = 'canceled';
+  return { id, status: 'canceled' };
 };
 fakeStripe.subscriptions.retrieve = async (id) => {
   state.stripeCalls.push('subscriptions.retrieve');
@@ -1232,7 +1278,6 @@ test('checkout turns away an account whose Gold payment failed and points it to 
   const cases = [
     ['the profile kept Gold through the retries', { profile: { stripe_customer_id: 'cus_1', subscription_tier: 'gold', subscription_status: 'past_due' } }],
     ['Stripe holds a past due subscription', { profile: { stripe_customer_id: 'cus_1' }, subscriptions: [sub('past_due')] }],
-    ['Stripe holds an unpaid subscription', { profile: { stripe_customer_id: 'cus_1' }, subscriptions: [sub('unpaid')] }],
   ];
   for (const [label, over] of cases) {
     reset(over);
@@ -1294,6 +1339,7 @@ test('a web lifetime refunded in full drops to what the account still holds', as
     ['nothing else', {}, { subscription_tier: 'free', subscription_status: null, trial_end: null }],
     ['a Gold subscription still running', { subscriptions: [{ id: 'sub_1', customer: 'cus_1', status: 'active', items: goldItems }] }, { subscription_tier: 'gold', subscription_status: 'active', trial_end: null }],
     ['an App Store subscription on record', { appState: { [`revenuecat_grant:${USER}`]: { subscriptionUntil: until } } }, { subscription_tier: 'gold', subscription_status: 'active', trial_end: null, subscription_expires_at: new Date(until).toISOString() }],
+    ['an App Store free trial on record', { appState: { [`revenuecat_grant:${USER}`]: { subscriptionUntil: until, subscriptionTrial: true } } }, { subscription_tier: 'gold', subscription_status: 'trialing', trial_end: new Date(until).toISOString(), subscription_expires_at: new Date(until).toISOString() }],
   ];
   for (const [label, over, written] of cases) {
     reset({ profile: lifetimeProfile(), sessions: [paidLifetime()], charges: { pi_life: { refunded: true } }, ...over });
@@ -1377,4 +1423,203 @@ test('the billing page opens on the customer whose subscription is Gold, not one
   const res = await openPortal();
   assert.equal(res.statusCode, 200);
   assert.equal(state.portal.customer, 'cus_gold');
+});
+
+test("checkout stops when it can't tell whether the account had Gold before, rather than give a free week", async () => {
+  const cases = [
+    ["the App Store record can't be read", { profile: { stripe_customer_id: 'cus_1' }, recordReadFails: true }],
+    ["the App Store record can't be read, with no customer yet", { profile: { stripe_customer_id: null }, recordReadFails: true }],
+    ['the look back through Stripe fails', { profile: { stripe_customer_id: 'cus_1' }, historyScanFails: true }],
+  ];
+  for (const [label, over] of cases) {
+    reset(over);
+    const res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 503, label);
+    assert.match(res.body.error, /Try again/, label);
+    assert.ok(!state.stripeCalls.includes('customers.create'), `${label}: no customer made`);
+    assert.ok(!state.stripeCalls.includes('checkout.sessions.create'), `${label}: no checkout opened`);
+  }
+  // Lifetime has no free week, so it doesn't look.
+  reset({ profile: { stripe_customer_id: 'cus_1' }, recordReadFails: true });
+  assert.equal((await checkout('price_gold_lifetime')).statusCode, 200);
+});
+
+// Runs fn with REVENUECAT_SECRET_KEY set to key, or unset for null, and with
+// RevenueCat's REST API answered by api in place of fetch when it's given.
+async function withRevenueCat(key, api, fn) {
+  const before = { key: process.env.REVENUECAT_SECRET_KEY, fetch: global.fetch };
+  if (key == null) delete process.env.REVENUECAT_SECRET_KEY;
+  else process.env.REVENUECAT_SECRET_KEY = key;
+  if (api) global.fetch = api;
+  try {
+    return await fn();
+  } finally {
+    if (before.key == null) delete process.env.REVENUECAT_SECRET_KEY;
+    else process.env.REVENUECAT_SECRET_KEY = before.key;
+    global.fetch = before.fetch;
+  }
+}
+
+const lapsedStoreGold = () => ({ stripe_customer_id: 'cus_1', subscription_tier: 'gold', subscription_status: 'active', subscription_expires_at: new Date(Date.now() - 86400000).toISOString() });
+
+// RevenueCat's REST API as a stand-in: each call answers the next of answers,
+// a subscriber's subscriptions, and nothing once they run out, or fails with
+// status. calls collects the addresses asked.
+function revenueCatApi(answers = [], { status = 200 } = {}) {
+  const calls = [];
+  const fetch = async (url) => {
+    calls.push(String(url));
+    const subscriptions = answers.shift() ?? {};
+    return { ok: status === 200, status, json: async () => ({ subscriber: { entitlements: {}, subscriptions, non_subscriptions: {} } }) };
+  };
+  return { calls, answers, fetch };
+}
+
+test('App Store Gold past its expiry is settled before checkout only by asking RevenueCat, and turns the account away while Apple may still renew it', async () => {
+  const periodEnd = Date.now() - 86400000;
+
+  // Without the key nothing is settled, since Apple may still be retrying the
+  // payment in a grace period, and the answer points to the App Store.
+  await withRevenueCat(null, null, async () => {
+    reset({ profile: lapsedStoreGold(), appState: { [`revenuecat_grant:${USER}`]: { purchasedAt: Date.now() - 40 * 86400000, subscriptionUntil: periodEnd } } });
+    const res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.body.reason, 'app_store_renewing');
+    assert.match(res.body.error, /App Store/);
+    assert.deepEqual(state.updates, []);
+    assert.equal(state.created, undefined);
+  });
+
+  const api = revenueCatApi();
+  await withRevenueCat('rc-rest-test-key', api.fetch, async () => {
+    // In Apple's billing grace period: Gold stays, with the period's own end on the profile.
+    api.answers.push({ monthly: { expires_date: new Date(periodEnd).toISOString(), grace_period_expires_date: new Date(Date.now() + 10 * 86400000).toISOString(), period_type: 'normal' } });
+    reset({ profile: lapsedStoreGold() });
+    let res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.body.reason, 'app_store_renewing');
+    assert.equal(state.updates[0].subscription_expires_at, new Date(periodEnd).toISOString());
+    assert.equal(state.created, undefined);
+
+    // A renewal the webhook never got still runs.
+    const renewed = Date.now() + 25 * 86400000;
+    api.answers.push({ monthly: { expires_date: new Date(renewed).toISOString(), period_type: 'normal' } });
+    reset({ profile: lapsedStoreGold() });
+    res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.body.reason, 'has_plan');
+    assert.equal(state.updates[0].subscription_expires_at, new Date(renewed).toISOString());
+
+    // A web subscription whose renewal is past due answers with the payment issue.
+    reset({ profile: lapsedStoreGold(), subscriptions: [{ id: 'sub_1', customer: 'cus_1', status: 'past_due', items: goldItems }] });
+    res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.body.reason, 'payment_issue');
+    assert.deepEqual(state.updates[0], { subscription_tier: 'gold', subscription_status: 'past_due', trial_end: null, subscription_expires_at: null });
+
+    // Nothing running: the profile goes to free and checkout opens, with no
+    // free week after the App Store plan RevenueCat still lists.
+    api.answers.push({ monthly: { expires_date: new Date(periodEnd).toISOString(), period_type: 'normal' } });
+    reset({ profile: lapsedStoreGold() });
+    res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(state.updates[0], { subscription_tier: 'free', subscription_status: null, trial_end: null, subscription_expires_at: null });
+    assert.equal(res.body.trial, false);
+
+    // Gold whose expiry is still ahead is turned away without asking.
+    const asked = api.calls.length;
+    reset({ profile: { ...lapsedStoreGold(), subscription_expires_at: new Date(Date.now() + 86400000).toISOString() } });
+    res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.body.reason, 'has_plan');
+    assert.equal(api.calls.length, asked);
+  });
+
+  // RevenueCat can't be read: a try-again answer, a lifetime checkout too,
+  // though that never looks back for a free week.
+  await withRevenueCat('rc-rest-test-key', revenueCatApi([], { status: 500 }).fetch, async () => {
+    reset({ profile: lapsedStoreGold() });
+    const res = await checkout('price_gold_lifetime');
+    assert.equal(res.statusCode, 503);
+    assert.match(res.body.error, /Try again/);
+    assert.deepEqual(state.updates, []);
+    assert.equal(state.created, undefined);
+  });
+});
+
+test('with the RevenueCat key set, an App Store trial the record never saw still rules out the web free week', async () => {
+  const lapsedTrial = () => ({ monthly: { expires_date: new Date(Date.now() - 60 * 86400000).toISOString(), period_type: 'trial' } });
+  const api = revenueCatApi();
+  await withRevenueCat('rc-rest-test-key', api.fetch, async () => {
+    for (const customer of ['cus_1', null]) {
+      api.answers.push(lapsedTrial());
+      reset({ profile: { stripe_customer_id: customer } });
+      const res = await checkout('price_gold_monthly');
+      assert.equal(res.statusCode, 200, String(customer));
+      assert.equal(res.body.trial, false, String(customer));
+    }
+    assert.deepEqual(api.calls, [1, 2].map(() => `https://api.revenuecat.com/v1/subscribers/${USER}`));
+
+    // Nothing listed: the free week stands.
+    reset({ profile: { stripe_customer_id: 'cus_1' } });
+    assert.equal((await checkout('price_gold_monthly')).body.trial, true);
+
+    // An earlier web subscription answers first, so RevenueCat isn't asked.
+    const asked = api.calls.length;
+    reset({ profile: { stripe_customer_id: 'cus_1' }, subscriptions: [{ id: 'sub_old', customer: 'cus_1', status: 'canceled', items: goldItems }] });
+    assert.equal((await checkout('price_gold_monthly')).body.trial, false);
+    assert.equal(api.calls.length, asked);
+  });
+
+  // RevenueCat can't be read: checkout stops rather than give the week.
+  await withRevenueCat('rc-rest-test-key', revenueCatApi([], { status: 500 }).fetch, async () => {
+    reset({ profile: { stripe_customer_id: 'cus_1' } });
+    const res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 503);
+    assert.equal(state.created, undefined);
+  });
+});
+
+test('an unpaid Gold subscription has its open invoices voided and is cancelled before a new checkout opens', async () => {
+  const unpaid = () => ({ id: 'sub_unpaid', customer: 'cus_1', status: 'unpaid', items: goldItems });
+  const invoices = () => [
+    { id: 'in_retried', subscription: 'sub_unpaid', status: 'open' },
+    { id: 'in_since', subscription: 'sub_unpaid', status: 'open' },
+    { id: 'in_paid', subscription: 'sub_unpaid', status: 'paid' },
+    { id: 'in_other', subscription: 'sub_other', status: 'open' },
+  ];
+  reset({ profile: { stripe_customer_id: 'cus_1', subscription_tier: 'free', subscription_status: 'unpaid' }, subscriptions: [unpaid()], invoices: invoices() });
+  const res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.trial, false, 'no second free week');
+  assert.deepEqual(state.voided, ['in_retried', 'in_since']);
+  assert.deepEqual(state.cancelled.map((x) => x.id), ['sub_unpaid']);
+  const calls = state.stripeCalls;
+  assert.ok(calls.lastIndexOf('invoices.voidInvoice') < calls.indexOf('subscriptions.cancel'), 'voided before it is cancelled');
+  assert.ok(calls.indexOf('subscriptions.cancel') < calls.indexOf('checkout.sessions.create'), 'cancelled before the new checkout opens');
+
+  // A void or a cancel that fails stops checkout with a try-again answer.
+  for (const [label, over] of [['a void fails', { voidFails: true }], ['the cancel fails', { cancelFails: true }]]) {
+    reset({ profile: { stripe_customer_id: 'cus_1' }, subscriptions: [unpaid()], invoices: invoices(), ...over });
+    const failed = await checkout('price_gold_monthly');
+    assert.equal(failed.statusCode, 503, label);
+    assert.match(failed.body.error, /Try again/, label);
+    assert.equal(state.created, undefined, label);
+    if (over.voidFails) assert.deepEqual(state.cancelled, [], 'nothing is cancelled while an invoice could still be paid');
+  }
+});
+
+test('every 409 from checkout says why, so the web can act on it', async () => {
+  const cases = [
+    ['a Gold profile', { profile: { stripe_customer_id: 'cus_1', subscription_tier: 'gold' } }, 'has_plan'],
+    ['a Lifetime profile', { profile: { stripe_customer_id: 'cus_1', subscription_tier: 'lifetime' } }, 'has_plan'],
+    ['a live web plan', { profile: { stripe_customer_id: 'cus_1' }, subscriptions: [{ id: 'sub_1', customer: 'cus_1', status: 'active', items: goldItems }] }, 'has_plan'],
+    ['a Gold profile past due', { profile: { stripe_customer_id: 'cus_1', subscription_tier: 'gold', subscription_status: 'past_due' } }, 'payment_issue'],
+  ];
+  for (const [label, over, reason] of cases) {
+    reset(over);
+    const res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 409, label);
+    assert.equal(res.body.reason, reason, label);
+  }
 });
