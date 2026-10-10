@@ -61,6 +61,11 @@ function reset(over = {}) {
     // app_state inserts and deletes fail with this error, as when the
     // database can't be reached.
     turnError: null,
+    // Stripe calls that fail, as during an outage: listing subscriptions,
+    // listing open checkouts, and expiring one.
+    subscriptionsFail: false,
+    openListFails: false,
+    expireFails: false,
   }, over);
   router.resetGoldProductCache();
   router.resetCustomerSearchCache();
@@ -177,6 +182,7 @@ const fakeStripe = {
     // Newest first and paged by starting_after, like Stripe.
     list: async (params = {}) => {
       state.stripeCalls.push('subscriptions.list');
+      if (state.subscriptionsFail) throw new Error('Stripe is having a moment');
       let rows = state.subscriptions.filter((x) => !x.customer || !params.customer || x.customer === params.customer);
       if (params.starting_after) rows = rows.slice(rows.findIndex((x) => x.id === params.starting_after) + 1);
       const page = rows.slice(0, params.limit || 10);
@@ -188,6 +194,7 @@ const fakeStripe = {
       // Newest first, filtered by status and paged by starting_after, like Stripe.
       list: async (params = {}) => {
         state.stripeCalls.push('checkout.sessions.list');
+        if (state.openListFails && params.status === 'open') throw new Error('Stripe is having a moment');
         let rows = state.sessions.filter(
           (x) =>
             (!params.status || x.status === params.status) &&
@@ -268,6 +275,7 @@ fakeStripe.billingPortal = {
 };
 fakeStripe.checkout.sessions.expire = async (id) => {
   state.stripeCalls.push('checkout.sessions.expire');
+  if (state.expireFails) throw new Error('Stripe is having a moment');
   state.expired.push(id);
   // An expired checkout isn't open to the next list.
   const session = state.sessions.find((x) => x.id === id);
@@ -1328,4 +1336,45 @@ test('a chargeback on a web lifetime drops it, an inquiry leaves it, and winning
   res = await stripeEvent(charge('charge.dispute.closed', { id: 'dp_1', payment_intent: 'pi_life', status: 'won' }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(state.updates, [{ subscription_tier: 'lifetime', subscription_status: 'active', trial_end: null }]);
+});
+
+test("checkout stops when it can't tell whether the account already has a plan", async () => {
+  const cases = [
+    ['the customer search fails', { profile: { stripe_customer_id: 'cus_1' }, searchFails: true }],
+    ['the subscriptions list fails', { profile: { stripe_customer_id: 'cus_1' }, subscriptionsFail: true }],
+    ['the search for an older customer fails', { profile: { stripe_customer_id: null }, searchFails: true }],
+  ];
+  for (const [label, over] of cases) {
+    reset(over);
+    const res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 503, label);
+    assert.match(res.body.error, /Try again/, label);
+    assert.ok(!state.stripeCalls.includes('customers.create'), `${label}: no customer made`);
+    assert.ok(!state.stripeCalls.includes('checkout.sessions.create'), `${label}: no checkout opened`);
+  }
+});
+
+test("checkout stops when a checkout it opened before can't be closed", async () => {
+  const open = { id: 'cs_open', customer: 'cus_1', status: 'open', mode: 'subscription' };
+  for (const [label, over] of [['the open checkout fails to expire', { expireFails: true }], ['open checkouts fail to list', { openListFails: true }]]) {
+    reset({ profile: { stripe_customer_id: 'cus_1' }, sessions: [{ ...open }], ...over });
+    const res = await checkout('price_gold_monthly');
+    assert.equal(res.statusCode, 503, label);
+    assert.match(res.body.error, /Try again/, label);
+    assert.ok(!state.stripeCalls.includes('checkout.sessions.create'), `${label}: no second checkout while the first can still be paid`);
+  }
+});
+
+test('the billing page opens on the customer whose subscription is Gold, not one billing for something else', async () => {
+  reset({
+    profile: { stripe_customer_id: 'cus_1' },
+    customers: [{ id: 'cus_gold', metadata: { supabase_user_id: USER } }],
+    subscriptions: [
+      { id: 'sub_api', customer: 'cus_1', status: 'active', items: { data: [{ price: { id: 'price_other_api', product: 'prod_other' } }] } },
+      { id: 'sub_gold', customer: 'cus_gold', status: 'active', items: goldItems },
+    ],
+  });
+  const res = await openPortal();
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.portal.customer, 'cus_gold');
 });
