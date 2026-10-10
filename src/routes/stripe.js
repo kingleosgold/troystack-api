@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 const supabase = require('../lib/supabase');
 const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions, soldLifetime } = require('../lib/stripe-checks');
-const { appStorePlanOnRecord, hadAppStorePlan } = require('./revenuecat-webhook');
+const { appStorePlanOnRecord, hadAppStorePlan, revenueCatListsGold, settleExpiredStorePlan } = require('./revenuecat-webhook');
 
 const router = express.Router();
 
@@ -264,14 +264,16 @@ async function planWithoutLostLifetime(userId, customerId) {
 }
 
 // The profile fields for such a plan. An App Store subscription keeps its
-// expiry, so a web subscription ending later can see it still runs.
+// expiry, so a web subscription ending later can see it still runs, and one
+// in its free trial is trialing until then, as the RevenueCat webhook writes it.
 function profileFieldsFor(plan) {
   if (plan.source === 'app_store') {
+    const expires = plan.expiresAt ? new Date(plan.expiresAt).toISOString() : null;
     return {
       subscription_tier: plan.tier,
-      subscription_status: 'active',
-      trial_end: null,
-      ...(plan.expiresAt ? { subscription_expires_at: new Date(plan.expiresAt).toISOString() } : {}),
+      subscription_status: plan.trial ? 'trialing' : 'active',
+      trial_end: plan.trial ? expires : null,
+      ...(expires ? { subscription_expires_at: expires } : {}),
     };
   }
   return { subscription_tier: plan.tier, subscription_status: plan.status ?? null, trial_end: plan.trialEnd ?? null };
@@ -321,6 +323,13 @@ function appStorePlanRunning(profile) {
   return Number.isFinite(until) && until > Date.now() && profile.subscription_tier === 'gold';
 }
 
+// Gold whose App Store expiry has passed: a plan whose period ended with no
+// EXPIRATION from RevenueCat yet to settle it, late or lost.
+function appStoreGoldPastExpiry(profile) {
+  const until = Date.parse(profile?.subscription_expires_at || '');
+  return Number.isFinite(until) && until <= Date.now() && profile.subscription_tier === 'gold';
+}
+
 // Lifetime outlasts anything a later checkout adds, so a profile that reads
 // lifetime keeps it.
 async function keepLifetime(userId, tier) {
@@ -330,52 +339,88 @@ async function keepLifetime(userId, tier) {
 }
 
 // Whether the account has had Gold before: an App Store trial or plan on the
-// RevenueCat record, or a Gold subscription on any of its Stripe customers.
-// The free week is for the first one only, so subscribing and cancelling
-// inside the week can't be repeated, and an App Store trial isn't followed by
-// a web one. A subscription whose first payment never went through doesn't
-// count. With no customer yet, only the App Store record is read.
+// RevenueCat record, a Gold subscription on any of its Stripe customers, or,
+// with REVENUECAT_SECRET_KEY set, a Gold product RevenueCat lists for it,
+// which finds an App Store trial or plan from before the record began. The
+// free week is for the first one only, so subscribing and cancelling inside
+// the week can't be repeated, and an App Store trial isn't followed by a web
+// one. A subscription whose first payment never went through doesn't count.
+// With no customer yet there's no Stripe history to read. RevenueCat is asked
+// last, only when nothing else has answered. A read that fails throws.
 async function hadGoldBefore(userId, customerId) {
   if (await hadAppStorePlan(userId)) return true;
-  if (!customerId) return false;
-  let products = null;
-  for (const id of await customersFor(userId, customerId, { strict: true })) {
-    for await (const sub of customerSubscriptions(id)) {
-      if (sub.status === 'incomplete' || sub.status === 'incomplete_expired') continue;
-      const price = sub.items?.data?.[0]?.price;
-      if (!products && mapStripePriceToTier(price?.id) === 'free') products = await goldProductIds();
-      if (subscriptionTier(price, mapStripePriceToTier, products)) return true;
+  if (customerId) {
+    let products = null;
+    for (const id of await customersFor(userId, customerId, { strict: true })) {
+      for await (const sub of customerSubscriptions(id)) {
+        if (sub.status === 'incomplete' || sub.status === 'incomplete_expired') continue;
+        const price = sub.items?.data?.[0]?.price;
+        if (!products && mapStripePriceToTier(price?.id) === 'free') products = await goldProductIds();
+        if (subscriptionTier(price, mapStripePriceToTier, products)) return true;
+      }
     }
   }
-  return false;
+  return (await revenueCatListsGold(userId)) === true;
 }
 
-// The answer for an account whose Gold renewal payment failed. Its
-// subscription bills again once the card works, so a second checkout could
-// leave it paying twice. The web shows this with a way to the billing page.
+// What checkout answers with 409, each with a reason the web acts on.
+//   - payment_issue, for an account whose Gold renewal is past due. Stripe is
+//     still retrying it and it bills again once the card works, so a second
+//     checkout could leave the account paying twice. The web sends it to the
+//     billing page to update the card.
+//   - has_plan, for an account that already holds Gold or Lifetime.
+//   - app_store_renewing, for App Store Gold whose period has ended while
+//     Apple may still renew it, as in its billing grace period, so it's
+//     managed in the App Store rather than bought again on the web.
+// checkout_in_progress is answered where the checkout turn is taken.
 const PAYMENT_ISSUE = {
   error: "Your last Gold payment didn't go through. Update your card on the billing page in Settings to keep Gold.",
   reason: 'payment_issue',
 };
+const HAS_PLAN = { error: 'This account already has Gold. You can manage it from Settings.', reason: 'has_plan' };
+const APP_STORE_RENEWING = {
+  error: 'Your App Store subscription may still be renewing. On your iPhone, open Settings, tap your name, then Subscriptions.',
+  reason: 'app_store_renewing',
+};
 
-// Whether a Gold subscription on any of the account's customers has a failed
-// renewal: past_due while Stripe retries, or unpaid once the retries ran out
-// and the invoice waits for a working card.
-async function goldPaymentIssue(userId, customerId) {
+// The Gold subscriptions on any of the account's customers whose renewal
+// failed: whether one is past_due, which Stripe still retries, and the ones
+// that are unpaid, whose retries ran out. Stripe doesn't collect an unpaid
+// subscription again, and it gives no Gold.
+async function goldPaymentIssues(userId, customerId) {
+  const issues = { pastDue: false, unpaid: [] };
   let products = null;
   for (const id of await customersFor(userId, customerId, { strict: true })) {
     for await (const sub of customerSubscriptions(id)) {
       if (sub.status !== 'past_due' && sub.status !== 'unpaid') continue;
       const price = sub.items?.data?.[0]?.price;
       if (!products && mapStripePriceToTier(price?.id) === 'free') products = await goldProductIds();
-      if (subscriptionTier(price, mapStripePriceToTier, products)) return true;
+      if (!subscriptionTier(price, mapStripePriceToTier, products)) continue;
+      if (sub.status === 'past_due') issues.pastDue = true;
+      else issues.unpaid.push(sub.id);
     }
   }
-  return false;
+  return issues;
+}
+
+// Ends unpaid Gold subscriptions before a new checkout opens, so the account
+// can buy again and the old subscription can't be paid alongside the new one.
+// Each one's open invoices are voided, then it's cancelled. Voiding comes
+// first because a cancelled subscription is no longer found as unpaid, so an
+// invoice left open on it by a void that failed would be missed on the next
+// try. A call that fails throws.
+async function endUnpaidGold(subscriptionIds) {
+  for (const id of subscriptionIds) {
+    const open = [];
+    for await (const invoice of everyRecord((p) => stripe.invoices.list(p), { subscription: id, status: 'open' })) open.push(invoice);
+    for (const invoice of open) await stripe.invoices.voidInvoice(invoice.id);
+    await stripe.subscriptions.cancel(id, { invoice_now: false, prorate: false });
+  }
 }
 
 // The answer when checkout can't be sure it won't sell a second plan: a plan
-// check or closing an earlier checkout didn't finish.
+// check, closing an earlier checkout or ending an unpaid subscription didn't
+// finish.
 const CHECK_FAILED = { error: "Checkout couldn't check this account's plan. Try again in a moment." };
 
 // A checkout left open in another tab could still be paid and start a second
@@ -798,7 +843,7 @@ router.post('/create-checkout-session', async (req, res) => {
     // customer id would have nowhere to be saved.
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('stripe_customer_id, subscription_tier, subscription_status')
+      .select('stripe_customer_id, subscription_tier, subscription_status, subscription_expires_at')
       .eq('id', user_id)
       .single();
     if (profileError && profileError.code !== 'PGRST116') {
@@ -814,38 +859,78 @@ router.post('/create-checkout-session', async (req, res) => {
     }
     // An account the profile already shows on Gold or Lifetime, from the App
     // Store as much as the web, isn't sold a second plan. Gold kept while
-    // Stripe retries a failed renewal answers with the payment issue.
+    // Stripe retries a failed renewal answers with the payment issue. App
+    // Store Gold whose expiry has passed may have ended with its EXPIRATION
+    // late or lost, and turning the account away on it would keep it out of
+    // checkout for good. So RevenueCat is asked what the account holds now,
+    // and the profile gets it: a plan still running, or one in Apple's billing
+    // grace period, turns the account away, and checkout goes on when it's
+    // free. Without REVENUECAT_SECRET_KEY nothing can tell a grace period from
+    // a plan that ended, and a web plan sold during one would be billed twice
+    // once Apple's retry goes through, so the account is pointed to the App
+    // Store. A settle that can't finish stops checkout.
     if (profile?.subscription_tier === 'gold' || profile?.subscription_tier === 'lifetime') {
       if (profile.subscription_tier === 'gold' && profile.subscription_status === 'past_due') return res.status(409).json(PAYMENT_ISSUE);
-      return res.status(409).json({ error: 'This account already has Gold. You can manage it from Settings.' });
+      if (!appStoreGoldPastExpiry(profile)) return res.status(409).json(HAS_PLAN);
+      let settled;
+      try {
+        settled = await settleExpiredStorePlan(user_id);
+      } catch (e) {
+        console.error('❌ [Stripe] Could not settle an App Store plan past its expiry:', e.message);
+        return res.status(503).json(CHECK_FAILED);
+      }
+      if (!settled) {
+        console.warn(`⚠️ [Stripe] App Store Gold for user ${user_id} is past its expiry and can't be settled without REVENUECAT_SECRET_KEY`);
+        return res.status(409).json(APP_STORE_RENEWING);
+      }
+      if (settled.tier !== 'free') {
+        if (settled.status === 'past_due') return res.status(409).json(PAYMENT_ISSUE);
+        if (settled.source === 'app_store' && settled.expiresAt != null && settled.expiresAt <= Date.now()) return res.status(409).json(APP_STORE_RENEWING);
+        return res.status(409).json(HAS_PLAN);
+      }
     }
 
     // A customer an earlier checkout made for this account is used again, so
     // purchases stay together. A new one is made only when there's none.
     // An account that already holds a live web plan isn't sold a second one,
-    // and neither is one whose Gold renewal failed, since that subscription
-    // bills again once the card works. The check covers the customer checkout
-    // is about to use and every other one made for the account. A check that
-    // can't finish stops checkout, since a plan it missed would be billed
-    // twice.
+    // and neither is one whose Gold renewal is past due, since Stripe still
+    // retries that subscription and it bills again once the card works. An
+    // unpaid one, whose retries ran out, is ended before the new checkout
+    // opens. The check covers the customer checkout is about to use and every
+    // other one made for the account. A check that can't finish stops
+    // checkout, since a plan it missed would be billed twice.
     let customerId;
-    let paymentIssue = false;
+    let issues = { pastDue: false, unpaid: [] };
     let existing = null;
     try {
       customerId = profile?.stripe_customer_id || (await customersFor(user_id, null, { strict: true }))[0] || null;
       if (customerId) {
-        paymentIssue = await goldPaymentIssue(user_id, customerId);
-        if (!paymentIssue) existing = await planForUser(user_id, customerId);
+        issues = await goldPaymentIssues(user_id, customerId);
+        if (!issues.pastDue) existing = await planForUser(user_id, customerId);
       }
     } catch (e) {
       console.error('❌ [Stripe] Could not check for an existing plan:', e.message);
       return res.status(503).json(CHECK_FAILED);
     }
-    if (paymentIssue) {
+    if (issues.pastDue) {
       return res.status(409).json(PAYMENT_ISSUE);
     }
     if (existing) {
-      return res.status(409).json({ error: 'This account already has Gold. You can manage it from Settings.' });
+      return res.status(409).json(HAS_PLAN);
+    }
+
+    // The free week is for an account's first Gold, on the web or the App
+    // Store. A look back that can't finish stops checkout before anything is
+    // made in Stripe, rather than give the week again. With no customer yet
+    // there's no Stripe history, so only the App Store record is read.
+    let firstGold = true;
+    if (!isLifetime) {
+      try {
+        firstGold = !(await hadGoldBefore(user_id, customerId || null));
+      } catch (e) {
+        console.error('❌ [Stripe] Could not check for an earlier subscription:', e.message);
+        return res.status(503).json(CHECK_FAILED);
+      }
     }
 
     const hadCustomer = Boolean(customerId);
@@ -877,18 +962,17 @@ router.post('/create-checkout-session', async (req, res) => {
       }
     }
 
-    // The free week is for an account's first Gold, on the web or the App
-    // Store. A check that fails gives the week, as checkout always did. A
-    // customer made just now has no Stripe history and no open checkouts, so
-    // only the App Store record is read for it.
-    let firstGold = true;
-    if (!isLifetime) {
+    if (issues.unpaid.length > 0) {
       try {
-        firstGold = !(await hadGoldBefore(user_id, hadCustomer ? customerId : null));
+        await endUnpaidGold(issues.unpaid);
       } catch (e) {
-        console.warn('⚠️ [Stripe] Could not check for an earlier subscription:', e.message);
+        console.error('❌ [Stripe] Could not end an unpaid subscription:', e.message);
+        return res.status(503).json(CHECK_FAILED);
       }
+      console.log(`💳 [Stripe] Ended unpaid Gold ${issues.unpaid.join(', ')} for user ${user_id} before a new checkout`);
     }
+
+    // A customer made just now has no open checkouts.
     if (hadCustomer) {
       try {
         await closeOpenCheckouts(user_id, customerId);
