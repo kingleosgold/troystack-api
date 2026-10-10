@@ -162,6 +162,10 @@ app.use('/v1/push', publicLimiter, pushRouter);
 // RevenueCat webhook — iOS subscription events (needs JSON body, so goes after express.json)
 app.post('/v1/webhooks/revenuecat', revenueCatWebhookHandler);
 
+// App Store plan sync for the signed-in account, from RevenueCat's REST API.
+// The app calls it after Purchases.logIn and after restoring purchases.
+app.post('/v1/revenuecat/sync', authenticatedLimiter, require('./routes/revenuecat-webhook').revenueCatSyncHandler);
+
 // Stripe billing (non-webhook routes)
 app.use('/v1/stripe', publicLimiter, stripeRouter);
 
