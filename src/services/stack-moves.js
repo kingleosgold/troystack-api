@@ -22,6 +22,19 @@ const WINDOWS = [
   { key: 'month', label: 'Last 30 days', days: 30 },
 ];
 
+// The current spot the moves are measured to. A static or failed-over price
+// set against real history would invent a gain or loss, so only a quote from
+// a live source counts, or a recent close while the markets are shut.
+function liveSpot(spot, now = new Date()) {
+  if (!spot || !spot.prices) return null;
+  if (/static-fallback|cached-fallback/.test(String(spot.source || ''))) return null;
+  const at = new Date(spot.timestamp);
+  if (Number.isNaN(at.getTime()) || now.getTime() - at.getTime() > MAX_STALE_MS) return null;
+  return spot.prices;
+}
+
+const NO_LIVE_SPOT = 'STACK MOVES:\nCurrent spot isn\'t live right now, so don\'t estimate a daily, weekly or monthly move.\n\n';
+
 // The last price_log row at or before `when`, no more than MAX_STALE_MS
 // earlier. Older rows are thinned to hourly and daily ones, so the nearest
 // earlier row is the honest price.
@@ -159,4 +172,4 @@ function formatStackMoves(moves) {
     + '\nHoldings bought inside a window aren\'t counted in that window.\n\n';
 }
 
-module.exports = { getStackMoves, formatStackMoves, WINDOWS, _spotAt: spotAt };
+module.exports = { getStackMoves, formatStackMoves, liveSpot, NO_LIVE_SPOT, WINDOWS, _spotAt: spotAt };
