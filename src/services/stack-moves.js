@@ -65,11 +65,16 @@ async function spotAt(when) {
 }
 
 // Holdings with no usable purchase date count as held, the same way the
-// stack totals count them.
+// stack totals count them. A plain calendar date has no time, so the holding
+// counts from the end of that day, and one bought on the day a window opens
+// stays out of that window.
 function heldAt(holding, when) {
   if (!holding.purchase_date) return true;
   const bought = new Date(holding.purchase_date);
-  return Number.isNaN(bought.getTime()) ? true : bought <= when;
+  if (Number.isNaN(bought.getTime())) return true;
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(holding.purchase_date).trim());
+  const heldFrom = dateOnly ? bought.getTime() + DAY_MS : bought.getTime();
+  return heldFrom <= when.getTime();
 }
 
 // Same ounce math as the stack totals in routes/troy-chat.js.
