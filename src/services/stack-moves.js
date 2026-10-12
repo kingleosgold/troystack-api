@@ -92,11 +92,29 @@ async function getStackMoves(holdings, prices, now = new Date()) {
   const moves = [];
   for (const w of WINDOWS) {
     const start = new Date(now.getTime() - w.days * DAY_MS);
+
+    // What the user held when the window opened. This needs no price, so a
+    // window that opened before the first purchase says so even when price
+    // history doesn't reach back that far.
+    const held = (holdings || []).filter(h => METALS.includes(h.metal) && heldAt(h, start) && ouncesOf(h) > 0);
+    const untracked = METALS.filter(m => UNTRACKED.includes(m) && held.some(h => h.metal === m));
+    const tracked = held.filter(h => !UNTRACKED.includes(h.metal));
+    if (!held.length) {
+      moves.push({ key: w.key, label: w.label, unavailable: true, nothingHeld: true, missing: [], untracked: [] });
+      continue;
+    }
+    if (!tracked.length) {
+      // Only platinum or palladium was held, and their moves aren't given
+      // with or without history.
+      moves.push({ key: w.key, label: w.label, unavailable: true, missing: [], untracked });
+      continue;
+    }
+
     const then = await spotAt(start);
     if (!then) {
       // No price row near the window's start. The window still gets a line,
       // so a question about it isn't answered from the other windows.
-      moves.push({ key: w.key, label: w.label, unavailable: true, noHistory: true, missing: [], untracked: [] });
+      moves.push({ key: w.key, label: w.label, unavailable: true, noHistory: true, missing: [], untracked });
       continue;
     }
 
@@ -106,39 +124,29 @@ async function getStackMoves(holdings, prices, now = new Date()) {
     // Held metals with no price then or now. They stay out of the sums, and
     // the window says so, so a partial number isn't read as the whole stack.
     const missing = new Set();
-    const untracked = new Set();
-    for (const h of holdings || []) {
+    for (const h of tracked) {
       const m = h.metal;
-      if (!METALS.includes(m) || !heldAt(h, start)) continue;
-      const oz = ouncesOf(h);
-      if (!(oz > 0)) continue;
-      if (UNTRACKED.includes(m)) {
-        untracked.add(m);
-        continue;
-      }
       const from = then[m];
       const to = Number(prices?.[m]) || 0;
       if (!(from > 0) || !(to > 0)) {
         missing.add(m);
         continue;
       }
+      const oz = ouncesOf(h);
       before += oz * from;
       after += oz * to;
       metals[m] = { from, to };
     }
     if (!(before > 0)) {
-      // Nothing in the window could be priced. Keep the window when held
-      // metals were left out, so Troy can say which ones instead of falling
-      // back to a generic no-history note.
+      // Every held metal was left out. Keep the window and name them, so
+      // Troy doesn't fall back to a generic no-history note.
       moves.push({
         key: w.key,
         label: w.label,
         since: then.timestamp,
         unavailable: true,
-        // Nothing left out means nothing was held yet when the window opened.
-        nothingHeld: !missing.size && !untracked.size,
         missing: METALS.filter(m => missing.has(m)),
-        untracked: METALS.filter(m => untracked.has(m)),
+        untracked,
       });
       continue;
     }
@@ -153,7 +161,7 @@ async function getStackMoves(holdings, prices, now = new Date()) {
       pct: ((after - before) / before) * 100,
       metals,
       missing: METALS.filter(m => missing.has(m)),
-      untracked: METALS.filter(m => untracked.has(m)),
+      untracked,
     });
   }
   return moves;
