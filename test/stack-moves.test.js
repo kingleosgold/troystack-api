@@ -111,28 +111,52 @@ test('a price from long before a window does not stand in for it', async () => {
   assert.deepStrictEqual(moves.map(m => m.key), ['month']);
 });
 
-test('a held metal with no price then is left out and named', async () => {
-  priceRows = [{ timestamp: daysAgo(7.1), gold_price: 4100, silver_price: 55, platinum_price: null, palladium_price: null }];
+test('a held metal with no price now is left out and named', async () => {
+  priceRows = [row(7.1, 4100, 55)];
+  const stack = [
+    { metal: 'gold', weight: 1, quantity: 10, purchase_date: '2024-04-01' },
+    { metal: 'silver', weight: 100, quantity: 1, purchase_date: '2024-04-01' },
+  ];
+  const moves = await getStackMoves(stack, { ...prices, silver: 0 }, NOW);
+  const week = moves.find(m => m.key === 'week');
+  assert.strictEqual(week.before, 41000);
+  assert.deepStrictEqual(week.missing, ['silver']);
+  const text = formatStackMoves(moves);
+  assert.match(text, /- Last 7 days: \+\$1000\.00 \(\+2\.4%\)\. Gold \$4100\.00 to \$4200\.00\. Silver isn't counted, since there's no price to compare it with\.\n/);
+});
+
+test('a window with nothing priceable names the metal instead of a generic note', async () => {
+  priceRows = [row(7.1, 4100, 55)];
+  const stack = [{ metal: 'silver', weight: 100, quantity: 1, purchase_date: '2024-04-01' }];
+  const moves = await getStackMoves(stack, { ...prices, silver: 0 }, NOW);
+  assert.deepStrictEqual(moves.map(m => [m.key, !!m.unavailable, m.missing]), [['week', true, ['silver']]]);
+  const text = formatStackMoves(moves);
+  assert.match(text, /- Last 7 days: no move to give\. Silver isn't counted, since there's no price to compare it with\.\n/);
+  assert.doesNotMatch(text, /isn't enough price history/);
+});
+
+test('platinum and palladium stay out of the moves and are named', async () => {
+  priceRows = [row(7.1, 4100, 55)];
   const stack = [
     { metal: 'gold', weight: 1, quantity: 10, purchase_date: '2024-04-01' },
     { metal: 'platinum', weight: 1, quantity: 5, purchase_date: '2024-04-01' },
+    { metal: 'palladium', weight: 1, quantity: 2, purchase_date: '2024-04-01' },
   ];
   const moves = await getStackMoves(stack, prices, NOW);
   const week = moves.find(m => m.key === 'week');
   assert.strictEqual(week.before, 41000);
-  assert.deepStrictEqual(week.missing, ['platinum']);
+  assert.deepStrictEqual(Object.keys(week.metals), ['gold']);
+  assert.deepStrictEqual(week.untracked, ['platinum', 'palladium']);
   const text = formatStackMoves(moves);
-  assert.match(text, /- Last 7 days: \+\$1000\.00 \(\+2\.4%\)\. Gold \$4100\.00 to \$4200\.00\. Platinum isn't counted, since there's no price to compare it with\.\n/);
+  assert.match(text, /Gold \$4100\.00 to \$4200\.00\. Platinum and palladium aren't counted in these moves yet, since their price history isn't reliable\.\n/);
 });
 
-test('a stack with nothing priceable in a window names the metal instead of a generic note', async () => {
-  priceRows = [{ timestamp: daysAgo(7.1), gold_price: 4100, silver_price: 55, platinum_price: null, palladium_price: null }];
+test('a platinum-only stack gets a named line, not a number', async () => {
+  priceRows = [row(7.1, 4100, 55)];
   const stack = [{ metal: 'platinum', weight: 1, quantity: 5, purchase_date: '2024-04-01' }];
   const moves = await getStackMoves(stack, prices, NOW);
-  assert.deepStrictEqual(moves.map(m => [m.key, !!m.unavailable, m.missing]), [['week', true, ['platinum']]]);
-  const text = formatStackMoves(moves);
-  assert.match(text, /- Last 7 days: no move to give, since there's no price to compare platinum with\.\n/);
-  assert.doesNotMatch(text, /isn't enough price history/);
+  assert.deepStrictEqual(moves.map(m => [m.key, !!m.unavailable, m.untracked]), [['week', true, ['platinum']]]);
+  assert.match(formatStackMoves(moves), /- Last 7 days: no move to give\. Platinum isn't counted in these moves yet, since its price history isn't reliable\.\n/);
 });
 
 test('moves are measured to a live quote, never a static or failed-over price', () => {
