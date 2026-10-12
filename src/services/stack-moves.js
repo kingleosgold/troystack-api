@@ -10,6 +10,13 @@ const supabase = require('../lib/supabase');
 const METALS = ['gold', 'silver', 'platinum', 'palladium'];
 const DAY_MS = 86400000;
 
+// Platinum and palladium stay out of the moves for now. When their quotes
+// fail, the price fetcher carries the last known value forward under the
+// same source as gold and silver and logs it to price_log, and their older
+// history is still waiting on the Pt/Pd backfill. A move built on those rows
+// could be invented, so each window names them instead.
+const UNTRACKED = ['platinum', 'palladium'];
+
 // How far before a window's start a price_log row may sit and still stand in
 // for it. Weekends and holidays leave no rows, so a few days of slack is
 // normal. A longer gap means the logger was down, and the window is skipped
@@ -89,11 +96,16 @@ async function getStackMoves(holdings, prices, now = new Date()) {
     // Held metals with no price then or now. They stay out of the sums, and
     // the window says so, so a partial number isn't read as the whole stack.
     const missing = new Set();
+    const untracked = new Set();
     for (const h of holdings || []) {
       const m = h.metal;
       if (!METALS.includes(m) || !heldAt(h, start)) continue;
       const oz = ouncesOf(h);
       if (!(oz > 0)) continue;
+      if (UNTRACKED.includes(m)) {
+        untracked.add(m);
+        continue;
+      }
       const from = then[m];
       const to = Number(prices?.[m]) || 0;
       if (!(from > 0) || !(to > 0)) {
@@ -108,13 +120,14 @@ async function getStackMoves(holdings, prices, now = new Date()) {
       // Nothing in the window could be priced. Keep the window when held
       // metals were left out, so Troy can say which ones instead of falling
       // back to a generic no-history note.
-      if (missing.size) {
+      if (missing.size || untracked.size) {
         moves.push({
           key: w.key,
           label: w.label,
           since: then.timestamp,
           unavailable: true,
           missing: METALS.filter(m => missing.has(m)),
+          untracked: METALS.filter(m => untracked.has(m)),
         });
       }
       continue;
@@ -130,6 +143,7 @@ async function getStackMoves(holdings, prices, now = new Date()) {
       pct: ((after - before) / before) * 100,
       metals,
       missing: METALS.filter(m => missing.has(m)),
+      untracked: METALS.filter(m => untracked.has(m)),
     });
   }
   return moves;
@@ -141,13 +155,24 @@ const name = m => m.charAt(0).toUpperCase() + m.slice(1);
 
 const listOf = names => (names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`);
 
+// "Platinum" or "Platinum and palladium", capitalized once at the front.
+const metalList = metals => {
+  const list = listOf(metals);
+  return list.charAt(0).toUpperCase() + list.slice(1);
+};
+
+function untrackedNote(untracked) {
+  if (!untracked || !untracked.length) return '';
+  return untracked.length === 1
+    ? ` ${metalList(untracked)} isn't counted in these moves yet, since its price history isn't reliable.`
+    : ` ${metalList(untracked)} aren't counted in these moves yet, since their price history isn't reliable.`;
+}
+
 function missingNote(missing) {
   if (!missing || !missing.length) return '';
-  const names = missing.map(name);
-  const list = listOf(names);
-  return names.length === 1
-    ? ` ${list} isn't counted, since there's no price to compare it with.`
-    : ` ${list} aren't counted, since there's no price to compare them with.`;
+  return missing.length === 1
+    ? ` ${metalList(missing)} isn't counted, since there's no price to compare it with.`
+    : ` ${metalList(missing)} aren't counted, since there's no price to compare them with.`;
 }
 
 /**
@@ -160,12 +185,12 @@ function formatStackMoves(moves) {
   }
   const lines = moves.map(mv => {
     if (mv.unavailable) {
-      return `- ${mv.label}: no move to give, since there's no price to compare ${listOf(mv.missing)} with.`;
+      return `- ${mv.label}: no move to give.${missingNote(mv.missing)}${untrackedNote(mv.untracked)}`;
     }
     const metals = Object.entries(mv.metals)
       .map(([m, p]) => `${name(m)} $${p.from.toFixed(2)} to $${p.to.toFixed(2)}`)
       .join(', ');
-    return `- ${mv.label}: ${money(mv.change)} (${pct(mv.pct)}). ${metals}.${missingNote(mv.missing)}`;
+    return `- ${mv.label}: ${money(mv.change)} (${pct(mv.pct)}). ${metals}.${missingNote(mv.missing)}${untrackedNote(mv.untracked)}`;
   });
   return 'STACK MOVES (spot moves on what the user already held, before premiums):\n'
     + lines.join('\n')
