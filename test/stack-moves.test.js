@@ -124,3 +124,13 @@ test('a held metal with no price then is left out and named', async () => {
   const text = formatStackMoves(moves);
   assert.match(text, /- Last 7 days: \+\$1000\.00 \(\+2\.4%\)\. Gold \$4100\.00 to \$4200\.00\. Platinum isn't counted, since there's no price to compare it with\.\n/);
 });
+
+test('a stack with nothing priceable in a window names the metal instead of a generic note', async () => {
+  priceRows = [{ timestamp: daysAgo(7.1), gold_price: 4100, silver_price: 55, platinum_price: null, palladium_price: null }];
+  const stack = [{ metal: 'platinum', weight: 1, quantity: 5, purchase_date: '2024-04-01' }];
+  const moves = await getStackMoves(stack, prices, NOW);
+  assert.deepStrictEqual(moves.map(m => [m.key, !!m.unavailable, m.missing]), [['week', true, ['platinum']]]);
+  const text = formatStackMoves(moves);
+  assert.match(text, /- Last 7 days: no move to give, since there's no price to compare platinum with\.\n/);
+  assert.doesNotMatch(text, /isn't enough price history/);
+});
