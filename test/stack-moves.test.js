@@ -206,3 +206,22 @@ test('a window that opened before anything was bought says so', async () => {
   assert.match(formatStackMoves(moves), /- Last 7 days: nothing in the stack was held yet when this window opened\.\n/);
   assert.strictEqual(moves.find(m => m.key === 'day').before, 4180);
 });
+
+test('a window from before the first purchase says so even with no history that far back', async () => {
+  // The first metal was bought three days ago and price_log reaches back
+  // only a week, so no row sits near the 30-day start.
+  priceRows = [row(7.1, 4100, 55), row(1.05, 4180, 59.5)];
+  const stack = [{ metal: 'gold', weight: 1, quantity: 1, purchase_date: daysAgo(3).slice(0, 10) }];
+  const moves = await getStackMoves(stack, prices, NOW);
+  const month = moves.find(m => m.key === 'month');
+  assert.deepStrictEqual([month.nothingHeld, !!month.noHistory], [true, false]);
+  assert.match(formatStackMoves(moves), /- Last 30 days: nothing in the stack was held yet when this window opened\.\n/);
+});
+
+test('a stack of only platinum or palladium is named even with no history', async () => {
+  priceRows = [];
+  const stack = [{ metal: 'palladium', weight: 1, quantity: 2, purchase_date: '2024-04-01' }];
+  const text = formatStackMoves(await getStackMoves(stack, prices, NOW));
+  assert.match(text, /- Last 7 days: no move to give\. Palladium isn't counted in these moves yet, since its price history isn't reliable\.\n/);
+  assert.doesNotMatch(text, /no price history covers this window/);
+});
