@@ -442,17 +442,16 @@ router.post('/conversations/:id/messages', async (req, res) => {
 
     const userHoldings = holdings || [];
 
-    // Get current spot prices from in-memory cache (same source as /v1/prices)
-    let prices = getCachedPrices();
-    if (!prices.gold || !prices.silver) {
-      // Cache cold (server just started) — fetch fresh
-      try {
-        const fresh = await getSpotPrices();
-        prices = fresh.prices;
-      } catch (e) {
-        console.error('[Troy Chat] Price fetch fallback failed:', e.message);
-      }
+    // One spot snapshot for the whole prompt. getSpotPrices refreshes a cold
+    // or stale cache and says where the price came from, so the stack totals,
+    // CURRENT SPOT and STACK MOVES below all use the same quote.
+    let spot = null;
+    try {
+      spot = await getSpotPrices();
+    } catch (e) {
+      console.error('[Troy Chat] Spot fetch failed:', e.message);
     }
+    const prices = spot?.prices || getCachedPrices();
 
     // Build portfolio summary
     const metalTotals = { gold: { oz: 0, cost: 0 }, silver: { oz: 0, cost: 0 }, platinum: { oz: 0, cost: 0 }, palladium: { oz: 0, cost: 0 } };
@@ -576,9 +575,9 @@ router.post('/conversations/:id/messages', async (req, res) => {
     let stackMoves = '';
     if (userHoldings.length > 0) {
       try {
-        // Measured to a live quote only. getSpotPrices says where the price
-        // came from, and a static or failed-over one would invent a move.
-        const live = liveSpot(await getSpotPrices());
+        // Measured to a live quote only. A static or failed-over price would
+        // invent a move, so those get a note not to estimate one.
+        const live = liveSpot(spot);
         stackMoves = live ? formatStackMoves(await getStackMoves(userHoldings, live)) : NO_LIVE_SPOT;
       } catch (movesErr) {
         console.log(`[Troy Chat] Stack moves error (non-fatal): ${movesErr.message}`);
