@@ -36,7 +36,7 @@ stub.loaded = true;
 stub.exports = fakeSupabase;
 require.cache[supabasePath] = stub;
 
-const { getStackMoves, formatStackMoves } = require('../src/services/stack-moves');
+const { getStackMoves, formatStackMoves, liveSpot, NO_LIVE_SPOT } = require('../src/services/stack-moves');
 
 const NOW = new Date('2026-10-12T04:00:00Z');
 const daysAgo = d => new Date(NOW.getTime() - d * 86400000).toISOString();
@@ -133,4 +133,16 @@ test('a stack with nothing priceable in a window names the metal instead of a ge
   const text = formatStackMoves(moves);
   assert.match(text, /- Last 7 days: no move to give, since there's no price to compare platinum with\.\n/);
   assert.doesNotMatch(text, /isn't enough price history/);
+});
+
+test('moves are measured to a live quote, never a static or failed-over price', () => {
+  const at = h => new Date(NOW.getTime() - h * 3600000).toISOString();
+  assert.deepStrictEqual(liveSpot({ prices, source: 'yahoo_finance', timestamp: at(0.1) }, NOW), prices);
+  assert.deepStrictEqual(liveSpot({ prices, source: 'yahoo_finance (friday-close)', timestamp: at(60) }, NOW), prices);
+  assert.strictEqual(liveSpot({ prices, source: 'static-fallback', timestamp: at(0.1) }, NOW), null);
+  assert.strictEqual(liveSpot({ prices, source: 'cached-fallback', timestamp: at(0.1) }, NOW), null);
+  assert.strictEqual(liveSpot({ prices, source: 'static-fallback (friday-close)', timestamp: at(60) }, NOW), null);
+  assert.strictEqual(liveSpot({ prices, source: 'metalpriceapi', timestamp: at(24 * 5) }, NOW), null);
+  assert.strictEqual(liveSpot({ prices, source: 'metalpriceapi' }, NOW), null);
+  assert.match(NO_LIVE_SPOT, /^STACK MOVES:\nCurrent spot isn't live right now/);
 });
