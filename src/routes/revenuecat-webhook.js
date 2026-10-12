@@ -42,9 +42,16 @@
 // App Store purchase on record, so a refund or a subscription grant that
 // arrives late can't end or replace a newer period, and of the latest
 // purchase a refund ended, so a grant for it that arrives late can't give it
-// back. It also keeps what the App Store still owes the account, the latest
-// subscription expiry and whether a lifetime purchase stands, so one plan
-// ending doesn't take another away.
+// back. Subscriptions and lifetime keep those times apart, and an event is
+// judged only against its own kind. It also keeps what the App Store still
+// owes the account, the latest subscription expiry and whether a lifetime
+// purchase stands, so one plan ending doesn't take another away.
+//
+// Where an event writes both the record and the profile, the record goes
+// first. The checks a retry makes read the profile, which a failed write
+// left as it was, or parts of the record whose answer the event's own record
+// write doesn't change, so when the profile write fails and RevenueCat sends
+// the event again, the retry takes the same path and finishes it.
 
 const crypto = require('node:crypto');
 const supabase = require('../lib/supabase');
@@ -184,11 +191,15 @@ async function withAccountTurn(id, work) {
 }
 
 // Each account's record is kept in app_state under this key as
-// { purchasedAt, endedAt, subscriptionUntil, subscriptionTrial, graceUntil,
-// lifetime, temporaryEndedAt, hadPlan }:
-//   - purchasedAt, the purchase time in ms of the newest App Store purchase
-//     on record
-//   - endedAt, the purchase time of the latest one a refund ended
+// { subscriptionPurchasedAt, subscriptionEndedAt, subscriptionReversedAt,
+// subscriptionUntil, subscriptionTrial, graceUntil, lifetimePurchasedAt,
+// lifetimeEndedAt, lifetimeReversedAt, lifetime, temporaryEndedAt, hadPlan }:
+//   - subscriptionPurchasedAt, the purchase time in ms of the newest App
+//     Store subscription purchase on record, a renewal included
+//   - subscriptionEndedAt, the purchase time of the latest subscription
+//     purchase a refund ended
+//   - subscriptionReversedAt, the event time of the latest REFUND_REVERSED
+//     for a subscription, so the refund it undid, sent again, ends nothing
 //   - subscriptionUntil, when the latest App Store subscription period on
 //     record ends, until it's refunded or expires
 //   - subscriptionTrial, true while that period is a free trial
@@ -196,6 +207,8 @@ async function withAccountTurn(id, work) {
 //     as the sync read it from RevenueCat. The period's own end stays in
 //     subscriptionUntil and on the profile, so the EXPIRATION sent when the
 //     grace period runs out still matches it.
+//   - lifetimePurchasedAt, lifetimeEndedAt and lifetimeReversedAt, the same
+//     three times for App Store lifetime purchases
 //   - lifetime, true while an App Store lifetime purchase stands
 //   - temporaryEndedAt, the event time of the latest expiry that ended a
 //     temporary grant
@@ -204,6 +217,17 @@ async function withAccountTurn(id, work) {
 // Any of them can be missing.
 function grantKey(id) {
   return `revenuecat_grant:${id}`;
+}
+
+// The record's purchase and refund times for each kind of App Store purchase.
+const KIND_TIMES = {
+  subscription: { purchased: 'subscriptionPurchasedAt', ended: 'subscriptionEndedAt', reversed: 'subscriptionReversedAt' },
+  lifetime: { purchased: 'lifetimePurchasedAt', ended: 'lifetimeEndedAt', reversed: 'lifetimeReversedAt' },
+};
+
+// The kind of purchase a product's tier makes: lifetime, or a subscription.
+function kindOf(tier) {
+  return tier === 'lifetime' ? 'lifetime' : 'subscription';
 }
 
 // A time in ms, or null when it isn't a positive number.
@@ -227,18 +251,35 @@ async function readRecord(id) {
     }
   }
   return {
-    purchasedAt: positiveMs(value?.purchasedAt),
-    endedAt: positiveMs(value?.endedAt),
+    subscriptionPurchasedAt: positiveMs(value?.subscriptionPurchasedAt),
+    subscriptionEndedAt: positiveMs(value?.subscriptionEndedAt),
+    subscriptionReversedAt: positiveMs(value?.subscriptionReversedAt),
     subscriptionUntil: positiveMs(value?.subscriptionUntil),
     subscriptionTrial: value?.subscriptionTrial === true,
     graceUntil: positiveMs(value?.graceUntil),
+    lifetimePurchasedAt: positiveMs(value?.lifetimePurchasedAt),
+    lifetimeEndedAt: positiveMs(value?.lifetimeEndedAt),
+    lifetimeReversedAt: positiveMs(value?.lifetimeReversedAt),
     lifetime: value?.lifetime === true,
     temporaryEndedAt: positiveMs(value?.temporaryEndedAt),
     hadPlan: value?.hadPlan === true,
   };
 }
 
-const RECORD_FIELDS = ['purchasedAt', 'endedAt', 'subscriptionUntil', 'subscriptionTrial', 'graceUntil', 'lifetime', 'temporaryEndedAt', 'hadPlan'];
+const RECORD_FIELDS = [
+  'subscriptionPurchasedAt',
+  'subscriptionEndedAt',
+  'subscriptionReversedAt',
+  'subscriptionUntil',
+  'subscriptionTrial',
+  'graceUntil',
+  'lifetimePurchasedAt',
+  'lifetimeEndedAt',
+  'lifetimeReversedAt',
+  'lifetime',
+  'temporaryEndedAt',
+  'hadPlan',
+];
 
 // Saves the record, leaving out what's empty. A write that fails throws.
 async function writeRecord(id, record) {
@@ -263,21 +304,31 @@ async function updateRecord(id, change) {
   if (!RECORD_FIELDS.every((field) => next[field] === record[field])) await writeRecord(id, next);
 }
 
-// Records a grant once its plan is on the profile, or once lifetime is kept
-// over it: its purchase time, unless a newer one is already on record, which
+// Records a grant, before its plan goes on the profile: its purchase time
+// among purchases of its kind, unless a newer one is already on record, which
 // a late or repeated event finds; a subscription's expiry, when it's later
-// than the one on record; and a lifetime purchase. A reversed refund also
-// wipes the record of a refund ending this purchase or an older one, so the
-// purchase it gives back is treated like any other from then on. A read or
-// write that fails throws and RevenueCat sends the event again, and the
-// profile write it repeats does no harm.
-async function recordGrant(id, { purchasedAtMs, until = null, trial = false, lifetime = false, reversesRefund = false }) {
+// than the one on record; and a lifetime purchase. A reversed refund, given
+// its event time as reversedAtMs, also wipes the record of a refund ending
+// this purchase or an older one of its kind, so the purchase it gives back is
+// treated like any other from then on, and keeps the latest reversal's time
+// for its kind. A read or write that fails throws and RevenueCat sends the
+// event again, and the record write it repeats changes nothing.
+async function recordGrant(id, { kind, purchasedAtMs, until = null, trial = false, reversedAtMs = null }) {
   const at = positiveMs(purchasedAtMs);
   const ends = positiveMs(until);
-  if (at == null && ends == null && !lifetime) return;
+  const reversedAt = positiveMs(reversedAtMs);
+  if (at == null && ends == null && reversedAt == null && kind !== 'lifetime') return;
+  const { purchased, ended, reversed } = KIND_TIMES[kind];
   await updateRecord(id, (record) => {
-    if (at != null && (record.purchasedAt == null || record.purchasedAt < at)) record.purchasedAt = at;
-    if (reversesRefund && at != null && record.endedAt != null && record.endedAt <= at) record.endedAt = null;
+    if (at != null && (record[purchased] == null || record[purchased] < at)) record[purchased] = at;
+    if (reversedAt != null) {
+      if (at != null && record[ended] != null && record[ended] <= at) record[ended] = null;
+      if (record[reversed] == null || record[reversed] < reversedAt) record[reversed] = reversedAt;
+    }
+    if (kind === 'lifetime') {
+      record.lifetime = true;
+      return record;
+    }
     // Whether the period is a free trial goes with the period on record, and
     // a new period starts with no grace period.
     if (ends != null && (record.subscriptionUntil == null || record.subscriptionUntil <= ends)) {
@@ -285,23 +336,23 @@ async function recordGrant(id, { purchasedAtMs, until = null, trial = false, lif
       record.subscriptionUntil = ends;
       record.subscriptionTrial = trial;
     }
-    if (lifetime) record.lifetime = true;
     return record;
   });
 }
 
-// Records that a refund ended a purchase, once the profile no longer has it,
-// so a grant for it that RevenueCat sends again afterwards, on a retry or out
-// of order, gives nothing back. The later of this purchase and any refunded
-// one already on record is kept, and the newest purchase on record stays as
-// it is. What was refunded, the lifetime purchase or the subscription, no
-// longer counts as owed. A read or write that fails throws and RevenueCat
-// sends the refund again, and the profile write it repeats does no harm.
-async function recordEnd(id, purchasedAtMs, { lifetime }) {
+// Records that a refund ended a purchase, before the profile drops it, so a
+// grant for it that RevenueCat sends again afterwards, on a retry or out of
+// order, gives nothing back. The later of this purchase and any refunded one
+// of its kind already on record is kept, and the newest purchase on record
+// stays as it is. What was refunded, the lifetime purchase or the
+// subscription, no longer counts as owed. A read or write that fails throws
+// and RevenueCat sends the refund again.
+async function recordEnd(id, purchasedAtMs, kind) {
   const at = positiveMs(purchasedAtMs);
+  const { ended } = KIND_TIMES[kind];
   await updateRecord(id, (record) => {
-    if (at != null && (record.endedAt == null || record.endedAt < at)) record.endedAt = at;
-    if (lifetime) {
+    if (at != null && (record[ended] == null || record[ended] < at)) record[ended] = at;
+    if (kind === 'lifetime') {
       record.lifetime = false;
     } else {
       record.subscriptionUntil = null;
@@ -312,11 +363,13 @@ async function recordEnd(id, purchasedAtMs, { lifetime }) {
   });
 }
 
-// A subscription period that ended comes off the record, unless a later
-// period is already on it.
-async function endSubscriptionOnRecord(id, expiresMs) {
+// A subscription period that ended comes off the record. An expiry for the
+// newest subscription purchase on record, current, takes it off whatever its
+// date, and otherwise the date decides, so a later period already on record
+// stays.
+async function endSubscriptionOnRecord(id, expiresMs, { current = false } = {}) {
   await updateRecord(id, (record) => {
-    if (record.subscriptionUntil != null && (expiresMs == null || record.subscriptionUntil <= expiresMs)) {
+    if (record.subscriptionUntil != null && (current || expiresMs == null || record.subscriptionUntil <= expiresMs)) {
       record.subscriptionUntil = null;
       record.subscriptionTrial = false;
       record.graceUntil = null;
@@ -325,25 +378,49 @@ async function endSubscriptionOnRecord(id, expiresMs) {
   });
 }
 
-// Whether a purchase newer than this one is on record for the account.
-// Without a purchase time on the event or a record, there's no telling, so no.
-async function newerGrantApplied(id, purchasedAtMs) {
-  const at = positiveMs(purchasedAtMs);
+// Whether a refund is one a reversal already undid, sent again late: its
+// event is older than the latest REFUND_REVERSED for its kind on record.
+// Without an event time on the refund or a reversal on record, there's no
+// telling, so no.
+async function refundReversedSince(id, refundedAtMs, kind) {
+  const at = positiveMs(refundedAtMs);
   if (at == null) return false;
-  const { purchasedAt } = await readRecord(id);
-  return purchasedAt != null && purchasedAt > at;
+  const reversedAt = (await readRecord(id))[KIND_TIMES[kind].reversed];
+  return reversedAt != null && at < reversedAt;
 }
 
-// Whether what's on record has overtaken a grant: a refund ended this
-// purchase or a later one, or, unless the grant is lifetime, a newer purchase
-// is on record. Without a purchase time on the event or a record, there's no
+// How a subscription event's purchase compares with the newest subscription
+// purchase on record: 'older' or 'current', the same one or newer, and null
+// when the event or the record has no purchase time, so there's no telling.
+async function subscriptionPurchaseOrder(id, purchasedAtMs) {
+  const at = positiveMs(purchasedAtMs);
+  if (at == null) return null;
+  const newest = (await readRecord(id)).subscriptionPurchasedAt;
+  if (newest == null) return null;
+  return at < newest ? 'older' : 'current';
+}
+
+// Whether a purchase of the same kind newer than this one is on record for
+// the account. Without a purchase time on the event or a record, there's no
 // telling, so no.
-async function grantSuperseded(id, purchasedAtMs, { lifetime = false } = {}) {
+async function newerPurchaseOnRecord(id, purchasedAtMs, kind) {
   const at = positiveMs(purchasedAtMs);
   if (at == null) return false;
-  const { purchasedAt, endedAt } = await readRecord(id);
-  if (endedAt != null && at <= endedAt) return true;
-  return !lifetime && purchasedAt != null && at < purchasedAt;
+  const newest = (await readRecord(id))[KIND_TIMES[kind].purchased];
+  return newest != null && newest > at;
+}
+
+// Whether what's on record for purchases of the grant's kind has overtaken
+// it: a refund ended this purchase or a later one, or, when olderIsLate, a
+// newer purchase is on record. Without a purchase time on the event or a
+// record, there's no telling, so no.
+async function grantSuperseded(id, purchasedAtMs, kind, { olderIsLate }) {
+  const at = positiveMs(purchasedAtMs);
+  if (at == null) return false;
+  const record = await readRecord(id);
+  const { purchased, ended } = KIND_TIMES[kind];
+  if (record[ended] != null && at <= record[ended]) return true;
+  return olderIsLate && record[purchased] != null && at < record[purchased];
 }
 
 // What the record says the App Store still owes an account: lifetime, Gold
@@ -402,16 +479,26 @@ function fieldsFor(plan) {
 const REVENUECAT_SUBSCRIBERS = 'https://api.revenuecat.com/v1/subscribers/';
 const REVENUECAT_TIMEOUT_MS = 10 * 1000;
 
-async function fetchSubscriber(appUserId) {
+async function fetchSubscriber(appUserId, { timeoutMs = REVENUECAT_TIMEOUT_MS } = {}) {
   const key = process.env.REVENUECAT_SECRET_KEY;
   if (!key) throw new Error('REVENUECAT_SECRET_KEY is not set');
   const res = await fetch(REVENUECAT_SUBSCRIBERS + encodeURIComponent(appUserId), {
     headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
-    signal: AbortSignal.timeout(REVENUECAT_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`RevenueCat answered ${res.status}`);
   const body = await res.json();
   return body?.subscriber || {};
+}
+
+// The plan an entitlement gives: lifetime when it's named for lifetime or a
+// lifetime product grants it, Gold when it's the Gold entitlement, the legacy
+// Silver one, or a Gold product grants it, and otherwise none. The app reads
+// its plan the same way, so a Gold product named some other way still counts.
+function entitlementTier(entitlementId, productId) {
+  if (mapProductToTier(entitlementId) === 'lifetime' || mapProductToTier(productId) === 'lifetime') return 'lifetime';
+  if (String(entitlementId).toLowerCase() === 'silver' || mapProductToTier(entitlementId) === 'gold' || mapProductToTier(productId) === 'gold') return 'gold';
+  return 'free';
 }
 
 // Whether every purchase RevenueCat lists for a product was made in the
@@ -422,34 +509,52 @@ function sandboxOnly(subscriber, productId) {
   return bought.length > 0 && bought.every((purchase) => purchase.is_sandbox === true);
 }
 
-// What the App Store holds for a subscriber now.
-//   - lifetime comes from the subscriber's entitlements, which RevenueCat
-//     ends when a purchase is refunded or a family share is revoked. The
-//     purchase itself stays listed under non_subscriptions with nothing to
-//     say it's gone, so it doesn't count on its own. An entitlement named for
-//     lifetime, or granted by a lifetime product, counts while it has no
-//     expiry or one still ahead. A sandbox lifetime counts only for an
-//     account listed for it.
-//   - until, graceUntil and trial come from the latest Gold subscription
-//     that wasn't refunded and is still running, or still in Apple's billing
-//     grace period: when its period ends, when its grace period ends, and
-//     whether the period is a free trial.
-//   - listed says whether RevenueCat lists any Gold product for the
-//     subscriber at all, running, expired or refunded, which means the
-//     account has had an App Store plan.
+// What the App Store holds for a subscriber now. Plans come from the
+// subscriber's entitlements, the way the app reads them, which RevenueCat
+// ends when a purchase is refunded or a family share is revoked. Subscriptions
+// whose product is a Gold one count too, so one still running behind a
+// lifetime entitlement stays on record.
+//   - lifetime comes from an entitlement named for lifetime, or granted by a
+//     lifetime product, while it has no expiry or one still ahead. A lifetime
+//     purchase stays listed under non_subscriptions with nothing to say it was
+//     refunded, so it doesn't count on its own. A sandbox lifetime counts only
+//     for an account listed for it.
+//   - until, graceUntil, trial and purchasedAt come from a Gold entitlement or
+//     Gold subscription that wasn't refunded and is still running, or still
+//     in Apple's billing grace period: when its period ends, when its grace
+//     period ends, whether the period is a free trial, and when it was bought
+//     or last renewed. One whose period still runs is picked over one that's
+//     only in its grace period, and then the one that runs longest.
+//   - listed says whether RevenueCat lists any Gold plan for the subscriber
+//     at all, running, expired or refunded, which means the account has had
+//     an App Store plan.
 function storeHoldings(subscriber, id) {
   const now = Date.now();
   let lifetime = false;
-  let until = null;
-  let graceUntil = null;
-  let trial = false;
+  let pick = null;
   let listed = false;
+  const consider = (expiresDate, graceDate, sub) => {
+    const ends = Date.parse(expiresDate || '') || 0;
+    const grace = Date.parse(graceDate || '') || 0;
+    const runsTo = Math.max(ends, grace);
+    if (sub?.refunded_at || ends <= 0 || runsTo <= now) return;
+    const running = ends > now;
+    if (!pick || (running && !pick.running) || (running === pick.running && runsTo > pick.runsTo)) {
+      const trial = String(sub?.period_type || '').toLowerCase() === 'trial';
+      pick = { ends, grace, runsTo, running, trial, purchasedAt: Date.parse(sub?.purchase_date || '') || null };
+    }
+  };
   for (const [entitlementId, entitlement] of Object.entries(subscriber.entitlements || {})) {
     const productId = entitlement?.product_identifier;
-    if (!entitlement || (mapProductToTier(entitlementId) !== 'lifetime' && mapProductToTier(productId) !== 'lifetime')) continue;
-    if (entitlement.expires_date && !(Date.parse(entitlement.expires_date) > now)) continue;
-    if (sandboxOnly(subscriber, productId) && !sandboxLifetimeAllowed(id)) continue;
-    lifetime = true;
+    const tier = entitlement ? entitlementTier(entitlementId, productId) : 'free';
+    if (tier === 'free') continue;
+    if (tier === 'lifetime' && sandboxOnly(subscriber, productId) && !sandboxLifetimeAllowed(id)) continue;
+    listed = true;
+    if (tier === 'lifetime') {
+      if (!entitlement.expires_date || Date.parse(entitlement.expires_date) > now) lifetime = true;
+      continue;
+    }
+    consider(entitlement.expires_date, entitlement.grace_period_expires_date, subscriber.subscriptions?.[productId] || { purchase_date: entitlement.purchase_date });
   }
   for (const [productId, purchases] of Object.entries(subscriber.non_subscriptions || {})) {
     if (mapProductToTier(productId) !== 'lifetime') continue;
@@ -459,17 +564,16 @@ function storeHoldings(subscriber, id) {
     const tier = mapProductToTier(productId);
     if (!sub || tier === 'free') continue;
     if (tier !== 'lifetime' || !sub.is_sandbox || sandboxLifetimeAllowed(id)) listed = true;
-    if (tier === 'lifetime' || sub.refunded_at) continue;
-    const ends = Date.parse(sub.expires_date || '') || 0;
-    const grace = Date.parse(sub.grace_period_expires_date || '') || 0;
-    const runsTo = Math.max(ends, grace);
-    if (ends > 0 && runsTo > now && (until == null || runsTo > Math.max(until, graceUntil ?? 0))) {
-      until = ends;
-      graceUntil = grace > ends ? grace : null;
-      trial = String(sub.period_type || '').toLowerCase() === 'trial';
-    }
+    if (tier !== 'lifetime') consider(sub.expires_date, sub.grace_period_expires_date, sub);
   }
-  return { lifetime, until, graceUntil, trial, listed };
+  return {
+    lifetime,
+    until: pick ? pick.ends : null,
+    graceUntil: pick && pick.grace > pick.ends ? pick.grace : null,
+    trial: pick ? pick.trial : false,
+    purchasedAt: pick ? pick.purchasedAt : null,
+    listed,
+  };
 }
 
 // Reads what RevenueCat holds for an account and puts it on the record and on
@@ -484,6 +588,11 @@ async function syncFromRevenueCat(id) {
       record.subscriptionUntil = store.until;
       record.subscriptionTrial = store.until != null && store.trial;
       record.graceUntil = store.until != null ? store.graceUntil : null;
+      // The running period's purchase time, so an expiry or a refund for it
+      // is judged by purchase time, as when a grant put it there.
+      if (store.purchasedAt != null && (record.subscriptionPurchasedAt == null || record.subscriptionPurchasedAt < store.purchasedAt)) {
+        record.subscriptionPurchasedAt = store.purchasedAt;
+      }
       if (store.listed) record.hadPlan = true;
       return record;
     });
@@ -551,7 +660,9 @@ async function applyEvent(event) {
     // it gives back is older than the one on record. That newer purchase may
     // have been refunded or run out since, so skipping the reversal could
     // leave the account without what Apple gave back.
-    if (type !== 'REFUND_REVERSED' && (await grantSuperseded(id, event.purchased_at_ms, { lifetime: lifetimeGrant }))) {
+    // Each kind is judged by its own purchase and refund times only.
+    const kind = kindOf(tier);
+    if (type !== 'REFUND_REVERSED' && (await grantSuperseded(id, event.purchased_at_ms, kind, { olderIsLate: !lifetimeGrant }))) {
       return { skipped: 'superseded' };
     }
     const profile = await profileForPurchase(id);
@@ -560,27 +671,29 @@ async function applyEvent(event) {
     // count paying subscribers by subscription_status count App Store ones
     // too. A purchase that validated after a temporary grant isn't temporary
     // now. Whether the period is a trial goes on record with it.
-    const trial = tier !== 'lifetime' && String(event.period_type || '').toUpperCase() === 'TRIAL';
-    const grant = {
+    const trial = kind === 'subscription' && String(event.period_type || '').toUpperCase() === 'TRIAL';
+    // The record goes first. If the profile write fails, the retry finds this
+    // purchase on record, which doesn't hold it back, and finishes. The other
+    // way round, a retry that came after the period ran out would be skipped,
+    // and the purchase would never reach the record.
+    await recordGrant(id, {
+      kind,
       purchasedAtMs: event.purchased_at_ms,
-      until: tier === 'lifetime' ? null : expiresMs,
+      until: kind === 'lifetime' ? null : expiresMs,
       trial,
-      lifetime: tier === 'lifetime',
-      reversesRefund: type === 'REFUND_REVERSED',
-    };
-    // A subscription bought after lifetime doesn't replace it. It's kept on
-    // record, so it still counts if the lifetime purchase is refunded.
-    if (profile.subscription_tier === 'lifetime' && tier !== 'lifetime') {
-      await recordGrant(id, grant);
-      return { kept: 'lifetime' };
-    }
+      // A reversal's time is kept, so the refund it undid, sent again, ends
+      // nothing. Without one on the event, it's the time it arrived.
+      reversedAtMs: type === 'REFUND_REVERSED' ? (positiveMs(event.event_timestamp_ms) ?? Date.now()) : null,
+    });
+    // A subscription bought after lifetime doesn't replace it. It's on record,
+    // so it still counts if the lifetime purchase is refunded.
+    if (profile.subscription_tier === 'lifetime' && kind !== 'lifetime') return { kept: 'lifetime' };
     await writeProfile(id, {
       subscription_tier: tier,
       subscription_expires_at: tier === 'lifetime' ? null : expires,
       subscription_status: trial ? 'trialing' : 'active',
       trial_end: trial ? expires : null,
     });
-    await recordGrant(id, grant);
     return { tier };
   }
 
@@ -612,6 +725,7 @@ async function applyEvent(event) {
     if (refund && tier === 'lifetime' && sandboxLifetimeBlocked(event, id)) return { skipped: 'sandbox_lifetime' };
     const profile = await readProfile(id);
     if (!profile) return { skipped: 'no_profile' };
+    const kind = kindOf(tier);
     // A refund ends what was refunded right away. Another plan still stands.
     if (refund) {
       // A refund can arrive late, or come again on a retry, after a renewal
@@ -621,24 +735,34 @@ async function applyEvent(event) {
       // period end stored here is always later, so a refund of the current
       // period would look replaced too. RevenueCat sends this event for a
       // subscription only when its latest period is refunded, so a refund for
-      // a purchase older than the newest one on record came late, and the
-      // purchase times are compared. A lifetime purchase can be refunded any
-      // time, so its refund always counts.
-      if (tier !== 'lifetime' && (await newerGrantApplied(id, event.purchased_at_ms))) return { skipped: 'superseded' };
-      if (tier === 'lifetime' || profile.subscription_tier !== 'lifetime') {
-        const left = await planLeft(id, profile, { ignore: tier === 'lifetime' ? 'lifetime' : 'subscription' });
+      // a purchase older than the newest subscription purchase on record came
+      // late, and the purchase times are compared. A lifetime purchase made
+      // after it doesn't count, since it's another kind. A lifetime purchase
+      // can be refunded any time, so its refund counts unless a reversal
+      // undid it. Of either kind, a refund older than the latest reversal for
+      // its kind is the one that reversal undid, sent again, and it ends
+      // nothing.
+      if (await refundReversedSince(id, event.event_timestamp_ms, kind)) return { skipped: 'superseded' };
+      if (kind === 'subscription' && (await newerPurchaseOnRecord(id, event.purchased_at_ms, 'subscription'))) return { skipped: 'superseded' };
+      if (kind === 'lifetime' || profile.subscription_tier !== 'lifetime') {
+        // The record goes first, and the plan left is worked out from it.
+        await recordEnd(id, event.purchased_at_ms, kind);
+        const left = await planLeft(id, profile, { ignore: kind });
         await writeProfile(id, fieldsFor(left));
-        await recordEnd(id, event.purchased_at_ms, { lifetime: tier === 'lifetime' });
         return { tier: left.tier, refunded: true };
       }
       // A refunded subscription leaves lifetime as it is, but it comes off
       // the record, so it can't keep Gold if the lifetime purchase is
       // refunded later.
-      await recordEnd(id, event.purchased_at_ms, { lifetime: false });
+      await recordEnd(id, event.purchased_at_ms, 'subscription');
       return { kept: 'lifetime' };
     }
-    // Auto-renew turned off. The plan runs to the end of the period.
+    // Auto-renew turned off. The plan runs to the end of the period. One for
+    // a purchase older than the newest subscription purchase on record came
+    // late, after a renewal, and its expiry would pull the profile's back far
+    // enough for that older period's expiry to end the current one.
     if (profile.subscription_tier === 'lifetime') return { kept: 'lifetime' };
+    if (kind === 'subscription' && (await newerPurchaseOnRecord(id, event.purchased_at_ms, 'subscription'))) return { skipped: 'superseded' };
     await writeProfile(id, { subscription_expires_at: expires });
     return { expires };
   }
@@ -647,31 +771,42 @@ async function applyEvent(event) {
     const profile = await readProfile(id);
     if (!profile) return { skipped: 'no_profile' };
     // A temporary grant whose purchase never validated ends, whatever
-    // product the event names, and its status goes with it.
-    if (profile.subscription_status === TEMPORARY) {
-      const left = await planLeft(id, profile);
-      await writeProfile(id, fieldsFor(left));
-      // So the grant this ended, sent again, gives nothing back.
-      const endedAt = positiveMs(event.event_timestamp_ms) ?? Date.now();
+    // product the event names, and its status goes with it. An expiry from
+    // before the grant began is an older one sent again late, so it isn't the
+    // grant's end, and it's judged below like any other, against the grant's
+    // expiry on the profile.
+    const eventAt = positiveMs(event.event_timestamp_ms);
+    const grantBegan = Date.parse(profile.subscription_expires_at || '') - TEMPORARY_MS;
+    if (profile.subscription_status === TEMPORARY && !(eventAt != null && eventAt < grantBegan)) {
+      // The end goes on record first, so the grant sent again gives nothing
+      // back, and a retry after a failed profile write still finds the grant
+      // on the profile and finishes.
+      const endedAt = eventAt ?? Date.now();
       await updateRecord(id, (record) => {
         if (record.temporaryEndedAt == null || record.temporaryEndedAt < endedAt) record.temporaryEndedAt = endedAt;
         return record;
       });
+      const left = await planLeft(id, profile);
+      await writeProfile(id, fieldsFor(left));
       return { tier: left.tier, temporary: true };
     }
     if (tier === 'free') return { skipped: 'unknown_product' };
     if (tier === 'lifetime') return { skipped: 'lifetime_does_not_expire' };
+    // A retried expiry that lands after a renewal or a new purchase is for a
+    // period that's already been replaced, so it ends nothing. The purchase
+    // times decide, as for a cancellation. A date can't: an expiry for the
+    // current purchase can carry an earlier date than the one stored, when a
+    // family share is revoked partway through the period or a cancellation
+    // for a failed renewal stored its grace period's end, and it still ends
+    // the plan. Only when a purchase time is missing do the dates decide.
+    const order = await subscriptionPurchaseOrder(id, event.purchased_at_ms);
+    const stored = Date.parse(profile.subscription_expires_at || '');
+    const replaced = order ? order === 'older' : Boolean(expires && Number.isFinite(stored) && stored > expiresMs);
+    if (replaced) return { skipped: 'superseded' };
     // The period is over, so it comes off the record and can't keep Gold if
     // a lifetime purchase is refunded later.
-    if (profile.subscription_tier === 'lifetime') {
-      await endSubscriptionOnRecord(id, expiresMs);
-      return { kept: 'lifetime' };
-    }
-    // A retried expiry that lands after a renewal or a new purchase is for a
-    // period that's already been replaced, so it ends nothing.
-    const stored = Date.parse(profile.subscription_expires_at || '');
-    if (expires && Number.isFinite(stored) && stored > expiresMs) return { skipped: 'superseded' };
-    await endSubscriptionOnRecord(id, expiresMs);
+    await endSubscriptionOnRecord(id, expiresMs, { current: order === 'current' });
+    if (profile.subscription_tier === 'lifetime') return { kept: 'lifetime' };
     const left = await planLeft(id, profile);
     await writeProfile(id, fieldsFor(left));
     return { tier: left.tier };
@@ -794,32 +929,36 @@ async function appStorePlanOnRecord(id) {
 // that fails throws.
 async function hadAppStorePlan(id) {
   const record = await readRecord(id);
-  return record.purchasedAt != null || record.endedAt != null || record.subscriptionUntil != null || record.lifetime || record.hadPlan;
+  return [record.subscriptionPurchasedAt, record.subscriptionEndedAt, record.subscriptionUntil, record.lifetimePurchasedAt, record.lifetimeEndedAt].some((time) => time != null) || record.lifetime || record.hadPlan;
 }
 
-// For stripe.js: whether RevenueCat lists any Gold product for the account,
-// running, expired or refunded. The record only knows the purchases this
-// webhook or the sync has seen, so someone who took the App Store trial
-// before then, or let it lapse, is found here. It's null without
-// REVENUECAT_SECRET_KEY, since RevenueCat can't be asked, and a read that
-// fails throws.
-async function revenueCatListsGold(id) {
+// For stripe.js: what RevenueCat says the App Store holds for the account
+// now, read as the sync reads it: whether Lifetime stands, when a running
+// subscription's period and grace period end, and whether RevenueCat lists
+// any Gold plan at all, running, expired or refunded. The record only knows
+// the purchases this webhook or the sync has seen, so someone who took the
+// App Store trial before then, let it lapse, or holds a plan the profile
+// never got, is found here. It's null without REVENUECAT_SECRET_KEY, since
+// RevenueCat can't be asked, and a read that fails or runs past timeoutMs
+// throws.
+async function revenueCatHoldings(id, { timeoutMs } = {}) {
   if (!process.env.REVENUECAT_SECRET_KEY) return null;
-  return storeHoldings(await fetchSubscriber(id), id).listed;
+  return storeHoldings(await fetchSubscriber(id, { timeoutMs }), id);
 }
 
-// For stripe.js: settles Gold on a profile whose App Store period has ended,
-// since an EXPIRATION that's late or lost would leave it Gold, and checkout
-// would turn the account away for good. RevenueCat is asked what the account
-// holds now and the profile gets it in the account's turn, as the sync route
-// does, which counts Apple's billing grace period and a renewal the webhook
+// For stripe.js: puts what RevenueCat holds for the account on the record and
+// the profile, in the account's turn, as the sync route does, which counts
+// Apple's billing grace period and a renewal the webhook never got. Checkout
+// calls it for App Store Gold on a profile whose period has ended, since an
+// EXPIRATION that's late or lost would leave it Gold and keep the account
+// out for good, and for an App Store plan RevenueCat shows that the profile
 // never got. The record alone can't tell a grace period from a plan that
 // ended, and a plan sold on the web during one would be billed twice once
 // Apple's retry goes through. So without REVENUECAT_SECRET_KEY, or without
 // the web plan check that keeps a plan bought on troystack.ai from being
-// written over, nothing is settled and it answers null. Otherwise it answers
+// written over, nothing is synced and it answers null. Otherwise it answers
 // the plan the account now has, and a read or write that fails throws.
-async function settleExpiredStorePlan(id) {
+async function syncStorePlan(id) {
   if (!process.env.REVENUECAT_SECRET_KEY || !webPlanCheck) return null;
   return syncFromRevenueCat(id);
 }
@@ -833,7 +972,7 @@ module.exports = {
   setWebPlanCheck,
   appStorePlanOnRecord,
   hadAppStorePlan,
-  revenueCatListsGold,
-  settleExpiredStorePlan,
+  revenueCatHoldings,
+  syncStorePlan,
   accountTurn,
 };
