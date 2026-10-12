@@ -1744,3 +1744,49 @@ test('the sync reads Gold from the Gold entitlement, whatever the product behind
   });
   assert.strictEqual(db.state[GRANT_KEY].subscriptionUntil, ends);
 }));
+
+test('a billing issue puts the grace period on record, so a lifetime refund during it leaves Gold', withSecret(SECRET, async () => {
+  const ends = Date.now() - 3600 * 1000;
+  const grace = Date.now() + 10 * DAY;
+  const bought = ends - 60 * DAY;
+  const rows = { [USER]: { ...freeRow(), subscription_tier: 'lifetime', subscription_status: 'active' } };
+  const record = { subscriptionPurchasedAt: ends - 30 * DAY, subscriptionUntil: ends, lifetimePurchasedAt: bought, lifetime: true };
+  const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { ...record } } });
+  const { revenueCatWebhookHandler } = loadHandler(db);
+  const issue = await send(revenueCatWebhookHandler, { type: 'BILLING_ISSUE', app_user_id: USER, product_id: 'monthly', expiration_at_ms: ends, grace_period_expiration_at_ms: grace });
+  assert.strictEqual(issue.body.skipped, 'billing_issue');
+  assert.strictEqual(db.state[GRANT_KEY].graceUntil, grace);
+
+  // The same billing issue sent again changes nothing.
+  const writes = db.stateWrites.length;
+  await send(revenueCatWebhookHandler, { type: 'BILLING_ISSUE', app_user_id: USER, product_id: 'monthly', expiration_at_ms: ends, grace_period_expiration_at_ms: grace });
+  assert.strictEqual(db.stateWrites.length, writes);
+
+  const refund = await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: bought });
+  assert.strictEqual(refund.code, 200);
+  assert.strictEqual(rows[USER].subscription_tier, 'gold', 'Apple still owes the grace period');
+}));
+
+test("a billing issue for a period that isn't the one on record leaves the record alone", withSecret(SECRET, async () => {
+  const until = Date.now() + 20 * DAY;
+  const rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_status: 'active' } };
+  const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { subscriptionPurchasedAt: Date.now() - 10 * DAY, subscriptionUntil: until } } });
+  const { revenueCatWebhookHandler } = loadHandler(db);
+  await send(revenueCatWebhookHandler, { type: 'BILLING_ISSUE', app_user_id: USER, product_id: 'monthly', expiration_at_ms: Date.now() - 10 * DAY, grace_period_expiration_at_ms: Date.now() + 6 * DAY });
+  assert.strictEqual(db.state[GRANT_KEY].graceUntil, undefined);
+  assert.deepStrictEqual(db.stateWrites, []);
+}));
+
+test('a reversed refund for an older purchase leaves the later running period on the profile', withSecret(SECRET, async () => {
+  const first = Date.now() - 20 * DAY;
+  const later = Date.now() - 5 * DAY;
+  const laterUntil = later + 365 * DAY;
+  const rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_status: 'active', subscription_expires_at: new Date(laterUntil).toISOString() } };
+  const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { subscriptionPurchasedAt: later, subscriptionUntil: laterUntil, subscriptionEndedAt: first } } });
+  const { revenueCatWebhookHandler } = loadHandler(db);
+  const res = await send(revenueCatWebhookHandler, { type: 'REFUND_REVERSED', app_user_id: USER, product_id: 'monthly', purchased_at_ms: first, expiration_at_ms: Date.now() + 10 * DAY, event_timestamp_ms: Date.now() - 3600 * 1000 });
+  assert.strictEqual(res.body.tier, 'gold');
+  assert.strictEqual(rows[USER].subscription_expires_at, new Date(laterUntil).toISOString());
+  assert.strictEqual(rows[USER].subscription_status, 'active');
+  assert.strictEqual(db.state[GRANT_KEY].subscriptionUntil, laterUntil);
+}));
