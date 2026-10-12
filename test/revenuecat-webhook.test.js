@@ -584,7 +584,7 @@ test('a refund of the current period still ends it, though its expiry reads as t
   const db = fakeSupabase(rows);
   const { revenueCatWebhookHandler } = loadHandler(db);
   await send(revenueCatWebhookHandler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: bought, expiration_at_ms: bought + 30 * DAY });
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought, subscriptionUntil: bought + 30 * DAY });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: bought, subscriptionUntil: bought + 30 * DAY });
 
   const res = await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'monthly', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: bought, expiration_at_ms: refundedAt });
   assert.strictEqual(res.code, 200);
@@ -601,21 +601,21 @@ test('grants record their purchase time, and a late older grant leaves a newer r
   const first = Date.now() - DAY;
   const second = first + 30 * DAY;
   await send(revenueCatWebhookHandler, { type: 'INITIAL_PURCHASE', app_user_id: USER, product_id: 'monthly', purchased_at_ms: first, expiration_at_ms: second });
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: first, subscriptionUntil: second });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: first, subscriptionUntil: second });
   await send(revenueCatWebhookHandler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: second, expiration_at_ms: second + 30 * DAY });
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: second, subscriptionUntil: second + 30 * DAY });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: second, subscriptionUntil: second + 30 * DAY });
 
   // The first purchase's event comes again on a retry.
   const res = await send(revenueCatWebhookHandler, { type: 'INITIAL_PURCHASE', app_user_id: USER, product_id: 'monthly', purchased_at_ms: first, expiration_at_ms: second });
   assert.strictEqual(res.code, 200);
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: second, subscriptionUntil: second + 30 * DAY });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: second, subscriptionUntil: second + 30 * DAY });
 
   // A grant without a purchase time changes no purchase time on record, and
   // this one's expiry is the one already there.
   await send(revenueCatWebhookHandler, { type: 'UNCANCELLATION', app_user_id: USER, product_id: 'monthly', expiration_at_ms: second + 30 * DAY });
   assert.deepStrictEqual(db.stateWrites, [
-    { key: GRANT_KEY, value: { purchasedAt: first, subscriptionUntil: second } },
-    { key: GRANT_KEY, value: { purchasedAt: second, subscriptionUntil: second + 30 * DAY } },
+    { key: GRANT_KEY, value: { subscriptionPurchasedAt: first, subscriptionUntil: second } },
+    { key: GRANT_KEY, value: { subscriptionPurchasedAt: second, subscriptionUntil: second + 30 * DAY } },
   ]);
 }));
 
@@ -630,20 +630,20 @@ test("a purchase record that can't be read or written answers 500 so RevenueCat 
     const res = await send(revenueCatWebhookHandler, purchase);
     assert.strictEqual(res.code, 500, fail);
     // The record is read before anything is written, to see whether a refund
-    // already ended this purchase, and written after the profile.
-    assert.strictEqual(rows[USER].subscription_tier, fail === 'failStateRead' ? 'free' : 'gold', fail);
+    // already ended this purchase, and written before the profile.
+    assert.strictEqual(rows[USER].subscription_tier, 'free', fail);
     assert.deepStrictEqual(db.stateWrites, [], fail);
-    // The retry repeats the profile write, which does no harm, and records the purchase.
+    // The retry records the purchase and puts the plan on the profile.
     opts[fail] = false;
     const retry = await send(revenueCatWebhookHandler, purchase);
     assert.strictEqual(retry.code, 200, fail);
     assert.strictEqual(rows[USER].subscription_tier, 'gold', fail);
-    assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: at, subscriptionUntil: at + 30 * DAY }, fail);
+    assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: at, subscriptionUntil: at + 30 * DAY }, fail);
   }
 
   // A refund whose record can't be read ends nothing until it can be.
   const rows = { [USER]: { subscription_tier: 'gold', subscription_status: null, subscription_expires_at: new Date(at + 30 * DAY).toISOString(), stripe_customer_id: null } };
-  const db = fakeSupabase(rows, { failStateRead: true, state: { [GRANT_KEY]: { purchasedAt: at } } });
+  const db = fakeSupabase(rows, { failStateRead: true, state: { [GRANT_KEY]: { subscriptionPurchasedAt: at } } });
   const { revenueCatWebhookHandler } = loadHandler(db);
   const res = await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'monthly', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: at, expiration_at_ms: at + DAY });
   assert.strictEqual(res.code, 500);
@@ -656,7 +656,7 @@ test('a purchase or renewal sent again after its period ran out gives nothing ba
   const renewed = ended - 30 * DAY;
   const bought = renewed - 30 * DAY;
   const rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_expires_at: new Date(ended).toISOString() } };
-  const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: renewed } } });
+  const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { subscriptionPurchasedAt: renewed } } });
   const { revenueCatWebhookHandler } = loadHandler(db);
   // The renewed month ran out an hour ago, and its expiry ended the plan.
   await send(revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', expiration_at_ms: ended });
@@ -686,7 +686,7 @@ test('a grant sent again after its purchase was refunded gives nothing back, and
   await send(revenueCatWebhookHandler, purchase);
   const refund = await send(revenueCatWebhookHandler, { ...purchase, type: 'CANCELLATION', cancel_reason: 'CUSTOMER_SUPPORT', expiration_at_ms: bought + DAY });
   assert.strictEqual(refund.body.refunded, true);
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought, endedAt: bought });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: bought, subscriptionEndedAt: bought });
   const profileWrites = db.writes.length;
   const recordWrites = db.stateWrites.length;
 
@@ -707,7 +707,7 @@ test('a grant sent again after its purchase was refunded gives nothing back, and
   const res = await send(revenueCatWebhookHandler, { ...purchase, type: 'RENEWAL', purchased_at_ms: again, expiration_at_ms: again + 30 * DAY });
   assert.strictEqual(res.body.tier, 'gold');
   assert.strictEqual(rows[USER].subscription_expires_at, new Date(again + 30 * DAY).toISOString());
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: again, endedAt: bought, subscriptionUntil: again + 30 * DAY });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: again, subscriptionEndedAt: bought, subscriptionUntil: again + 30 * DAY });
 }));
 
 test('a purchase that lands after its own refund gives nothing back', withSecret(SECRET, async () => {
@@ -719,7 +719,7 @@ test('a purchase that lands after its own refund gives nothing back', withSecret
   const { revenueCatWebhookHandler } = loadHandler(db);
   const refund = await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'yearly_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: bought, expiration_at_ms: bought + DAY });
   assert.strictEqual(refund.body.refunded, true);
-  assert.deepStrictEqual(db.state[GRANT_KEY], { endedAt: bought });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionEndedAt: bought });
 
   const res = await send(revenueCatWebhookHandler, { type: 'INITIAL_PURCHASE', app_user_id: USER, product_id: 'yearly_gold', purchased_at_ms: bought, expiration_at_ms: bought + 365 * DAY });
   assert.strictEqual(res.body.skipped, 'superseded');
@@ -736,13 +736,14 @@ test('a reversed refund gives the refunded purchase back and clears its end, so 
   await send(revenueCatWebhookHandler, { ...purchase, type: 'INITIAL_PURCHASE' });
   await send(revenueCatWebhookHandler, { ...purchase, type: 'CANCELLATION', cancel_reason: 'CUSTOMER_SUPPORT', expiration_at_ms: bought + DAY });
   assert.strictEqual(rows[USER].subscription_tier, 'free');
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought, endedAt: bought });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: bought, subscriptionEndedAt: bought });
 
-  const res = await send(revenueCatWebhookHandler, { ...purchase, type: 'REFUND_REVERSED' });
+  const reversedAt = Date.now() - 3600 * 1000;
+  const res = await send(revenueCatWebhookHandler, { ...purchase, type: 'REFUND_REVERSED', event_timestamp_ms: reversedAt });
   assert.strictEqual(res.body.tier, 'gold');
   assert.strictEqual(rows[USER].subscription_tier, 'gold');
   assert.strictEqual(rows[USER].subscription_expires_at, new Date(until).toISOString());
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought, subscriptionUntil: until });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: bought, subscriptionReversedAt: reversedAt, subscriptionUntil: until });
 
   // Turning auto-renew back on applies as it would have before the refund.
   const uncancel = await send(revenueCatWebhookHandler, { ...purchase, type: 'UNCANCELLATION' });
@@ -755,11 +756,12 @@ test('a reversed refund leaves the end of a later refunded purchase in place', w
   const first = Date.now() - 10 * DAY;
   const later = Date.now() - 2 * DAY;
   const rows = { [USER]: freeRow() };
-  const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: later, endedAt: later } } });
+  const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { subscriptionPurchasedAt: later, subscriptionEndedAt: later } } });
   const { revenueCatWebhookHandler } = loadHandler(db);
-  const res = await send(revenueCatWebhookHandler, { type: 'REFUND_REVERSED', app_user_id: USER, product_id: 'monthly', purchased_at_ms: first, expiration_at_ms: first + 30 * DAY });
+  const reversedAt = Date.now() - 3600 * 1000;
+  const res = await send(revenueCatWebhookHandler, { type: 'REFUND_REVERSED', app_user_id: USER, product_id: 'monthly', purchased_at_ms: first, expiration_at_ms: first + 30 * DAY, event_timestamp_ms: reversedAt });
   assert.strictEqual(res.body.tier, 'gold');
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: later, endedAt: later, subscriptionUntil: first + 30 * DAY });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: later, subscriptionEndedAt: later, subscriptionReversedAt: reversedAt, subscriptionUntil: first + 30 * DAY });
 
   // The later purchase's grant sent again still gives nothing.
   const retried = await send(revenueCatWebhookHandler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: later, expiration_at_ms: later + 30 * DAY });
@@ -773,12 +775,13 @@ test('a late refund of an older lifetime purchase keeps the later end on record'
   const first = Date.now() - 10 * DAY;
   const later = Date.now() - 2 * DAY;
   const rows = { [USER]: freeRow() };
-  const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: later, endedAt: later } } });
+  const record = { subscriptionPurchasedAt: later, subscriptionEndedAt: later, lifetimePurchasedAt: first, lifetimeEndedAt: first };
+  const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { ...record } } });
   const { revenueCatWebhookHandler } = loadHandler(db);
   const res = await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: first });
   assert.strictEqual(res.body.refunded, true);
   assert.deepStrictEqual(db.stateWrites, []);
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: later, endedAt: later });
+  assert.deepStrictEqual(db.state[GRANT_KEY], record);
 }));
 
 test('a lifetime refund records its end, and the lifetime purchase sent again gives nothing back', withSecret(SECRET, async () => {
@@ -792,7 +795,7 @@ test('a lifetime refund records its end, and the lifetime purchase sent again gi
   const refund = await send(revenueCatWebhookHandler, { ...purchase, type: 'CANCELLATION', cancel_reason: 'CUSTOMER_SUPPORT' });
   assert.strictEqual(refund.body.refunded, true);
   assert.strictEqual(rows[USER].subscription_tier, 'free');
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought, endedAt: bought });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { lifetimePurchasedAt: bought, lifetimeEndedAt: bought });
 
   const profileWrites = db.writes.length;
   const res = await send(revenueCatWebhookHandler, purchase);
@@ -803,26 +806,29 @@ test('a lifetime refund records its end, and the lifetime purchase sent again gi
 
 test("a refund whose end can't be recorded answers 500 so RevenueCat sends it again", withSecret(SECRET, async () => {
   const bought = Date.now() - 2 * DAY;
-  // A lifetime refund reads the record before the profile write, to see
-  // whether an App Store subscription still runs, so a read that fails there
-  // changes nothing yet.
-  for (const [product, tier, fail] of [['monthly', 'gold', 'failStateWrite'], ['lifetime_gold', 'lifetime', 'failStateRead']]) {
+  // A refund records its end before the profile drops the plan, so a record
+  // read or write that fails changes nothing yet.
+  for (const [product, tier, fail, purchased, ended] of [
+    ['monthly', 'gold', 'failStateWrite', 'subscriptionPurchasedAt', 'subscriptionEndedAt'],
+    ['lifetime_gold', 'lifetime', 'failStateRead', 'lifetimePurchasedAt', 'lifetimeEndedAt'],
+  ]) {
     const rows = { [USER]: { ...freeRow(), subscription_tier: tier } };
-    const opts = { [fail]: true, state: { [GRANT_KEY]: { purchasedAt: bought } } };
+    const opts = { [fail]: true, state: { [GRANT_KEY]: { [purchased]: bought } } };
     const db = fakeSupabase(rows, opts);
     const { revenueCatWebhookHandler } = loadHandler(db);
     const refund = { type: 'CANCELLATION', app_user_id: USER, product_id: product, cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: bought };
     const res = await send(revenueCatWebhookHandler, refund);
     assert.strictEqual(res.code, 500, fail);
-    assert.strictEqual(rows[USER].subscription_tier, fail === 'failStateRead' ? tier : 'free', fail);
-    assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought }, fail);
+    assert.strictEqual(rows[USER].subscription_tier, tier, fail);
+    assert.deepStrictEqual(db.state[GRANT_KEY], { [purchased]: bought }, fail);
 
-    // The retry repeats the profile write, which does no harm, and records the end.
+    // The retry records the end and drops the plan from the profile.
     opts[fail] = false;
     const retry = await send(revenueCatWebhookHandler, refund);
     assert.strictEqual(retry.code, 200, fail);
     assert.strictEqual(retry.body.refunded, true, fail);
-    assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: bought, endedAt: bought }, fail);
+    assert.strictEqual(rows[USER].subscription_tier, 'free', fail);
+    assert.deepStrictEqual(db.state[GRANT_KEY], { [purchased]: bought, [ended]: bought }, fail);
   }
 }));
 
@@ -849,7 +855,7 @@ test('an older RENEWAL sent again after a newer one changes nothing', withSecret
   assert.strictEqual(rows[USER].subscription_expires_at, new Date(olderEnd + 30 * DAY).toISOString(), 'the expiry stays where the newer month put it');
   assert.strictEqual(db.writes.length, profileWrites, 'no profile write');
   assert.strictEqual(db.stateWrites.length, recordWrites, 'no record write');
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: newer.purchased_at_ms, subscriptionUntil: olderEnd + 30 * DAY });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: newer.purchased_at_ms, subscriptionUntil: olderEnd + 30 * DAY });
 }));
 
 test('a lifetime grant older than the purchase on record still applies', withSecret(SECRET, async () => {
@@ -861,13 +867,13 @@ test('a lifetime grant older than the purchase on record still applies', withSec
     { type: 'PRODUCT_CHANGE', product_id: 'monthly', new_product_id: 'lifetime_gold' },
   ]) {
     const rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_expires_at: new Date(newer + 30 * DAY).toISOString() } };
-    const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: newer } } });
+    const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { subscriptionPurchasedAt: newer } } });
     const { revenueCatWebhookHandler } = loadHandler(db);
     const res = await send(revenueCatWebhookHandler, { ...event, app_user_id: USER, purchased_at_ms: older });
     assert.strictEqual(res.body.tier, 'lifetime', event.type);
     assert.strictEqual(rows[USER].subscription_tier, 'lifetime', event.type);
     assert.strictEqual(rows[USER].subscription_expires_at, null, event.type);
-    assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: newer, lifetime: true }, `${event.type}: the newer purchase stays on record`);
+    assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: newer, lifetimePurchasedAt: older, lifetime: true }, `${event.type}: the newer purchase stays on record`);
   }
 }));
 
@@ -878,7 +884,7 @@ test('a grant with the same purchase time as the record still applies', withSecr
   const db = fakeSupabase(rows);
   const { revenueCatWebhookHandler } = loadHandler(db);
   await send(revenueCatWebhookHandler, { ...period, type: 'RENEWAL' });
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: renewed, subscriptionUntil: renewed + 30 * DAY });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: renewed, subscriptionUntil: renewed + 30 * DAY });
 
   // Turning auto-renew back on, then Apple extending the same period.
   const uncancel = await send(revenueCatWebhookHandler, { ...period, type: 'UNCANCELLATION' });
@@ -950,7 +956,7 @@ test('a yearly App Store subscriber who buys lifetime and refunds it keeps Gold 
   assert.strictEqual(res.body.tier, 'gold');
   assert.strictEqual(rows[USER].subscription_tier, 'gold');
   assert.strictEqual(rows[USER].subscription_expires_at, new Date(yearlyEnds).toISOString());
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: lifetimeBought, endedAt: lifetimeBought, subscriptionUntil: yearlyEnds });
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: yearlyBought, subscriptionUntil: yearlyEnds, lifetimePurchasedAt: lifetimeBought, lifetimeEndedAt: lifetimeBought });
 }));
 
 test('a subscription renewed while lifetime holds still counts after a lifetime refund, and one refunded or expired meanwhile does not', withSecret(SECRET, async () => {
@@ -963,7 +969,7 @@ test('a subscription renewed while lifetime holds still counts after a lifetime 
 
   // The renewal is kept on record while lifetime holds, and Gold runs to its end.
   let rows = { [USER]: lifetimeRow() };
-  let db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: lifetimeBought, lifetime: true } } });
+  let db = fakeSupabase(rows, { state: { [GRANT_KEY]: { lifetimePurchasedAt: lifetimeBought, lifetime: true } } });
   let handler = loadHandler(db).revenueCatWebhookHandler;
   assert.deepStrictEqual((await send(handler, renewal)).body.kept, 'lifetime');
   assert.strictEqual(rows[USER].subscription_tier, 'lifetime');
@@ -973,7 +979,7 @@ test('a subscription renewed while lifetime holds still counts after a lifetime 
 
   // Refunded while lifetime held, the subscription leaves nothing to fall back on.
   rows = { [USER]: lifetimeRow() };
-  db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: lifetimeBought, lifetime: true } } });
+  db = fakeSupabase(rows, { state: { [GRANT_KEY]: { lifetimePurchasedAt: lifetimeBought, lifetime: true } } });
   handler = loadHandler(db).revenueCatWebhookHandler;
   await send(handler, renewal);
   assert.strictEqual((await send(handler, { ...renewal, type: 'CANCELLATION', cancel_reason: 'CUSTOMER_SUPPORT', expiration_at_ms: renewed + DAY })).body.kept, 'lifetime');
@@ -982,7 +988,7 @@ test('a subscription renewed while lifetime holds still counts after a lifetime 
 
   // Expired while lifetime held, the same.
   rows = { [USER]: lifetimeRow() };
-  db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: lifetimeBought, lifetime: true, subscriptionUntil: Date.now() + DAY } } });
+  db = fakeSupabase(rows, { state: { [GRANT_KEY]: { lifetimePurchasedAt: lifetimeBought, lifetime: true, subscriptionUntil: Date.now() + DAY } } });
   handler = loadHandler(db).revenueCatWebhookHandler;
   await send(handler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', expiration_at_ms: Date.now() + DAY });
   assert.strictEqual(db.state[GRANT_KEY].subscriptionUntil, undefined);
@@ -1016,7 +1022,7 @@ test('a TRANSFER moves the plan: the account it left loses Gold and the one it r
     [OTHER]: { ...freeRow(), subscription_tier: 'gold', subscription_expires_at: new Date(until).toISOString() },
     [USER]: freeRow(),
   };
-  const db = fakeSupabase(rows, { state: { [`revenuecat_grant:${OTHER}`]: { purchasedAt: Date.now() - 100 * DAY, subscriptionUntil: until } } });
+  const db = fakeSupabase(rows, { state: { [`revenuecat_grant:${OTHER}`]: { subscriptionPurchasedAt: Date.now() - 100 * DAY, subscriptionUntil: until } } });
   const mod = loadHandler(db);
   mod.setWebPlanCheck(noWebPlan);
   const { revenueCatWebhookHandler } = mod;
@@ -1136,7 +1142,7 @@ test('an expiry and the renewal after it, at once for one account, take turns so
   let answerLate;
   const late = new Promise((resolve) => { answerLate = resolve; });
   const rows = { [USER]: { ...freeRow(), subscription_tier: 'lifetime', subscription_status: 'active' } };
-  const db = fakeSupabase(rows, { holdFirstRecordRead: late, state: { [GRANT_KEY]: { purchasedAt: periodEnd - 30 * DAY, subscriptionUntil: periodEnd, lifetime: true } } });
+  const db = fakeSupabase(rows, { holdFirstRecordRead: late, state: { [GRANT_KEY]: { subscriptionPurchasedAt: periodEnd - 30 * DAY, subscriptionUntil: periodEnd, lifetime: true } } });
   const { revenueCatWebhookHandler } = loadHandler(db);
 
   // The expiry reads the record, and the answer is slow to come back.
@@ -1156,10 +1162,10 @@ test('a lifetime refund and a renewal at once take turns, so the renewal is neit
   let answerLate;
   const late = new Promise((resolve) => { answerLate = resolve; });
   const rows = { [USER]: { ...freeRow(), subscription_tier: 'lifetime', subscription_status: 'active' } };
-  const db = fakeSupabase(rows, { holdFirstRecordRead: late, state: { [GRANT_KEY]: { purchasedAt: lifetimeBought, lifetime: true } } });
+  const db = fakeSupabase(rows, { holdFirstRecordRead: late, state: { [GRANT_KEY]: { lifetimePurchasedAt: lifetimeBought, lifetime: true } } });
   const { revenueCatWebhookHandler } = loadHandler(db);
 
-  // The refund looks for what else the account holds, and that answer is slow.
+  // The refund reads the record, and that answer is slow.
   const refund = send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: lifetimeBought });
   await until(() => db.recordReads === 1);
   const renewal = send(revenueCatWebhookHandler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: renewed, expiration_at_ms: renewed + 30 * DAY });
@@ -1169,7 +1175,7 @@ test('a lifetime refund and a renewal at once take turns, so the renewal is neit
   assert.deepStrictEqual((await Promise.all([refund, renewal])).map((res) => res.code), [200, 200]);
   assert.strictEqual(rows[USER].subscription_tier, 'gold', 'the paid renewal keeps Gold');
   assert.strictEqual(rows[USER].subscription_expires_at, new Date(renewed + 30 * DAY).toISOString());
-  assert.deepStrictEqual(db.state[GRANT_KEY], { purchasedAt: renewed, endedAt: lifetimeBought, subscriptionUntil: renewed + 30 * DAY }, 'lifetime stays refunded');
+  assert.deepStrictEqual(db.state[GRANT_KEY], { subscriptionPurchasedAt: renewed, subscriptionUntil: renewed + 30 * DAY, lifetimePurchasedAt: lifetimeBought, lifetimeEndedAt: lifetimeBought }, 'lifetime stays refunded');
 }));
 
 test("an event for an account another instance is applying waits its turn, and answers 500 if the turn isn't given back", withSecret(SECRET, async () => {
@@ -1234,7 +1240,7 @@ test('an App Store grant marks the profile active, or trialing during a free tri
 
   // A subscription still on record after a lifetime refund counts as active.
   rows[USER] = { ...freeRow(), subscription_tier: 'lifetime', subscription_status: 'active' };
-  db.state[GRANT_KEY] = { purchasedAt: lifetimeBought, lifetime: true, subscriptionUntil: until };
+  db.state[GRANT_KEY] = { lifetimePurchasedAt: lifetimeBought, lifetime: true, subscriptionUntil: until };
   await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: lifetimeBought });
   assert.deepStrictEqual(fields(), { tier: 'gold', status: 'active', trialEnd: null });
 }));
@@ -1329,7 +1335,7 @@ test('App Store Gold past its expiry is settled for stripe.js only by asking Rev
   // since the record can't tell a grace period from a plan that ended.
   for (const [label, key, webPlan] of [['no key', null, noWebPlan], ['no web plan check', REST_KEY, null]]) {
     const rows = { [USER]: lapsed() };
-    const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { purchasedAt: periodEnd - 30 * DAY, subscriptionUntil: periodEnd } } });
+    const db = fakeSupabase(rows, { state: { [GRANT_KEY]: { subscriptionPurchasedAt: periodEnd - 30 * DAY, subscriptionUntil: periodEnd } } });
     const mod = loadHandler(db);
     if (webPlan) mod.setWebPlanCheck(webPlan);
     const api = revenueCatApi({});
@@ -1337,7 +1343,7 @@ test('App Store Gold past its expiry is settled for stripe.js only by asking Rev
     global.fetch = api.fetch;
     try {
       await withEnv({ REVENUECAT_SECRET_KEY: key }, async () => {
-        assert.strictEqual(await mod.settleExpiredStorePlan(USER), null, label);
+        assert.strictEqual(await mod.syncStorePlan(USER), null, label);
       });
     } finally {
       global.fetch = before;
@@ -1356,7 +1362,7 @@ test('App Store Gold past its expiry is settled for stripe.js only by asking Rev
   mod.setWebPlanCheck(noWebPlan);
   const api = revenueCatApi({ [USER]: inGrace });
   await withRevenueCatApi(api, async () => {
-    const plan = await mod.settleExpiredStorePlan(USER);
+    const plan = await mod.syncStorePlan(USER);
     assert.strictEqual(plan.tier, 'gold');
     assert.strictEqual(plan.expiresAt, periodEnd);
   });
@@ -1364,7 +1370,7 @@ test('App Store Gold past its expiry is settled for stripe.js only by asking Rev
   assert.deepStrictEqual(profile(rows), { tier: 'gold', status: 'active', expires: new Date(periodEnd).toISOString() });
   // Once RevenueCat holds nothing running for the account, it's free.
   await withRevenueCatApi(revenueCatApi({}), async () => {
-    assert.strictEqual((await mod.settleExpiredStorePlan(USER)).tier, 'free');
+    assert.strictEqual((await mod.syncStorePlan(USER)).tier, 'free');
   });
   assert.deepStrictEqual(profile(rows), { tier: 'free', status: null, expires: null });
 
@@ -1374,7 +1380,7 @@ test('App Store Gold past its expiry is settled for stripe.js only by asking Rev
   heldMod.setWebPlanCheck(noWebPlan);
   heldMod.accountTurn.waitMs = 200;
   await withRevenueCatApi(revenueCatApi({}), async () => {
-    await assert.rejects(heldMod.settleExpiredStorePlan(USER), /still being applied/);
+    await assert.rejects(heldMod.syncStorePlan(USER), /still being applied/);
   });
   assert.deepStrictEqual(held.writes, []);
 }));
@@ -1411,8 +1417,8 @@ test('the sync records any Gold product RevenueCat lists, expired or not, so the
   mod.setWebPlanCheck(noWebPlan);
   assert.strictEqual(await mod.hadAppStorePlan(USER), false);
   await withRevenueCatApi(revenueCatApi({ [USER]: lapsedTrial }), async () => {
-    assert.strictEqual(await mod.revenueCatListsGold(USER), true, 'RevenueCat asked directly');
-    assert.strictEqual(await mod.revenueCatListsGold(OTHER), false, 'nothing listed');
+    assert.strictEqual((await mod.revenueCatHoldings(USER)).listed, true, 'RevenueCat asked directly');
+    assert.strictEqual((await mod.revenueCatHoldings(OTHER)).listed, false, 'nothing listed');
     assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).code, 200);
   });
   assert.strictEqual(rows[USER].subscription_tier, 'free');
@@ -1420,7 +1426,7 @@ test('the sync records any Gold product RevenueCat lists, expired or not, so the
   assert.strictEqual(await mod.hadAppStorePlan(USER), true, 'the record knows now');
   // Without the key there's nobody to ask.
   await withEnv({ REVENUECAT_SECRET_KEY: null }, async () => {
-    assert.strictEqual(await mod.revenueCatListsGold(USER), null);
+    assert.strictEqual(await mod.revenueCatHoldings(USER), null);
   });
 }));
 
@@ -1430,7 +1436,7 @@ test("a billing grace period from the sync keeps the period's end on the profile
   const purchasedAt = periodEnd - 30 * DAY;
   const inGrace = { entitlements: {}, subscriptions: { monthly: { expires_date: new Date(periodEnd).toISOString(), grace_period_expires_date: new Date(graceEnds).toISOString(), period_type: 'normal', purchase_date: new Date(purchasedAt).toISOString(), refunded_at: null } }, non_subscriptions: {} };
   const rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_status: 'active', subscription_expires_at: new Date(periodEnd).toISOString() } };
-  const db = fakeSupabase(rows, { users: { 'good-token': USER }, state: { [GRANT_KEY]: { purchasedAt, subscriptionUntil: periodEnd } } });
+  const db = fakeSupabase(rows, { users: { 'good-token': USER }, state: { [GRANT_KEY]: { subscriptionPurchasedAt: purchasedAt, subscriptionUntil: periodEnd } } });
   const mod = loadHandler(db);
   mod.setWebPlanCheck(noWebPlan);
   await withRevenueCatApi(revenueCatApi({ [USER]: inGrace }), async () => {
@@ -1451,7 +1457,7 @@ test("a billing grace period from the sync keeps the period's end on the profile
 
   // If Apple's retry goes through instead, the renewal starts a new period with no grace period.
   const renewed = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_status: 'active', subscription_expires_at: new Date(periodEnd).toISOString() } };
-  const again = fakeSupabase(renewed, { users: { 'good-token': USER }, state: { [GRANT_KEY]: { purchasedAt, subscriptionUntil: periodEnd } } });
+  const again = fakeSupabase(renewed, { users: { 'good-token': USER }, state: { [GRANT_KEY]: { subscriptionPurchasedAt: purchasedAt, subscriptionUntil: periodEnd } } });
   const againMod = loadHandler(again);
   againMod.setWebPlanCheck(noWebPlan);
   await withRevenueCatApi(revenueCatApi({ [USER]: inGrace }), async () => {
@@ -1460,4 +1466,281 @@ test("a billing grace period from the sync keeps the period's end on the profile
   await send(againMod.revenueCatWebhookHandler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: Date.now() - 60 * 1000, expiration_at_ms: Date.now() + 30 * DAY });
   assert.strictEqual(again.state[GRANT_KEY].graceUntil, undefined);
   assert.strictEqual(renewed[USER].subscription_tier, 'gold');
+}));
+
+test('an expiry that ends a temporary grant goes on record before the profile, so a retry still finishes and a copy of the grant gives nothing', withSecret(SECRET, async () => {
+  const grantedAt = Date.now() - 3 * 3600 * 1000;
+  const grant = { type: 'TEMPORARY_ENTITLEMENT_GRANT', app_user_id: USER, store: 'APP_STORE', event_timestamp_ms: grantedAt };
+  const expiry = { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', event_timestamp_ms: grantedAt + 3600 * 1000 };
+  for (const fail of ['failStateWrite', 'failWrite']) {
+    const rows = { [USER]: freeRow() };
+    const opts = {};
+    const db = fakeSupabase(rows, opts);
+    const { revenueCatWebhookHandler } = loadHandler(db);
+    await send(revenueCatWebhookHandler, grant);
+    assert.strictEqual(rows[USER].subscription_status, 'temporary_grant', fail);
+
+    // The first try fails partway, so RevenueCat sends the expiry again.
+    opts[fail] = true;
+    await captureLogs(async () => {
+      assert.strictEqual((await send(revenueCatWebhookHandler, expiry)).code, 500, fail);
+    });
+    if (fail === 'failWrite') assert.strictEqual(db.state[GRANT_KEY]?.temporaryEndedAt, expiry.event_timestamp_ms, 'the end is on record first');
+    opts[fail] = false;
+    assert.strictEqual((await send(revenueCatWebhookHandler, expiry)).code, 200, fail);
+    assert.strictEqual(rows[USER].subscription_tier, 'free', fail);
+    assert.strictEqual(db.state[GRANT_KEY]?.temporaryEndedAt, expiry.event_timestamp_ms, fail);
+
+    const copy = await send(revenueCatWebhookHandler, grant);
+    assert.strictEqual(copy.body.skipped, 'superseded', fail);
+    assert.strictEqual(rows[USER].subscription_tier, 'free', fail);
+  }
+}));
+
+test('a grant goes on record before the profile, so a purchase whose profile write failed is on record however late its retry comes', withSecret(SECRET, async () => {
+  const purchase = { type: 'INITIAL_PURCHASE', app_user_id: USER, product_id: 'monthly', period_type: 'TRIAL', purchased_at_ms: Date.now() - DAY, expiration_at_ms: Date.now() + 6 * DAY };
+  const rows = { [USER]: freeRow() };
+  const opts = { failWrite: true };
+  const db = fakeSupabase(rows, opts);
+  const mod = loadHandler(db);
+  await captureLogs(async () => {
+    assert.strictEqual((await send(mod.revenueCatWebhookHandler, purchase)).code, 500);
+  });
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+  assert.strictEqual(await mod.hadAppStorePlan(USER), true, 'the trial is on record, so the web gives no second free week');
+
+  // The retry finishes the profile.
+  opts.failWrite = false;
+  assert.strictEqual((await send(mod.revenueCatWebhookHandler, purchase)).body.tier, 'gold');
+  assert.strictEqual(rows[USER].subscription_status, 'trialing');
+}));
+
+test('subscriptions and lifetime keep their own purchase and refund times, so one kind never makes the other look late', withSecret(SECRET, async () => {
+  // A subscription refunded while lifetime holds comes off the record though
+  // lifetime was bought after it, so a later lifetime refund leaves free.
+  const monthlyBought = Date.now() - 5 * DAY;
+  const lifetimeBought = Date.now() - 2 * DAY;
+  let rows = { [USER]: freeRow() };
+  let handler = loadHandler(fakeSupabase(rows)).revenueCatWebhookHandler;
+  await send(handler, { type: 'INITIAL_PURCHASE', app_user_id: USER, product_id: 'monthly', purchased_at_ms: monthlyBought, expiration_at_ms: monthlyBought + 30 * DAY });
+  await send(handler, { type: 'NON_RENEWING_PURCHASE', app_user_id: USER, product_id: 'lifetime_gold', purchased_at_ms: lifetimeBought });
+  const subscriptionRefund = await send(handler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'monthly', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: monthlyBought });
+  assert.strictEqual(subscriptionRefund.body.kept, 'lifetime');
+  await send(handler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: lifetimeBought });
+  assert.strictEqual(rows[USER].subscription_tier, 'free', 'the refunded subscription gives no Gold back');
+
+  // A lifetime purchase delivered late still applies after a subscription
+  // bought later was refunded.
+  rows = { [USER]: freeRow() };
+  handler = loadHandler(fakeSupabase(rows)).revenueCatWebhookHandler;
+  const laterSubscription = Date.now() - DAY;
+  await send(handler, { type: 'INITIAL_PURCHASE', app_user_id: USER, product_id: 'monthly', purchased_at_ms: laterSubscription, expiration_at_ms: laterSubscription + 30 * DAY });
+  await send(handler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'monthly', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: laterSubscription });
+  const lateLifetime = await send(handler, { type: 'NON_RENEWING_PURCHASE', app_user_id: USER, product_id: 'lifetime_gold', purchased_at_ms: Date.now() - 3 * DAY });
+  assert.strictEqual(lateLifetime.body.tier, 'lifetime');
+
+  // A lifetime bought and refunded after a subscription doesn't hold back that
+  // subscription's own events.
+  rows = { [USER]: freeRow() };
+  handler = loadHandler(fakeSupabase(rows)).revenueCatWebhookHandler;
+  const subscriptionBought = Date.now() - 4 * DAY;
+  const subscription = { app_user_id: USER, product_id: 'monthly', purchased_at_ms: subscriptionBought, expiration_at_ms: subscriptionBought + 30 * DAY };
+  const lifetimeAt = Date.now() - DAY;
+  await send(handler, { ...subscription, type: 'INITIAL_PURCHASE' });
+  await send(handler, { type: 'NON_RENEWING_PURCHASE', app_user_id: USER, product_id: 'lifetime_gold', purchased_at_ms: lifetimeAt });
+  await send(handler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: lifetimeAt });
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+  const uncancel = await send(handler, { ...subscription, type: 'UNCANCELLATION' });
+  assert.strictEqual(uncancel.body.tier, 'gold');
+
+  // A lifetime purchase that was refunded still shows the account had an App
+  // Store plan, with nothing else on record.
+  rows = { [USER]: freeRow() };
+  const mod = loadHandler(fakeSupabase(rows));
+  await send(mod.revenueCatWebhookHandler, { type: 'NON_RENEWING_PURCHASE', app_user_id: USER, product_id: 'lifetime_gold', purchased_at_ms: lifetimeAt });
+  await send(mod.revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: lifetimeAt });
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+  assert.strictEqual(await mod.hadAppStorePlan(USER), true);
+}));
+
+test("a late auto-renew-off for an older period doesn't pull the expiry back, so an old expiry sent again can't end the current period", withSecret(SECRET, async () => {
+  const firstBought = Date.now() - 40 * DAY;
+  const firstEnds = firstBought + 30 * DAY;
+  const renewedEnds = firstEnds + 30 * DAY;
+  const rows = { [USER]: freeRow() };
+  const { revenueCatWebhookHandler } = loadHandler(fakeSupabase(rows));
+  await send(revenueCatWebhookHandler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: firstEnds, expiration_at_ms: renewedEnds });
+  const late = await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'monthly', cancel_reason: 'UNSUBSCRIBE', purchased_at_ms: firstBought, expiration_at_ms: firstEnds });
+  assert.strictEqual(late.body.skipped, 'superseded');
+  assert.strictEqual(rows[USER].subscription_expires_at, new Date(renewedEnds).toISOString());
+
+  // The older period's expiry sent again ends nothing.
+  await send(revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', purchased_at_ms: firstBought, expiration_at_ms: firstEnds });
+  assert.strictEqual(rows[USER].subscription_tier, 'gold');
+
+  // Turning auto-renew off for the current period still records its end.
+  const current = await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'monthly', cancel_reason: 'UNSUBSCRIBE', purchased_at_ms: firstEnds, expiration_at_ms: renewedEnds });
+  assert.strictEqual(current.body.expires, new Date(renewedEnds).toISOString());
+}));
+
+test('an expiry from before a temporary grant began, sent again late, leaves the grant alone', withSecret(SECRET, async () => {
+  const grantedAt = Date.now() - 2 * 3600 * 1000;
+  const rows = { [USER]: freeRow() };
+  const { revenueCatWebhookHandler } = loadHandler(fakeSupabase(rows));
+  await send(revenueCatWebhookHandler, { type: 'TEMPORARY_ENTITLEMENT_GRANT', app_user_id: USER, store: 'APP_STORE', event_timestamp_ms: grantedAt });
+  const old = await send(revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', event_timestamp_ms: grantedAt - 5 * DAY, expiration_at_ms: grantedAt - 5 * DAY });
+  assert.strictEqual(old.body.skipped, 'superseded');
+  assert.strictEqual(rows[USER].subscription_status, 'temporary_grant');
+
+  // The expiry that does end it still applies.
+  await send(revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', event_timestamp_ms: grantedAt + 3600 * 1000 });
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+}));
+
+test('the sync picks a subscription whose period still runs over one only in its grace period', withSecret(SECRET, async () => {
+  const runningEnds = Date.now() + 5 * DAY;
+  const subscriber = {
+    entitlements: {},
+    subscriptions: {
+      monthly: { expires_date: new Date(runningEnds).toISOString(), period_type: 'normal', refunded_at: null },
+      yearly_gold: { expires_date: new Date(Date.now() - DAY).toISOString(), grace_period_expires_date: new Date(Date.now() + 10 * DAY).toISOString(), period_type: 'normal', refunded_at: null },
+    },
+    non_subscriptions: {},
+  };
+  const rows = { [USER]: freeRow() };
+  const db = fakeSupabase(rows, { users: { 'good-token': USER } });
+  const mod = loadHandler(db);
+  mod.setWebPlanCheck(noWebPlan);
+  await withRevenueCatApi(revenueCatApi({ [USER]: subscriber }), async () => {
+    assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).body.tier, 'gold');
+  });
+  assert.strictEqual(rows[USER].subscription_expires_at, new Date(runningEnds).toISOString());
+  assert.strictEqual(rows[USER].subscription_status, 'active');
+  assert.strictEqual(db.state[GRANT_KEY].graceUntil, undefined);
+}));
+
+test('a refund sent again after its reversal ends nothing, for a subscription and for lifetime', withSecret(SECRET, async () => {
+  const bought = Date.now() - 10 * DAY;
+  const periodEnd = Date.now() + 20 * DAY;
+  const refundedAt = Date.now() - 3 * DAY;
+  const reversedAt = Date.now() - DAY;
+  const kinds = [
+    ['monthly', 'gold', { type: 'INITIAL_PURCHASE', expiration_at_ms: periodEnd }, { expiration_at_ms: refundedAt }, { expiration_at_ms: periodEnd }],
+    ['lifetime_gold', 'lifetime', { type: 'NON_RENEWING_PURCHASE' }, {}, {}],
+  ];
+  for (const [product, tier, purchase, refundFields, reversalFields] of kinds) {
+    const rows = { [USER]: freeRow() };
+    const { revenueCatWebhookHandler } = loadHandler(fakeSupabase(rows));
+    const ofPurchase = { app_user_id: USER, product_id: product, purchased_at_ms: bought };
+    await send(revenueCatWebhookHandler, { ...ofPurchase, ...purchase });
+    const refund = { ...ofPurchase, ...refundFields, type: 'CANCELLATION', cancel_reason: 'CUSTOMER_SUPPORT', event_timestamp_ms: refundedAt };
+    await send(revenueCatWebhookHandler, refund);
+    assert.strictEqual(rows[USER].subscription_tier, 'free', product);
+    await send(revenueCatWebhookHandler, { ...ofPurchase, ...reversalFields, type: 'REFUND_REVERSED', event_timestamp_ms: reversedAt });
+    assert.strictEqual(rows[USER].subscription_tier, tier, product);
+
+    // The refund the reversal undid comes again, on a retry or out of order.
+    const again = await send(revenueCatWebhookHandler, refund);
+    assert.strictEqual(again.body.skipped, 'superseded', product);
+    assert.strictEqual(rows[USER].subscription_tier, tier, product);
+
+    // A refund made after the reversal still ends it.
+    const later = await send(revenueCatWebhookHandler, { ...refund, event_timestamp_ms: Date.now() });
+    assert.strictEqual(later.body.refunded, true, product);
+    assert.strictEqual(rows[USER].subscription_tier, 'free', product);
+  }
+
+  // A reversal for one kind doesn't hold back a refund of the other.
+  const rows = { [USER]: freeRow() };
+  const { revenueCatWebhookHandler } = loadHandler(fakeSupabase(rows));
+  const monthly = { app_user_id: USER, product_id: 'monthly', purchased_at_ms: bought, expiration_at_ms: periodEnd };
+  await send(revenueCatWebhookHandler, { ...monthly, type: 'INITIAL_PURCHASE' });
+  await send(revenueCatWebhookHandler, { ...monthly, type: 'CANCELLATION', cancel_reason: 'CUSTOMER_SUPPORT', expiration_at_ms: refundedAt, event_timestamp_ms: refundedAt });
+  await send(revenueCatWebhookHandler, { ...monthly, type: 'REFUND_REVERSED', event_timestamp_ms: reversedAt });
+  const lifetimeBought = Date.now() - 5 * DAY;
+  await send(revenueCatWebhookHandler, { type: 'NON_RENEWING_PURCHASE', app_user_id: USER, product_id: 'lifetime_gold', purchased_at_ms: lifetimeBought });
+  assert.strictEqual(rows[USER].subscription_tier, 'lifetime');
+  const lifetimeRefund = await send(revenueCatWebhookHandler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'lifetime_gold', cancel_reason: 'CUSTOMER_SUPPORT', purchased_at_ms: lifetimeBought, event_timestamp_ms: reversedAt - 3600 * 1000 });
+  assert.strictEqual(lifetimeRefund.body.refunded, true);
+  assert.strictEqual(rows[USER].subscription_tier, 'gold', 'back to the subscription Apple gave back');
+}));
+
+test('an expiry for the current purchase ends Gold even when its date is earlier than the one stored', withSecret(SECRET, async () => {
+  // A family share revoked partway through the period ends the plan now.
+  const bought = Date.now() - 5 * DAY;
+  let rows = { [USER]: freeRow() };
+  let db = fakeSupabase(rows);
+  let handler = loadHandler(db).revenueCatWebhookHandler;
+  await send(handler, { type: 'RENEWAL', app_user_id: USER, product_id: 'monthly', purchased_at_ms: bought, expiration_at_ms: bought + 30 * DAY });
+  const revoked = await send(handler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', purchased_at_ms: bought, expiration_at_ms: Date.now() - 60 * 1000 });
+  assert.notStrictEqual(revoked.body.skipped, 'superseded');
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+  assert.strictEqual(db.state[GRANT_KEY].subscriptionUntil, undefined);
+
+  // A failed renewal: the cancellation carries the grace period's end, and
+  // the expiry when the grace period runs out names the period's own end.
+  const renewed = Date.now() - 40 * DAY;
+  const periodEnd = renewed + 30 * DAY;
+  rows = { [USER]: { ...freeRow(), subscription_tier: 'gold', subscription_status: 'active', subscription_expires_at: new Date(periodEnd).toISOString() } };
+  db = fakeSupabase(rows, { state: { [GRANT_KEY]: { subscriptionPurchasedAt: renewed, subscriptionUntil: periodEnd } } });
+  handler = loadHandler(db).revenueCatWebhookHandler;
+  await send(handler, { type: 'CANCELLATION', app_user_id: USER, product_id: 'monthly', cancel_reason: 'BILLING_ERROR', purchased_at_ms: renewed, expiration_at_ms: Date.now() + 6 * DAY });
+  const ended = await send(handler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', purchased_at_ms: renewed, expiration_at_ms: periodEnd });
+  assert.notStrictEqual(ended.body.skipped, 'superseded');
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+
+  // A plan only the sync brought is judged by the purchase time the sync recorded.
+  const synced = Date.now() - 3 * DAY;
+  const subscriber = { entitlements: {}, subscriptions: { monthly: { expires_date: new Date(synced + 30 * DAY).toISOString(), purchase_date: new Date(synced).toISOString(), period_type: 'normal', refunded_at: null } }, non_subscriptions: {} };
+  rows = { [USER]: freeRow() };
+  db = fakeSupabase(rows, { users: { 'good-token': USER } });
+  const mod = loadHandler(db);
+  mod.setWebPlanCheck(noWebPlan);
+  await withRevenueCatApi(revenueCatApi({ [USER]: subscriber }), async () => {
+    await syncAs(mod.revenueCatSyncHandler, 'good-token');
+  });
+  assert.strictEqual(db.state[GRANT_KEY].subscriptionPurchasedAt, synced);
+  await send(mod.revenueCatWebhookHandler, { type: 'EXPIRATION', app_user_id: USER, product_id: 'monthly', purchased_at_ms: synced, expiration_at_ms: Date.now() - 60 * 1000 });
+  assert.strictEqual(rows[USER].subscription_tier, 'free');
+}));
+
+test('the sync reads Gold from the Gold entitlement, whatever the product behind it is called', withSecret(SECRET, async () => {
+  const ends = Date.now() + 20 * DAY;
+  const entitled = (entitlementId, product, expires) => ({
+    entitlements: { [entitlementId]: { product_identifier: product, expires_date: expires && new Date(expires).toISOString(), purchase_date: new Date(Date.now() - 10 * DAY).toISOString() } },
+    subscriptions: { [product]: { expires_date: expires && new Date(expires).toISOString(), period_type: 'normal', purchase_date: new Date(Date.now() - 10 * DAY).toISOString(), refunded_at: null } },
+    non_subscriptions: {},
+  });
+  const cases = [
+    ['a product named some other way', entitled('Gold', 'troystack_pro_quarterly', ends), 'gold'],
+    ['the legacy Silver entitlement', entitled('Silver', 'stg_silver_annual', ends), 'gold'],
+    ['an entitlement that ran out', entitled('Gold', 'troystack_pro_quarterly', Date.now() - DAY), 'free'],
+  ];
+  for (const [label, subscriber, tier] of cases) {
+    const rows = { [USER]: freeRow() };
+    const db = fakeSupabase(rows, { users: { 'good-token': USER } });
+    const mod = loadHandler(db);
+    mod.setWebPlanCheck(noWebPlan);
+    await withRevenueCatApi(revenueCatApi({ [USER]: subscriber }), async () => {
+      assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).body.tier, tier, label);
+    });
+    assert.strictEqual(rows[USER].subscription_tier, tier, label);
+    if (tier === 'gold') assert.strictEqual(rows[USER].subscription_expires_at, new Date(ends).toISOString(), label);
+    assert.strictEqual(await mod.hadAppStorePlan(USER), true, `${label}: the account had an App Store plan`);
+  }
+
+  // A subscription still running behind a lifetime entitlement stays on record.
+  const rows = { [USER]: freeRow() };
+  const db = fakeSupabase(rows, { users: { 'good-token': USER } });
+  const mod = loadHandler(db);
+  mod.setWebPlanCheck(noWebPlan);
+  const both = {
+    entitlements: { Gold: { product_identifier: 'stacktracker_lifetime', expires_date: null } },
+    subscriptions: { stacktracker_gold_monthly: { expires_date: new Date(ends).toISOString(), period_type: 'normal', refunded_at: null } },
+    non_subscriptions: { stacktracker_lifetime: [{ id: 'p1', is_sandbox: false }] },
+  };
+  await withRevenueCatApi(revenueCatApi({ [USER]: both }), async () => {
+    assert.strictEqual((await syncAs(mod.revenueCatSyncHandler, 'good-token')).body.tier, 'lifetime');
+  });
+  assert.strictEqual(db.state[GRANT_KEY].subscriptionUntil, ends);
 }));
