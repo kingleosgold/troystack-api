@@ -9,7 +9,7 @@ const { getTTSProvider, getSTTProvider } = require('../services/voice-providers'
 const ttsCache = require('../services/tts-cache');
 const troyLlm = require('../services/troy-llm');
 const { TROY_PERSONA, TROY_KNOWLEDGE } = require('../services/troy-prompt');
-const { getStackMoves, formatStackMoves } = require('../services/stack-moves');
+const { getStackMoves, formatStackMoves, liveSpot, NO_LIVE_SPOT } = require('../services/stack-moves');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -576,7 +576,10 @@ router.post('/conversations/:id/messages', async (req, res) => {
     let stackMoves = '';
     if (userHoldings.length > 0) {
       try {
-        stackMoves = formatStackMoves(await getStackMoves(userHoldings, prices));
+        // Measured to a live quote only. getSpotPrices says where the price
+        // came from, and a static or failed-over one would invent a move.
+        const live = liveSpot(await getSpotPrices());
+        stackMoves = live ? formatStackMoves(await getStackMoves(userHoldings, live)) : NO_LIVE_SPOT;
       } catch (movesErr) {
         console.log(`[Troy Chat] Stack moves error (non-fatal): ${movesErr.message}`);
       }
