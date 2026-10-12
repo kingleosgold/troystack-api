@@ -86,14 +86,19 @@ function ouncesOf(holding) {
  * @param {Array} holdings rows with metal, weight, quantity, purchase_date
  * @param {object} prices current spot by metal
  * @param {Date} now
- * @returns {Promise<Array>} one entry per window that has price history
+ * @returns {Promise<Array>} one entry per window, priced or marked unavailable
  */
 async function getStackMoves(holdings, prices, now = new Date()) {
   const moves = [];
   for (const w of WINDOWS) {
     const start = new Date(now.getTime() - w.days * DAY_MS);
     const then = await spotAt(start);
-    if (!then) continue;
+    if (!then) {
+      // No price row near the window's start. The window still gets a line,
+      // so a question about it isn't answered from the other windows.
+      moves.push({ key: w.key, label: w.label, unavailable: true, noHistory: true, missing: [], untracked: [] });
+      continue;
+    }
 
     let before = 0;
     let after = 0;
@@ -125,16 +130,16 @@ async function getStackMoves(holdings, prices, now = new Date()) {
       // Nothing in the window could be priced. Keep the window when held
       // metals were left out, so Troy can say which ones instead of falling
       // back to a generic no-history note.
-      if (missing.size || untracked.size) {
-        moves.push({
-          key: w.key,
-          label: w.label,
-          since: then.timestamp,
-          unavailable: true,
-          missing: METALS.filter(m => missing.has(m)),
-          untracked: METALS.filter(m => untracked.has(m)),
-        });
-      }
+      moves.push({
+        key: w.key,
+        label: w.label,
+        since: then.timestamp,
+        unavailable: true,
+        // Nothing left out means nothing was held yet when the window opened.
+        nothingHeld: !missing.size && !untracked.size,
+        missing: METALS.filter(m => missing.has(m)),
+        untracked: METALS.filter(m => untracked.has(m)),
+      });
       continue;
     }
 
@@ -189,6 +194,12 @@ function formatStackMoves(moves) {
     return 'STACK MOVES:\nThere isn\'t enough price history to give a daily, weekly or monthly move for these holdings, so don\'t estimate one.\n\n';
   }
   const lines = moves.map(mv => {
+    if (mv.noHistory) {
+      return `- ${mv.label}: no price history covers this window, so don't estimate a move.`;
+    }
+    if (mv.nothingHeld) {
+      return `- ${mv.label}: nothing in the stack was held yet when this window opened.`;
+    }
     if (mv.unavailable) {
       return `- ${mv.label}: no move to give.${missingNote(mv.missing)}${untrackedNote(mv.untracked)}`;
     }
