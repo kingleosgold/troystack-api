@@ -72,14 +72,17 @@ test('a holding bought inside a window counts only in the shorter windows', asyn
   assert.strictEqual(month.before, 10 * 4000 + 100 * 50);
 });
 
-test('no price history means no windows and a plain note not to guess', async () => {
+test('no price history gives every window a line saying not to estimate it', async () => {
   priceRows = [];
   const moves = await getStackMoves(holdings, prices, NOW);
-  assert.deepStrictEqual(moves, []);
+  assert.deepStrictEqual(moves.map(m => [m.key, !!m.noHistory]), [['day', true], ['week', true], ['month', true]]);
   const text = formatStackMoves(moves);
-  assert.match(text, /^STACK MOVES:\n/);
-  assert.match(text, /don't estimate one/);
+  assert.match(text, /- Last 24 hours: no price history covers this window, so don't estimate a move\.\n/);
+  assert.match(text, /- Last 7 days: no price history covers this window/);
+  assert.match(text, /- Last 30 days: no price history covers this window/);
   assert.ok(text.endsWith('\n\n'));
+  // An empty list, which troy-chat never sends, still gets the plain note.
+  assert.match(formatStackMoves([]), /^STACK MOVES:\nThere isn't enough price history/);
 });
 
 test('a holding with no purchase date counts as held', async () => {
@@ -108,7 +111,8 @@ test('a price from long before a window does not stand in for it', async () => {
   // The logger went quiet: nothing within four days of the day or week start.
   priceRows = [row(31, 4000, 50), row(12, 4100, 55)];
   const moves = await getStackMoves(holdings, prices, NOW);
-  assert.deepStrictEqual(moves.map(m => m.key), ['month']);
+  assert.deepStrictEqual(moves.map(m => [m.key, !!m.noHistory]), [['day', true], ['week', true], ['month', false]]);
+  assert.match(formatStackMoves(moves), /- Last 7 days: no price history covers this window, so don't estimate a move\.\n/);
 });
 
 test('a held metal with no price now is left out and named', async () => {
@@ -129,7 +133,8 @@ test('a window with nothing priceable names the metal instead of a generic note'
   priceRows = [row(7.1, 4100, 55)];
   const stack = [{ metal: 'silver', weight: 100, quantity: 1, purchase_date: '2024-04-01' }];
   const moves = await getStackMoves(stack, { ...prices, silver: 0 }, NOW);
-  assert.deepStrictEqual(moves.map(m => [m.key, !!m.unavailable, m.missing]), [['week', true, ['silver']]]);
+  const week = moves.find(m => m.key === 'week');
+  assert.deepStrictEqual([week.unavailable, week.missing], [true, ['silver']]);
   const text = formatStackMoves(moves);
   assert.match(text, /- Last 7 days: no move to give\. Silver isn't counted, since there's no price to compare it with\.\n/);
   assert.doesNotMatch(text, /isn't enough price history/);
@@ -155,7 +160,8 @@ test('a platinum-only stack gets a named line, not a number', async () => {
   priceRows = [row(7.1, 4100, 55)];
   const stack = [{ metal: 'platinum', weight: 1, quantity: 5, purchase_date: '2024-04-01' }];
   const moves = await getStackMoves(stack, prices, NOW);
-  assert.deepStrictEqual(moves.map(m => [m.key, !!m.unavailable, m.untracked]), [['week', true, ['platinum']]]);
+  const week = moves.find(m => m.key === 'week');
+  assert.deepStrictEqual([week.unavailable, week.untracked], [true, ['platinum']]);
   assert.match(formatStackMoves(moves), /- Last 7 days: no move to give\. Platinum isn't counted in these moves yet, since its price history isn't reliable\.\n/);
 });
 
@@ -188,5 +194,15 @@ test('a full timestamp is used as given', async () => {
   priceRows = [row(1.05, 4180, 59.5)];
   const stack = [{ metal: 'gold', weight: 1, quantity: 1, purchase_date: '2026-10-11T02:00:00Z' }];
   const moves = await getStackMoves(stack, prices, NOW);
+  assert.strictEqual(moves.find(m => m.key === 'day').before, 4180);
+});
+
+test('a window that opened before anything was bought says so', async () => {
+  priceRows = [row(7.1, 4100, 55), row(1.05, 4180, 59.5)];
+  const stack = [{ metal: 'gold', weight: 1, quantity: 1, purchase_date: daysAgo(3).slice(0, 10) }];
+  const moves = await getStackMoves(stack, prices, NOW);
+  const week = moves.find(m => m.key === 'week');
+  assert.strictEqual(week.nothingHeld, true);
+  assert.match(formatStackMoves(moves), /- Last 7 days: nothing in the stack was held yet when this window opened\.\n/);
   assert.strictEqual(moves.find(m => m.key === 'day').before, 4180);
 });
