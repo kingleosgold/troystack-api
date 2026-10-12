@@ -688,11 +688,23 @@ async function applyEvent(event) {
     // A subscription bought after lifetime doesn't replace it. It's on record,
     // so it still counts if the lifetime purchase is refunded.
     if (profile.subscription_tier === 'lifetime' && kind !== 'lifetime') return { kept: 'lifetime' };
+    // The profile carries the period on record. A reversed refund for an
+    // older purchase gives that purchase back, but a later period already
+    // running is the one that ends Gold, so its expiry and trial stay.
+    let until = expires;
+    let periodTrial = trial;
+    if (kind !== 'lifetime') {
+      const { subscriptionUntil, subscriptionTrial } = await readRecord(id);
+      if (subscriptionUntil != null && (expiresMs == null || subscriptionUntil > expiresMs)) {
+        until = new Date(subscriptionUntil).toISOString();
+        periodTrial = subscriptionTrial === true;
+      }
+    }
     await writeProfile(id, {
       subscription_tier: tier,
-      subscription_expires_at: tier === 'lifetime' ? null : expires,
-      subscription_status: trial ? 'trialing' : 'active',
-      trial_end: trial ? expires : null,
+      subscription_expires_at: tier === 'lifetime' ? null : until,
+      subscription_status: periodTrial ? 'trialing' : 'active',
+      trial_end: periodTrial ? until : null,
     });
     return { tier };
   }
@@ -813,7 +825,21 @@ async function applyEvent(event) {
   }
 
   if (type === 'BILLING_ISSUE' || type === 'BILLING_ISSUE_DETECTED') {
-    // Apple keeps the subscription in its grace period, and so do we.
+    // Apple keeps the subscription in its grace period, and so do we. When
+    // the event names the grace period's end, it goes on record with the
+    // period it follows, so another plan ending meanwhile, a web plan deleted
+    // or a lifetime purchase refunded, can't leave the account free while
+    // Apple still owes it Gold. A period the record doesn't have yet is taken
+    // from the event.
+    const graceMs = positiveMs(event.grace_period_expiration_at_ms);
+    if (graceMs != null && graceMs > Date.now()) {
+      await updateRecord(id, (record) => {
+        if (record.subscriptionUntil == null && expiresMs != null) record.subscriptionUntil = expiresMs;
+        const samePeriod = record.subscriptionUntil != null && (expiresMs == null || record.subscriptionUntil === expiresMs);
+        if (samePeriod && graceMs > record.subscriptionUntil && (record.graceUntil == null || record.graceUntil < graceMs)) record.graceUntil = graceMs;
+        return record;
+      });
+    }
     return { skipped: 'billing_issue' };
   }
 
@@ -975,4 +1001,5 @@ module.exports = {
   revenueCatHoldings,
   syncStorePlan,
   accountTurn,
+  withAccountTurn,
 };

@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 const supabase = require('../lib/supabase');
 const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions, soldLifetime } = require('../lib/stripe-checks');
-const { appStorePlanOnRecord, hadAppStorePlan, revenueCatHoldings, syncStorePlan } = require('./revenuecat-webhook');
+const { appStorePlanOnRecord, hadAppStorePlan, revenueCatHoldings, syncStorePlan, withAccountTurn } = require('./revenuecat-webhook');
 
 const router = express.Router();
 
@@ -673,11 +673,17 @@ async function stripeWebhookHandler(req, res) {
         // subscription is read again and the plan follows where it stands now.
         const subscription = await stripe.subscriptions.retrieve(event.data.object.id);
         const customerId = typeof subscription.customer === 'string' ? subscription.customer : subscription.customer?.id;
-        const profile = await profileForCustomer(customerId);
+        const found = await profileForCustomer(customerId);
+        if (!found) break;
 
-        if (profile) {
+        // The profile is read again and written in the account's turn, which
+        // RevenueCat events take too, so an App Store renewal that lands
+        // meanwhile isn't written over with free.
+        const written = await withAccountTurn(found.id, async () => {
+          const profile = await profileForCustomer(customerId);
+          if (!profile) return true;
           // Don't downgrade lifetime users via subscription events
-          if (profile.subscription_tier === 'lifetime') break;
+          if (profile.subscription_tier === 'lifetime') return true;
 
           // A live subscription gives Gold only when it's to a Gold price or
           // product. A Gold product Stripe can't read throws, and the event
@@ -710,7 +716,7 @@ async function stripeWebhookHandler(req, res) {
             const after = await planAfterEnding(profile.id, profile.stripe_customer_id || customerId);
             if (after.tier === 'free' && appStorePlanRunning(profile)) {
               console.log(`💳 [Stripe Webhook] subscription.updated: user=${profile.id} keeps the App Store plan running to ${profile.subscription_expires_at}`);
-              break;
+              return true;
             }
             updateData = { subscription_tier: after.tier, subscription_status: after.status || subscription.status, trial_end: after.trialEnd };
           }
@@ -720,27 +726,32 @@ async function stripeWebhookHandler(req, res) {
             .eq('id', profile.id);
           if (updateError) {
             console.error('❌ [Stripe Webhook] Failed to update profile:', updateError.message);
-            return res.status(500).send('Profile update failed');
+            return false;
           }
           console.log(`✅ [Stripe Webhook] subscription.updated: user=${profile.id}, tier=${updateData.subscription_tier}, status=${subscription.status}`);
-        }
+          return true;
+        });
+        if (!written) return res.status(500).send('Profile update failed');
         break;
       }
 
       case 'customer.subscription.deleted': {
         const subscription = event.data.object;
         const customerId = subscription.customer;
-        const profile = await profileForCustomer(customerId);
+        const found = await profileForCustomer(customerId);
+        if (!found) break;
 
-        if (profile) {
-          if (profile.subscription_tier === 'lifetime') break;
+        // Read again and written in the account's turn, as above.
+        const written = await withAccountTurn(found.id, async () => {
+          const profile = await profileForCustomer(customerId);
+          if (!profile || profile.subscription_tier === 'lifetime') return true;
 
           // The account may hold another plan in Stripe, a second Gold
           // subscription or lifetime, so the profile gets what Stripe still holds.
           const after = await planAfterEnding(profile.id, profile.stripe_customer_id || customerId);
           if (after.tier === 'free' && appStorePlanRunning(profile)) {
             console.log(`💳 [Stripe Webhook] subscription.deleted: user=${profile.id} keeps the App Store plan running to ${profile.subscription_expires_at}`);
-            break;
+            return true;
           }
           const { error: updateError } = await supabase
             .from('profiles')
@@ -748,10 +759,12 @@ async function stripeWebhookHandler(req, res) {
             .eq('id', profile.id);
           if (updateError) {
             console.error('❌ [Stripe Webhook] Failed to update profile:', updateError.message);
-            return res.status(500).send('Profile update failed');
+            return false;
           }
           console.log(`✅ [Stripe Webhook] subscription.deleted: user=${profile.id}, now ${after.tier}`);
-        }
+          return true;
+        });
+        if (!written) return res.status(500).send('Profile update failed');
         break;
       }
 
@@ -772,22 +785,31 @@ async function stripeWebhookHandler(req, res) {
         // through its customer.
         const named = session.client_reference_id || session.metadata?.user_id;
         const sessionCustomer = typeof session.customer === 'string' ? session.customer : session.customer?.id;
-        let profile = null;
-        if (named && isUUID(named)) {
-          profile = profileRead(await supabase.from('profiles').select('id, subscription_tier, stripe_customer_id').eq('id', named).single());
-        } else if (sessionCustomer) {
-          profile = await profileForCustomer(sessionCustomer);
-        }
-        if (!profile) break;
-        const userId = profile.id || named;
-        const plan = await planWithoutLostLifetime(userId, profile.stripe_customer_id || sessionCustomer);
-        if ((profile.subscription_tier === 'lifetime') === (plan.tier === 'lifetime')) break;
-        const { error: updateError } = await supabase.from('profiles').update(profileFieldsFor(plan)).eq('id', userId);
-        if (updateError) {
-          console.error('❌ [Stripe Webhook] Failed to update profile:', updateError.message);
-          return res.status(500).send('Profile update failed');
-        }
-        console.log(`✅ [Stripe Webhook] ${event.type}: user=${userId}, lifetime payment ${plan.tier === 'lifetime' ? 'counts again' : 'no longer counts'}, now ${plan.tier}`);
+        const readProfile = async () => {
+          if (named && isUUID(named)) {
+            return profileRead(await supabase.from('profiles').select('id, subscription_tier, stripe_customer_id').eq('id', named).single());
+          }
+          return sessionCustomer ? profileForCustomer(sessionCustomer) : null;
+        };
+        const found = await readProfile();
+        if (!found) break;
+        const userId = found.id || named;
+        // Worked out and written in the account's turn, which RevenueCat
+        // events take too, so what the App Store still owes is read as it stands.
+        const written = await withAccountTurn(userId, async () => {
+          const profile = await readProfile();
+          if (!profile) return true;
+          const plan = await planWithoutLostLifetime(userId, profile.stripe_customer_id || sessionCustomer);
+          if ((profile.subscription_tier === 'lifetime') === (plan.tier === 'lifetime')) return true;
+          const { error: updateError } = await supabase.from('profiles').update(profileFieldsFor(plan)).eq('id', userId);
+          if (updateError) {
+            console.error('❌ [Stripe Webhook] Failed to update profile:', updateError.message);
+            return false;
+          }
+          console.log(`✅ [Stripe Webhook] ${event.type}: user=${userId}, lifetime payment ${plan.tier === 'lifetime' ? 'counts again' : 'no longer counts'}, now ${plan.tier}`);
+          return true;
+        });
+        if (!written) return res.status(500).send('Profile update failed');
         break;
       }
 
@@ -913,7 +935,14 @@ router.post('/create-checkout-session', async (req, res) => {
     // a plan that ended, and a web plan sold during one would be billed twice
     // once Apple's retry goes through, so the account is pointed to the App
     // Store. A settle that can't finish stops checkout.
-    if (profile?.subscription_tier === 'gold' || profile?.subscription_tier === 'lifetime') {
+    //
+    // Web Gold, a gold tier with no App Store expiry, can outlive its plan
+    // when Stripe's deletion event is lost. With REVENUECAT_SECRET_KEY set,
+    // the Stripe plan check and the RevenueCat read below decide it, so the
+    // account isn't turned away for good. Without the key a gold tier with no
+    // expiry could be an older App Store plan, so it still answers 409.
+    const webGoldToCheck = profile?.subscription_tier === 'gold' && profile.subscription_status !== 'past_due' && !profile.subscription_expires_at && !!process.env.REVENUECAT_SECRET_KEY;
+    if ((profile?.subscription_tier === 'gold' || profile?.subscription_tier === 'lifetime') && !webGoldToCheck) {
       if (profile.subscription_tier === 'gold' && profile.subscription_status === 'past_due') return res.status(409).json(PAYMENT_ISSUE);
       if (!appStoreGoldPastExpiry(profile)) return res.status(409).json(HAS_PLAN);
       let settled;
