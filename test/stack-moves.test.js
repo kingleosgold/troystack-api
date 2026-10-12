@@ -170,3 +170,23 @@ test('moves are measured to a live quote, never a static or failed-over price', 
   assert.strictEqual(liveSpot({ prices, source: 'metalpriceapi' }, NOW), null);
   assert.match(NO_LIVE_SPOT, /^STACK MOVES:\nCurrent spot isn't live right now/);
 });
+
+test('a holding dated the day a window opens stays out of that window', async () => {
+  // The day window opens 2026-10-11 at 04:00 UTC. A date-only purchase on
+  // 10/11 could have come after that, so it isn't counted; one on 10/10 is.
+  priceRows = [row(1.05, 4180, 59.5)];
+  const stack = [
+    { metal: 'gold', weight: 1, quantity: 1, purchase_date: '2026-10-10' },
+    { metal: 'gold', weight: 1, quantity: 1, purchase_date: '2026-10-11' },
+  ];
+  const moves = await getStackMoves(stack, prices, NOW);
+  const day = moves.find(m => m.key === 'day');
+  assert.strictEqual(day.before, 4180);
+});
+
+test('a full timestamp is used as given', async () => {
+  priceRows = [row(1.05, 4180, 59.5)];
+  const stack = [{ metal: 'gold', weight: 1, quantity: 1, purchase_date: '2026-10-11T02:00:00Z' }];
+  const moves = await getStackMoves(stack, prices, NOW);
+  assert.strictEqual(moves.find(m => m.key === 'day').before, 4180);
+});
