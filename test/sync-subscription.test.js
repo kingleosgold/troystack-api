@@ -1754,3 +1754,45 @@ test("with no RevenueCat key set, checkout goes on without the App Store read", 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.trial, true);
 });
+
+test("a Stripe deletion waits for the account's turn, so an App Store renewal that lands first keeps Gold", async () => {
+  const webhook = require('../src/routes/revenuecat-webhook');
+  const before = { ...webhook.accountTurn };
+  webhook.accountTurn.pollMs = 5;
+  try {
+    reset({ profile: { id: USER, subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1', subscription_expires_at: null } });
+    const turnKey = `revenuecat_turn:${USER}`;
+    state.appState[turnKey] = { until: new Date(Date.now() + 60 * 1000).toISOString(), owner: 'renewal' };
+    const res = webhookRes();
+    const done = router.stripeWebhookHandler({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from(JSON.stringify(subscriptionEvent('customer.subscription.deleted', 'canceled'))) }, res);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(state.updates.length, 0, 'nothing is written while RevenueCat holds the turn');
+    // The renewal lands and gives the turn back.
+    state.profile.subscription_expires_at = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    delete state.appState[turnKey];
+    await done;
+    assert.equal(res.statusCode, 200);
+    assert.equal(state.updates.length, 0, 'the App Store plan keeps Gold');
+    assert.equal(state.appState[turnKey], undefined, 'the turn is given back');
+  } finally {
+    Object.assign(webhook.accountTurn, before);
+  }
+});
+
+test('web Gold whose Stripe plan is gone is checked again when the RevenueCat key is set', async () => {
+  const stale = { stripe_customer_id: 'cus_1', subscription_tier: 'gold', subscription_status: 'active', subscription_expires_at: null };
+  reset({ profile: { ...stale } });
+  let res = await checkout('price_gold_monthly');
+  assert.equal(res.statusCode, 409, 'without the key it could be an older App Store plan');
+  assert.equal(res.body.reason, 'has_plan');
+  await withRevenueCat('rc-rest-test-key', revenueCatApi([]).fetch, async () => {
+    reset({ profile: { ...stale } });
+    res = await quietly(() => checkout('price_gold_monthly'));
+    assert.equal(res.statusCode, 200, 'nothing in Stripe or the App Store, so checkout opens');
+
+    reset({ profile: { ...stale }, subscriptions: [{ status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }] });
+    res = await quietly(() => checkout('price_gold_monthly'));
+    assert.equal(res.statusCode, 409, 'a live web plan still turns it away');
+    assert.equal(res.body.reason, 'has_plan');
+  });
+});
