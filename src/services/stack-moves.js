@@ -91,7 +91,21 @@ async function getStackMoves(holdings, prices, now = new Date()) {
       after += oz * to;
       metals[m] = { from, to };
     }
-    if (!(before > 0)) continue;
+    if (!(before > 0)) {
+      // Nothing in the window could be priced. Keep the window when held
+      // metals were left out, so Troy can say which ones instead of falling
+      // back to a generic no-history note.
+      if (missing.size) {
+        moves.push({
+          key: w.key,
+          label: w.label,
+          since: then.timestamp,
+          unavailable: true,
+          missing: METALS.filter(m => missing.has(m)),
+        });
+      }
+      continue;
+    }
 
     moves.push({
       key: w.key,
@@ -112,10 +126,12 @@ const money = n => `${n < 0 ? '-' : '+'}$${Math.abs(n).toFixed(2)}`;
 const pct = n => `${n < 0 ? '-' : '+'}${Math.abs(n).toFixed(1)}%`;
 const name = m => m.charAt(0).toUpperCase() + m.slice(1);
 
+const listOf = names => (names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`);
+
 function missingNote(missing) {
   if (!missing || !missing.length) return '';
   const names = missing.map(name);
-  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  const list = listOf(names);
   return names.length === 1
     ? ` ${list} isn't counted, since there's no price to compare it with.`
     : ` ${list} aren't counted, since there's no price to compare them with.`;
@@ -130,6 +146,9 @@ function formatStackMoves(moves) {
     return 'STACK MOVES:\nThere isn\'t enough price history to give a daily, weekly or monthly move for these holdings, so don\'t estimate one.\n\n';
   }
   const lines = moves.map(mv => {
+    if (mv.unavailable) {
+      return `- ${mv.label}: no move to give, since there's no price to compare ${listOf(mv.missing)} with.`;
+    }
     const metals = Object.entries(mv.metals)
       .map(([m, p]) => `${name(m)} $${p.from.toFixed(2)} to $${p.to.toFixed(2)}`)
       .join(', ');
