@@ -9,6 +9,7 @@ const { getTTSProvider, getSTTProvider } = require('../services/voice-providers'
 const ttsCache = require('../services/tts-cache');
 const troyLlm = require('../services/troy-llm');
 const { TROY_PERSONA, TROY_KNOWLEDGE } = require('../services/troy-prompt');
+const { getStackMoves, formatStackMoves } = require('../services/stack-moves');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -21,10 +22,12 @@ const QUESTION_PERIOD_DAYS = 1;
 
 // Purchasing power benchmarks — today's values + 1971 (Nixon Shock) values
 const PURCHASING_POWER_BENCHMARKS = {
-  oil_per_barrel: 70,
+  // Today's values match the labels the app prints under the purchasing
+  // power card, so the card and Troy's text quote the same numbers.
+  oil_per_barrel: 85,
   gas_per_gallon: 3.50,
-  rent_monthly: 1800,
-  labor_hourly: 30,
+  rent_monthly: 1850,
+  labor_hourly: 29,
   // 1971 values (Nixon Shock)
   gold_1971: 35,
   silver_1971: 1.29,
@@ -515,11 +518,11 @@ router.post('/conversations/:id/messages', async (req, res) => {
       silverPrice: prices.silver,
       goldSilverRatio: prices.silver > 0 ? prices.gold / prices.silver : null,
       purchasingPower: {
-        goldPerBarrelOfOil: prices.gold / 85,
-        silverPerGallonOfGas: prices.silver / 3.50,
-        stackBarrelsOfOil: totalValue / 85,
-        stackMonthsOfRent: totalValue / 1850,
-        stackHoursOfLabor: totalValue / 29,
+        goldPerBarrelOfOil: prices.gold / B.oil_per_barrel,
+        silverPerGallonOfGas: prices.silver / B.gas_per_gallon,
+        stackBarrelsOfOil: totalValue / B.oil_per_barrel,
+        stackMonthsOfRent: totalValue / B.rent_monthly,
+        stackHoursOfLabor: totalValue / B.labor_hourly,
       },
       purchasingPowerComparison: {
         gold: {
@@ -568,6 +571,17 @@ router.post('/conversations/:id/messages', async (req, res) => {
       console.log(`[Troy Chat] Intelligence fetch error (non-fatal): ${intelErr.message}`);
     }
 
+    // How the stack moved over the last day, week and month, so a question
+    // like "how did my stack do this week" gets answered from data.
+    let stackMoves = '';
+    if (userHoldings.length > 0) {
+      try {
+        stackMoves = formatStackMoves(await getStackMoves(userHoldings, prices));
+      } catch (movesErr) {
+        console.log(`[Troy Chat] Stack moves error (non-fatal): ${movesErr.message}`);
+      }
+    }
+
     // The system prompt is built in four parts. Gemini gets them joined in
     // this order, byte for byte what it got before. Claude gets the two fixed
     // parts first so they cache across requests (see services/troy-llm.js).
@@ -588,7 +602,7 @@ CURRENT SPOT:
 Gold: $${prices.gold}, Silver: $${prices.silver}, Platinum: $${prices.platinum}, Palladium: $${prices.palladium}
 Gold/Silver Ratio: ${gsRatio}
 
-PURCHASING POWER (1971 vs TODAY):
+${stackMoves}PURCHASING POWER (1971 vs TODAY):
 ${goldOzTotal > 0 ? `- User's gold: ${goldOzTotal.toFixed(2)} oz → 1971 value: $${gold1971Value.toFixed(2)} → today: $${goldTodayValue.toFixed(2)} → bought ${goldBarrels1971.toFixed(1)} barrels of oil then, buys ${goldBarrelsToday.toFixed(1)} barrels now (${goldBarrels1971 > 0 ? (goldBarrelsToday / goldBarrels1971).toFixed(1) : '0'}x)` : '- User holds no gold'}
 ${silverOzTotal > 0 ? `- User's silver: ${silverOzTotal.toFixed(2)} oz → 1971 value: $${silver1971Value.toFixed(2)} → today: $${silverTodayValue.toFixed(2)} → bought ${silverGallons1971.toFixed(1)} gallons of gas then, buys ${silverGallonsToday.toFixed(1)} gallons now (${silverGallons1971 > 0 ? (silverGallonsToday / silverGallons1971).toFixed(1) : '0'}x)` : '- User holds no silver'}
 - Total stack buys: ${(totalValue / B.oil_per_barrel).toFixed(1)} barrels of oil, ${(totalValue / B.rent_monthly).toFixed(1)} months of rent, ${(totalValue / B.labor_hourly).toFixed(1)} hours of median US labor today
