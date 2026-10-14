@@ -3,8 +3,9 @@ const converter = require('number-to-words');
 const multer = require('multer');
 const { PassThrough } = require('node:stream');
 const supabase = require('../lib/supabase');
-const { getCachedPrices, getSpotPrices } = require('../services/price-fetcher');
+const { getPriceSnapshot, getSpotPrices } = require('../services/price-fetcher');
 const { getTopIntelligence } = require('../services/intelligence-scraper');
+const { sharedMarketBlock } = require('../services/troy-context');
 const { getTTSProvider, getSTTProvider } = require('../services/voice-providers');
 const ttsCache = require('../services/tts-cache');
 const troyLlm = require('../services/troy-llm');
@@ -40,6 +41,19 @@ const PURCHASING_POWER_BENCHMARKS = {
 // ============================================
 // HELPERS
 // ============================================
+
+// The purchasing power card that can show under Troy's answer. It divides by
+// the same benchmarks his instructions use, so the card and what he says
+// about oil, rent and labor agree.
+function purchasingPowerCard(prices, totalValue, B = PURCHASING_POWER_BENCHMARKS) {
+  return {
+    goldPerBarrelOfOil: prices.gold / B.oil_per_barrel,
+    silverPerGallonOfGas: prices.silver / B.gas_per_gallon,
+    stackBarrelsOfOil: totalValue / B.oil_per_barrel,
+    stackMonthsOfRent: totalValue / B.rent_monthly,
+    stackHoursOfLabor: totalValue / B.labor_hourly,
+  };
+}
 
 function isUUID(str) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
@@ -442,16 +456,17 @@ router.post('/conversations/:id/messages', async (req, res) => {
 
     const userHoldings = holdings || [];
 
-    // One spot snapshot for the whole prompt. getSpotPrices refreshes a cold
-    // or stale cache and says where the price came from, so the stack totals,
-    // CURRENT SPOT and STACK MOVES below all use the same quote.
-    let spot = null;
+    // One reading for the whole prompt. getSpotPrices refreshes a cold or
+    // stale cache, and the cached snapshot stands in if that throws, so the
+    // stack totals, CURRENT SPOT, STACK MOVES and the market block all agree.
+    let snapshot = null;
     try {
-      spot = await getSpotPrices();
+      snapshot = await getSpotPrices();
     } catch (e) {
       console.error('[Troy Chat] Spot fetch failed:', e.message);
     }
-    const prices = spot?.prices || getCachedPrices();
+    if (!snapshot || !snapshot.prices) snapshot = getPriceSnapshot();
+    const prices = snapshot.prices || {};
 
     // Build portfolio summary
     const metalTotals = { gold: { oz: 0, cost: 0 }, silver: { oz: 0, cost: 0 }, platinum: { oz: 0, cost: 0 }, palladium: { oz: 0, cost: 0 } };
@@ -516,13 +531,7 @@ router.post('/conversations/:id/messages', async (req, res) => {
       goldPrice: prices.gold,
       silverPrice: prices.silver,
       goldSilverRatio: prices.silver > 0 ? prices.gold / prices.silver : null,
-      purchasingPower: {
-        goldPerBarrelOfOil: prices.gold / B.oil_per_barrel,
-        silverPerGallonOfGas: prices.silver / B.gas_per_gallon,
-        stackBarrelsOfOil: totalValue / B.oil_per_barrel,
-        stackMonthsOfRent: totalValue / B.rent_monthly,
-        stackHoursOfLabor: totalValue / B.labor_hourly,
-      },
+      purchasingPower: purchasingPowerCard(prices, totalValue),
       purchasingPowerComparison: {
         gold: {
           oz: goldOzTotal,
@@ -562,6 +571,15 @@ router.post('/conversations/:id/messages', async (req, res) => {
         return `${m.charAt(0).toUpperCase() + m.slice(1)}: ${v.oz.toFixed(2)} oz, Value $${val.toFixed(2)}, Cost $${v.cost.toFixed(2)}, ${gl >= 0 ? '+' : ''}$${gl.toFixed(2)}`;
       }).join('\n');
 
+    // The day's moves, Troy's latest Stack Signal and the newest headlines, so
+    // he can say what moved metals, the same as on troystack.ai.
+    let marketBlock = '';
+    try {
+      marketBlock = (await sharedMarketBlock(snapshot)) || '';
+    } catch (marketErr) {
+      console.log(`[Troy Chat] Market context error (non-fatal): ${marketErr.message}`);
+    }
+
     // Fetch community intelligence (YouTube, X, Reddit) for context injection
     let communityIntel = '';
     try {
@@ -577,7 +595,7 @@ router.post('/conversations/:id/messages', async (req, res) => {
       try {
         // Measured to a live quote only. A static or failed-over price would
         // invent a move, so those get a note not to estimate one.
-        const live = liveSpot(spot);
+        const live = liveSpot(snapshot);
         stackMoves = live ? formatStackMoves(await getStackMoves(userHoldings, live)) : NO_LIVE_SPOT;
       } catch (movesErr) {
         console.log(`[Troy Chat] Stack moves error (non-fatal): ${movesErr.message}`);
@@ -626,7 +644,7 @@ Reference these community discussions naturally when relevant — "Schiff pointe
       message,
       prompt: {
         persona: promptPersona,
-        stack: promptStack,
+        stack: promptStack + marketBlock,
         knowledge: promptKnowledge,
         community: promptCommunity,
       },
@@ -1295,3 +1313,6 @@ module.exports = router;
 // reuses the exact /speak sanitizer so spoken output policy stays single-
 // sourced here (alongside SANITIZER_VERSION). Function body unchanged.
 module.exports.sanitizeTTSText = sanitizeTTSText;
+// For tests: the card's figures and the benchmarks Troy is told.
+module.exports.purchasingPowerCard = purchasingPowerCard;
+module.exports.PURCHASING_POWER_BENCHMARKS = PURCHASING_POWER_BENCHMARKS;

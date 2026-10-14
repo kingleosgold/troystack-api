@@ -68,12 +68,13 @@ Reference these community discussions naturally when relevant.` : '';
 /**
  * @param {object} deps
  * @param {object} deps.llm - { isConfigured(), generateTroyReply(args) }
- * @param {() => Promise<object>} deps.getPrices - resolves { gold, silver, platinum, palladium }
+ * @param {() => Promise<object>} deps.getPrices - resolves a price snapshot { prices, change, source }, or bare { gold, silver, platinum, palladium }
  * @param {() => Promise<string>} [deps.getIntel] - community chatter, '' when none
+ * @param {(snapshot?: object) => Promise<string>} [deps.getMarket] - the day's moves and Signal from the same snapshot, '' when none
  * @param {() => number} [deps.now]
  * @param {object} [deps.env]
  */
-function createTroyAskRouter({ llm, getPrices, getIntel = async () => '', now = () => Date.now(), env = process.env }) {
+function createTroyAskRouter({ llm, getPrices, getIntel = async () => '', getMarket = async () => '', now = () => Date.now(), env = process.env }) {
   const router = express.Router();
   const limit = positiveInt(env.TROY_ASK_LIMIT, DEFAULT_LIMIT);
   const budget = createDailyBudget(positiveInt(env.TROY_ASK_DAILY_BUDGET, DEFAULT_DAILY_BUDGET));
@@ -133,9 +134,13 @@ function createTroyAskRouter({ llm, getPrices, getIntel = async () => '', now = 
     };
 
     try {
+      // One price reading for CURRENT SPOT and for the day's moves, so they agree.
+      let snapshot = null;
       let prices = {};
       try {
-        prices = (await getPrices()) || {};
+        const read = (await getPrices()) || {};
+        snapshot = read.prices ? read : null;
+        prices = read.prices || read;
       } catch (e) {
         console.error('[Troy Ask] Price fetch failed:', e.message);
       }
@@ -145,6 +150,12 @@ function createTroyAskRouter({ llm, getPrices, getIntel = async () => '', now = 
       } catch (e) {
         console.log(`[Troy Ask] Intelligence fetch error (non-fatal): ${e.message}`);
       }
+      let market = '';
+      try {
+        market = (await getMarket(snapshot || undefined)) || '';
+      } catch (e) {
+        console.log(`[Troy Ask] Market context error (non-fatal): ${e.message}`);
+      }
 
       const reply = await llm.generateTroyReply({
         userId: null,
@@ -152,7 +163,7 @@ function createTroyAskRouter({ llm, getPrices, getIntel = async () => '', now = 
         message: message.trim(),
         prompt: {
           persona: TROY_PERSONA,
-          stack: visitorBlock(prices),
+          stack: visitorBlock(prices) + market,
           knowledge: TROY_KNOWLEDGE,
           community: communityBlock(intel),
         },

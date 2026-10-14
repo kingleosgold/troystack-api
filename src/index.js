@@ -24,6 +24,7 @@ const scanUsageRouter = require('./routes/scan-usage');
 const minVersionRouter = require('./routes/min-version');
 const troyChatRouter = require('./routes/troy-chat');
 const { createTroyAskRouter } = require('./routes/troy-ask');
+const { sharedMarketBlock } = require('./services/troy-context');
 const troyLlm = require('./services/troy-llm');
 const { getTopIntelligence } = require('./services/intelligence-scraper');
 const stackSignalRouter = require('./routes/stack-signal');
@@ -36,7 +37,7 @@ const adminEngagementRouter = require('./routes/admin-engagement');
 const { apiKeyAuth } = require('./middleware/api-key-auth');
 const { handleMcp } = require('./routes/mcp');
 
-const { initPriceFetcher, fetchLiveSpotPrices, areMarketsClosed, getCachedPrices, getSpotPrices } = require('./services/price-fetcher');
+const { initPriceFetcher, fetchLiveSpotPrices, areMarketsClosed, getSpotPrices, getPriceSnapshot } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
 
 const app = express();
@@ -201,11 +202,12 @@ app.use('/v1/min-version', minVersionRouter);
 app.use('/v1/troy', publicLimiter, createTroyAskRouter({
   llm: troyLlm,
   getPrices: async () => {
-    const cached = getCachedPrices() || {};
-    if (cached.gold && cached.silver) return cached;
-    return (await getSpotPrices()).prices;
+    const snapshot = getPriceSnapshot();
+    if (snapshot.source !== 'static-fallback' && snapshot.prices.gold && snapshot.prices.silver) return snapshot;
+    return getSpotPrices();
   },
   getIntel: () => getTopIntelligence(8),
+  getMarket: (snapshot) => sharedMarketBlock(snapshot),
 }));
 
 // Troy Chat — persistent conversations (mobile app sends userId)
