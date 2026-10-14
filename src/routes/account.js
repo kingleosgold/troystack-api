@@ -58,11 +58,13 @@ function willChargeAgain(subscription) {
 }
 
 // Asks Stripe, since the profile's status isn't kept up to date when a plan
-// is cancelled. Without Stripe set up, the profile is all there is to go on.
+// is cancelled. Lifetime is asked about too, since a monthly or yearly plan
+// bought before Lifetime keeps charging. Without Stripe set up, the profile is
+// all there is to go on.
 async function hasPlanThatCharges(stripe, profile) {
-  if (!profile?.stripe_customer_id || profile.subscription_tier === 'lifetime') return false;
+  if (!profile?.stripe_customer_id) return false;
   if (!stripe) {
-    return profile.subscription_tier !== 'free' && LIVE_STRIPE_STATUSES.has(profile.subscription_status);
+    return !['free', 'lifetime'].includes(profile.subscription_tier) && LIVE_STRIPE_STATUSES.has(profile.subscription_status);
   }
   const subscriptions = await stripe.subscriptions.list({ customer: profile.stripe_customer_id, status: 'all', limit: 100 });
   return (subscriptions?.data || []).some(willChargeAgain);
@@ -202,11 +204,16 @@ function createAccountRouter({ supabase, stripe = null }) {
         if (failed(error)) throw new Error(`troy_messages: ${error.message}`);
       }
 
+      // The stories are counted again however the deletes below end, since a
+      // retry can't find them once the account's likes and comments are gone.
       const stories = await storiesTouched(supabase, userId);
-
-      for (const [table, column] of USER_TABLES) {
-        const { error } = await supabase.from(table).delete().eq(column, userId);
-        if (failed(error)) throw new Error(`${table}: ${error.message}`);
+      try {
+        for (const [table, column] of USER_TABLES) {
+          const { error } = await supabase.from(table).delete().eq(column, userId);
+          if (failed(error)) throw new Error(`${table}: ${error.message}`);
+        }
+      } finally {
+        await recountStories(supabase, stories);
       }
 
       for (const prefix of appStatePrefixes(userId)) {
@@ -215,8 +222,6 @@ function createAccountRouter({ supabase, stripe = null }) {
       }
       const { error: keysError } = await supabase.from('app_state').delete().in('key', appStateKeys(userId));
       if (failed(keysError)) throw new Error(`app_state: ${keysError.message}`);
-
-      await recountStories(supabase, stories);
 
       // Reports on Troy's replies stay for review, without the account.
       const { error: reportsError } = await supabase.from('troy_reports').update({ user_id: null }).eq('user_id', userId);

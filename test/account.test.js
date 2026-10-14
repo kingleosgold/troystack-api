@@ -204,6 +204,28 @@ test('an account on a Stripe plan that will charge again is told to cancel first
   }
 });
 
+test('a Lifetime account still paying for a monthly plan is asked to cancel it first', async () => {
+  const supabase = fakeSupabase({ answers: { 'profiles.select': { data: { subscription_tier: 'lifetime', subscription_status: 'active', stripe_customer_id: 'cus_1' }, error: null } } });
+  const stripe = fakeStripe([{ status: 'active', cancel_at_period_end: false }]);
+  const res = await callDelete(supabase, { authorization: 'Bearer good' }, stripe);
+  assert.strictEqual(res.statusCode, 409);
+  assert.deepStrictEqual(stripe.asked, [{ customer: 'cus_1', status: 'all', limit: 100 }]);
+  assert.strictEqual(supabase.deletedUsers.length, 0);
+});
+
+test('the stories are counted again even when a later table refuses', async () => {
+  const supabase = fakeSupabase({
+    answers: {
+      'article_likes.select': { data: [{ article_id: 'a1' }], count: 2, error: null },
+      'holdings.delete': { data: null, error: { message: 'timeout', code: '57014' } },
+    },
+  });
+  const res = await callDelete(supabase, { authorization: 'Bearer good' });
+  assert.strictEqual(res.statusCode, 500);
+  assert.ok(supabase.log.some(([t, op]) => t === 'stack_signal_articles' && op === 'update'), 'recounted');
+  assert.strictEqual(supabase.deletedUsers.length, 0);
+});
+
 test('Lifetime and cancelled Stripe plans, and App Store plans, can be deleted', async () => {
   for (const profile of [
     { subscription_tier: 'lifetime', subscription_status: 'active', stripe_customer_id: 'cus_1' },
