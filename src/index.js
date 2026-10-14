@@ -16,6 +16,8 @@ const intelligenceRouter = require('./routes/intelligence');
 const scanReceiptRouter = require('./routes/scan-receipt');
 const pushRouter = require('./routes/push');
 const legalRouter = require('./routes/legal');
+const { createAccountRouter, createTroyReportHandler } = require('./routes/account');
+const supabaseClient = require('./lib/supabase');
 const stripeRouter = require('./routes/stripe');
 const { stripeWebhookHandler, revenueCatWebhookHandler } = require('./routes/stripe');
 const widgetRouter = require('./routes/widget');
@@ -196,6 +198,12 @@ app.use('/', openCors, legalRouter);
 
 // Minimum app version check — no auth, no rate limit
 app.use('/v1/min-version', minVersionRouter);
+
+// Reports on Troy's replies, and deleting an account, for Google Play's
+// review (see routes/account.js). The report route sits ahead of the Troy
+// routers so nothing there answers it first.
+app.post('/v1/troy/report', publicLimiter, createTroyReportHandler({ supabase: supabaseClient }));
+app.use('/v1/account', publicLimiter, createAccountRouter({ supabase: supabaseClient }));
 
 // Troy for visitors on troystack.ai who haven't signed in: capped per
 // visitor and by a daily budget (see routes/troy-ask.js)

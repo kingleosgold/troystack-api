@@ -268,6 +268,19 @@ Both the signed-in chat and the visitor chat add the day's market context from `
 | GET | /v1/api-keys | Supabase JWT | List user's keys with `key_preview` (last 8 chars of hash), tier, rate_limit, last_used_at, request_count |
 | DELETE | /v1/api-keys/:id | Supabase JWT | Revoke key — 404 if not owned by caller |
 
+### src/routes/account.js
+- **Purpose:** What Google Play's review asks for. A report on one of Troy's replies, kept for a person to review, and deleting the signed-in account with everything kept for it
+- **Exports:** `createAccountRouter({ supabase })`, `createTroyReportHandler({ supabase })`, `USER_TABLES`
+- **Dependencies:** supabase (service role)
+- **Auth:** reports need none, so a visitor can file one. Deletion takes the Supabase session JWT as `Authorization: Bearer <jwt>` and acts only for that account, never an id in the body
+- **Deletion order:** troy_messages through the account's conversations, then every table in `USER_TABLES`, the app_state keys carrying the id, profiles, and the sign-in last through `auth.admin.deleteUser`. A step that fails stops it before the sign-in goes, so asking again finishes it. A table the database doesn't have is passed over
+- **Stripe:** an account whose Stripe plan will charge again (active, trialing, past due or unpaid, not Lifetime) gets 409 `stripe_plan_active` and is told to cancel first, since deleting the account wouldn't stop Stripe billing the card. App Store and Play plans are the stores' to cancel
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | /v1/troy/report | None | `{ userId?, conversationId?, messageId?, reason, content }`, content kept to 4,000 characters. 201 `{ id }`, 400 on a missing reason or content or an id that isn't one, 500 with the support address when it can't be saved |
+| DELETE | /v1/account | Supabase JWT | Deletes the account. 200 `{ deleted: true }`, 401 without a session, 409 on a live Stripe plan, 500 when a step fails |
+
 ### src/routes/mcp.js
 - **Purpose:** Model Context Protocol (MCP) server — wraps 6 public tools for AI agent consumption via the Streamable HTTP transport
 - **Exports:** `handleMcp`, `createMcpServer`
@@ -540,6 +553,12 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `user_id` (UUID, PK), `questions_used` (int), `period_start` (timestamptz)
 - Rolling 1-day window: free=3/day, gold=30/day
 - Used by: troy-chat.js
+
+### troy_reports
+- `id` (UUID, PK), `user_id`, `conversation_id`, `message_id` (UUID, nullable, not foreign keys so a report outlives its chat)
+- `reason` (text), `content` (text, up to 4,000 characters), `reviewed_at`, `created_at` (timestamptz)
+- Row-level security on with no policies, so only the service role reaches it (migration 008)
+- Used by: account.js
 
 ### podcast_episodes
 - `slug` (text, PK — matches stack_signal_articles.slug, e.g. `the-stack-signal-2026-07-31`)
