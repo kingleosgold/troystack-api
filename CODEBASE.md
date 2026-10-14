@@ -273,7 +273,7 @@ Both the signed-in chat and the visitor chat add the day's market context from `
 - **Exports:** `createAccountRouter({ supabase })`, `createTroyReportHandler({ supabase })`, `USER_TABLES`
 - **Dependencies:** supabase (service role)
 - **Auth:** reports need none, so a visitor can file one. Deletion takes the Supabase session JWT as `Authorization: Bearer <jwt>` and acts only for that account, never an id in the body
-- **Deletion order:** troy_messages through the account's conversations, then every table in `USER_TABLES`, the app_state keys carrying the id, profiles, and the sign-in last through `auth.admin.deleteUser`. A step that fails stops it before the sign-in goes, so asking again finishes it. A table the database doesn't have is passed over
+- **Deletion order:** troy_messages through the account's conversations, then every table in `USER_TABLES`, the app_state keys carrying the id, the account's id taken off its troy_reports, profiles, and the sign-in last through `auth.admin.deleteUser`. A step that fails stops it before the sign-in goes, so asking again finishes it. A table the database doesn't have is passed over
 - **Stripe:** an account whose Stripe plan will charge again (active, trialing, past due or unpaid, not Lifetime) gets 409 `stripe_plan_active` and is told to cancel first, since deleting the account wouldn't stop Stripe billing the card. App Store and Play plans are the stores' to cancel
 
 | Method | Path | Auth | Description |

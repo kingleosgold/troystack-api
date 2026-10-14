@@ -162,6 +162,10 @@ function createAccountRouter({ supabase }) {
       const { error: keysError } = await supabase.from('app_state').delete().in('key', appStateKeys(userId));
       if (failed(keysError)) throw new Error(`app_state: ${keysError.message}`);
 
+      // Reports on Troy's replies stay for review, without the account.
+      const { error: reportsError } = await supabase.from('troy_reports').update({ user_id: null }).eq('user_id', userId);
+      if (failed(reportsError)) throw new Error(`troy_reports: ${reportsError.message}`);
+
       const { error: profileDeleteError } = await supabase.from('profiles').delete().eq('id', userId);
       if (failed(profileDeleteError)) throw new Error(`profiles: ${profileDeleteError.message}`);
 

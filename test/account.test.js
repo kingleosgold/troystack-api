@@ -153,6 +153,8 @@ test("deleting an account removes every table's rows for the session's account, 
   }
   assert.ok(supabase.log.some(([t, op, col, val]) => t === 'app_state' && op === 'in' && col === 'key' && val.includes(`revenuecat_grant:${USER}`)));
   assert.ok(supabase.log.some(([t, op, col, val]) => t === 'app_state' && op === 'like' && val === `voice_usage_${USER}_%`));
+  assert.ok(supabase.log.some(([t, op, val]) => t === 'troy_reports' && op === 'update' && val.user_id === null), 'reports kept without the account');
+  assert.ok(supabase.log.some(([t, op, col, val]) => t === 'troy_reports' && op === 'eq' && col === 'user_id' && val === USER));
   assert.ok(supabase.log.some(([t, op, col, val]) => t === 'profiles' && op === 'eq' && val === USER));
   assert.deepStrictEqual(supabase.deletedUsers, [USER]);
   // Only ever the session's account.
