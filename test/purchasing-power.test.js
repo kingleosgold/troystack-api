@@ -32,3 +32,17 @@ test('no hard-coded divisor is left in the card', () => {
   assert.ok(!/\/\s*85\b/.test(src), 'no division by 85');
   assert.ok(!/\/\s*1850\b/.test(src), 'no division by 1850');
 });
+
+test('the benchmarks are $85 oil, $1,850 rent and $29 an hour', () => {
+  assert.equal(B.oil_per_barrel, 85);
+  assert.equal(B.rent_monthly, 1850);
+  assert.equal(B.labor_hourly, 29);
+});
+
+test('the route reads the price once and passes that reading on', () => {
+  const src = require('node:fs').readFileSync(require.resolve('../src/routes/troy-chat'), 'utf8');
+  assert.match(src, /snapshot = await getSpotPrices\(\)/);
+  assert.match(src, /liveSpot\(snapshot\)/);
+  assert.match(src, /sharedMarketBlock\(snapshot\)/);
+  assert.ok(!/getCachedPrices\(\)/.test(src), 'no second read of the cache');
+});

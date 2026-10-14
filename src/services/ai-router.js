@@ -51,13 +51,15 @@ function getAnthropicClient() {
  * @param {string} model - Model name (e.g. 'gemini-2.5-flash')
  * @param {string} systemPrompt - System instruction text
  * @param {string} userMessage - User message text
- * @param {object} options - { temperature, maxOutputTokens, responseMimeType, timeout }
+ * @param {object} options - { temperature, maxOutputTokens, responseMimeType, timeout, thinking }
+ *   thinking: false turns Gemini 2.5 Flash's thinking off. Leave it unset for
+ *   prose; set it false for scoring, extraction and other short structured jobs.
  * @returns {string} Raw text response
  */
 async function callGemini(model, systemPrompt, userMessage, options = {}) {
   if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not configured');
 
-  const { temperature = 0.3, maxOutputTokens = 4096, responseMimeType, timeout = 30000 } = options;
+  const { temperature = 0.3, maxOutputTokens = 4096, responseMimeType, timeout = 30000, thinking } = options;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
 
@@ -72,6 +74,13 @@ async function callGemini(model, systemPrompt, userMessage, options = {}) {
 
   if (responseMimeType) {
     body.generationConfig.responseMimeType = responseMimeType;
+  }
+
+  // Flash thinks by default and bills that thinking as output tokens. The
+  // thinking also draws on the output limit, so on a short maxOutputTokens it
+  // can leave little or nothing for the answer itself.
+  if (thinking === false) {
+    body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
   }
 
   const resp = await axios.post(url, body, {
