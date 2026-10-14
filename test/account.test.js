@@ -63,8 +63,22 @@ function fakeRes() {
   return res;
 }
 
-async function callDelete(supabase, headers = {}) {
-  const router = createAccountRouter({ supabase });
+function fakeStripe(subscriptions) {
+  const asked = [];
+  return {
+    asked,
+    subscriptions: {
+      list: async (params) => {
+        asked.push(params);
+        if (subscriptions instanceof Error) throw subscriptions;
+        return { data: subscriptions };
+      },
+    },
+  };
+}
+
+async function callDelete(supabase, headers = {}, stripe = null) {
+  const router = createAccountRouter({ supabase, stripe });
   const layer = router.stack.find((l) => l.route && l.route.path === '/' && l.route.methods.delete);
   const res = fakeRes();
   await layer.route.stack[0].handle({ headers, body: {} }, res);
@@ -201,4 +215,62 @@ test('Lifetime and cancelled Stripe plans, and App Store plans, can be deleted',
     assert.strictEqual(res.statusCode, 200, JSON.stringify(profile));
     assert.deepStrictEqual(supabase.deletedUsers, [USER]);
   }
+});
+
+const GOLD_ON_STRIPE = { 'profiles.select': { data: { subscription_tier: 'gold', subscription_status: 'active', stripe_customer_id: 'cus_1' }, error: null } };
+
+test("Stripe decides whether a plan will charge again, not the profile's stored status", async () => {
+  // Cancelled in Stripe while the profile still says active, as the
+  // cancellation webhook leaves it.
+  let supabase = fakeSupabase({ answers: { 'profiles.select': { data: { subscription_tier: 'free', subscription_status: 'active', stripe_customer_id: 'cus_1' }, error: null } } });
+  let stripe = fakeStripe([{ status: 'canceled', cancel_at_period_end: false }]);
+  let res = await callDelete(supabase, { authorization: 'Bearer good' }, stripe);
+  assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(stripe.asked, [{ customer: 'cus_1', status: 'all', limit: 100 }]);
+
+  // Set to cancel at the end of the period, so it won't charge again.
+  supabase = fakeSupabase({ answers: GOLD_ON_STRIPE });
+  stripe = fakeStripe([{ status: 'active', cancel_at_period_end: true }]);
+  res = await callDelete(supabase, { authorization: 'Bearer good' }, stripe);
+  assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(supabase.deletedUsers, [USER]);
+
+  // Still renewing.
+  supabase = fakeSupabase({ answers: GOLD_ON_STRIPE });
+  stripe = fakeStripe([{ status: 'canceled' }, { status: 'trialing', cancel_at_period_end: false }]);
+  res = await callDelete(supabase, { authorization: 'Bearer good' }, stripe);
+  assert.strictEqual(res.statusCode, 409);
+  assert.strictEqual(supabase.deletedUsers.length, 0);
+});
+
+test("when Stripe can't be asked, nothing is deleted", async () => {
+  const supabase = fakeSupabase({ answers: GOLD_ON_STRIPE });
+  const res = await callDelete(supabase, { authorization: 'Bearer good' }, fakeStripe(new Error('network')));
+  assert.strictEqual(res.statusCode, 503);
+  assert.ok(!supabase.log.some(([, op]) => op === 'delete'));
+  assert.strictEqual(supabase.deletedUsers.length, 0);
+});
+
+test('without Stripe set up, a profile moved to free by the cancellation webhook can be deleted', async () => {
+  const supabase = fakeSupabase({ answers: { 'profiles.select': { data: { subscription_tier: 'free', subscription_status: 'active', stripe_customer_id: 'cus_1' }, error: null } } });
+  const res = await callDelete(supabase, { authorization: 'Bearer good' });
+  assert.strictEqual(res.statusCode, 200);
+});
+
+test('the stories the account liked or commented on are counted again after its rows go', async () => {
+  const supabase = fakeSupabase({
+    answers: {
+      'article_likes.select': { data: [{ article_id: 'a1' }], count: 4, error: null },
+      'article_comments.select': { data: [{ article_id: 'a2' }], count: 1, error: null },
+    },
+  });
+  const res = await callDelete(supabase, { authorization: 'Bearer good' });
+  assert.strictEqual(res.statusCode, 200);
+  const updates = supabase.log.filter(([t, op]) => t === 'stack_signal_articles' && op === 'update').map(([, , v]) => v);
+  assert.deepStrictEqual(updates, [{ like_count: 4, comment_count: 1 }, { like_count: 4, comment_count: 1 }]);
+  const ids = supabase.log.filter(([t, op, col]) => t === 'stack_signal_articles' && op === 'eq' && col === 'id').map(([, , , v]) => v);
+  assert.deepStrictEqual(ids, ['a1', 'a2']);
+  const lastLikeDelete = supabase.log.findLastIndex(([t, op]) => t === 'article_likes' && op === 'delete');
+  const firstRecount = supabase.log.findIndex(([t, op]) => t === 'stack_signal_articles' && op === 'update');
+  assert.ok(lastLikeDelete < firstRecount, 'counted after the rows are gone');
 });

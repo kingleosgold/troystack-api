@@ -274,12 +274,13 @@ Both the signed-in chat and the visitor chat add the day's market context from `
 - **Dependencies:** supabase (service role)
 - **Auth:** reports need none, so a visitor can file one. Deletion takes the Supabase session JWT as `Authorization: Bearer <jwt>` and acts only for that account, never an id in the body
 - **Deletion order:** troy_messages through the account's conversations, then every table in `USER_TABLES`, the app_state keys carrying the id, the account's id taken off its troy_reports, profiles, and the sign-in last through `auth.admin.deleteUser`. A step that fails stops it before the sign-in goes, so asking again finishes it. A table the database doesn't have is passed over
-- **Stripe:** an account whose Stripe plan will charge again (active, trialing, past due or unpaid, not Lifetime) gets 409 `stripe_plan_active` and is told to cancel first, since deleting the account wouldn't stop Stripe billing the card. App Store and Play plans are the stores' to cancel
+- **Stripe:** an account whose Stripe plan will charge again gets 409 `stripe_plan_active` and is told to cancel first, since deleting the account wouldn't stop Stripe billing the card. The route asks Stripe, since the profile's `subscription_status` stays `active` after the cancellation webhook. A subscription active, trialing, past due or unpaid and not set to cancel at period end counts. When Stripe can't be asked, it answers 503 and deletes nothing. Without `STRIPE_SECRET_KEY` it goes by the profile's tier and status. App Store and Play plans are the stores' to cancel
+- **Story counts:** the stories the account liked or commented on are counted again after its rows go, so `like_count` and `comment_count` on stack_signal_articles stay right
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | /v1/troy/report | None | `{ userId?, conversationId?, messageId?, reason, content }`, content kept to 4,000 characters. 201 `{ id }`, 400 on a missing reason or content or an id that isn't one, 500 with the support address when it can't be saved |
-| DELETE | /v1/account | Supabase JWT | Deletes the account. 200 `{ deleted: true }`, 401 without a session, 409 on a live Stripe plan, 500 when a step fails |
+| DELETE | /v1/account | Supabase JWT | Deletes the account. 200 `{ deleted: true }`, 401 without a session, 409 on a Stripe plan that will charge again, 503 when Stripe can't be asked, 500 when a step fails |
 
 ### src/routes/mcp.js
 - **Purpose:** Model Context Protocol (MCP) server — wraps 6 public tools for AI agent consumption via the Streamable HTTP transport

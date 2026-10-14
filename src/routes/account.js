@@ -49,8 +49,54 @@ function appStateKeys(userId) {
 }
 
 // A Stripe plan that will charge again. Deleting the account wouldn't stop
-// Stripe billing the card, so the plan is cancelled first.
+// Stripe billing the card, so the plan is cancelled first. One set to cancel
+// at the end of its period won't charge again, so it doesn't hold deletion up.
 const LIVE_STRIPE_STATUSES = new Set(['active', 'trialing', 'past_due', 'unpaid']);
+
+function willChargeAgain(subscription) {
+  return LIVE_STRIPE_STATUSES.has(subscription.status) && !subscription.cancel_at_period_end;
+}
+
+// Asks Stripe, since the profile's status isn't kept up to date when a plan
+// is cancelled. Without Stripe set up, the profile is all there is to go on.
+async function hasPlanThatCharges(stripe, profile) {
+  if (!profile?.stripe_customer_id || profile.subscription_tier === 'lifetime') return false;
+  if (!stripe) {
+    return profile.subscription_tier !== 'free' && LIVE_STRIPE_STATUSES.has(profile.subscription_status);
+  }
+  const subscriptions = await stripe.subscriptions.list({ customer: profile.stripe_customer_id, status: 'all', limit: 100 });
+  return (subscriptions?.data || []).some(willChargeAgain);
+}
+
+// The stories an account liked or commented on keep counts of both, which the
+// usual unlike and delete paths keep right one at a time. A deletion removes
+// the account's rows in bulk, so those stories are counted again afterwards.
+async function storiesTouched(supabase, userId) {
+  const ids = new Set();
+  for (const table of ['article_likes', 'article_comments']) {
+    const { data, error } = await supabase.from(table).select('article_id').eq('user_id', userId);
+    if (failed(error)) throw new Error(`${table}: ${error.message}`);
+    for (const row of data || []) if (row.article_id) ids.add(row.article_id);
+  }
+  return [...ids];
+}
+
+async function recountStories(supabase, articleIds) {
+  for (const id of articleIds) {
+    try {
+      const likes = await supabase.from('article_likes').select('id', { count: 'exact', head: true }).eq('article_id', id);
+      const comments = await supabase.from('article_comments').select('id', { count: 'exact', head: true }).eq('article_id', id);
+      if (likes.error || comments.error) throw new Error((likes.error || comments.error).message);
+      const { error } = await supabase
+        .from('stack_signal_articles')
+        .update({ like_count: likes.count ?? 0, comment_count: comments.count ?? 0 })
+        .eq('id', id);
+      if (error) throw new Error(error.message);
+    } catch (err) {
+      console.error(`[Account] Could not recount story ${id}:`, err.message);
+    }
+  }
+}
 
 function cleanText(value, max) {
   if (typeof value !== 'string') return '';
@@ -116,7 +162,7 @@ function createTroyReportHandler({ supabase }) {
   };
 }
 
-function createAccountRouter({ supabase }) {
+function createAccountRouter({ supabase, stripe = null }) {
   const router = express.Router();
 
   router.delete('/', async (req, res) => {
@@ -131,8 +177,14 @@ function createAccountRouter({ supabase }) {
         .eq('id', userId)
         .maybeSingle();
       if (failed(profileError)) throw new Error(`profiles: ${profileError.message}`);
-      if (profile?.stripe_customer_id && profile.subscription_tier !== 'lifetime'
-          && LIVE_STRIPE_STATUSES.has(profile.subscription_status)) {
+      let charges;
+      try {
+        charges = await hasPlanThatCharges(stripe, profile);
+      } catch (err) {
+        console.error(`[Account] Could not read Stripe plans for ${userId}:`, err.message);
+        return res.status(503).json({ error: `Your plan couldn't be checked just now, so nothing was deleted. Try again, or email support@troystack.com.` });
+      }
+      if (charges) {
         return res.status(409).json({
           error: 'stripe_plan_active',
           message: 'Cancel your Gold plan in Settings on troystack.ai first, so your card isn\'t charged again, then delete your account. Or email support@troystack.com and we\'ll do both.',
@@ -150,6 +202,8 @@ function createAccountRouter({ supabase }) {
         if (failed(error)) throw new Error(`troy_messages: ${error.message}`);
       }
 
+      const stories = await storiesTouched(supabase, userId);
+
       for (const [table, column] of USER_TABLES) {
         const { error } = await supabase.from(table).delete().eq(column, userId);
         if (failed(error)) throw new Error(`${table}: ${error.message}`);
@@ -161,6 +215,8 @@ function createAccountRouter({ supabase }) {
       }
       const { error: keysError } = await supabase.from('app_state').delete().in('key', appStateKeys(userId));
       if (failed(keysError)) throw new Error(`app_state: ${keysError.message}`);
+
+      await recountStories(supabase, stories);
 
       // Reports on Troy's replies stay for review, without the account.
       const { error: reportsError } = await supabase.from('troy_reports').update({ user_id: null }).eq('user_id', userId);

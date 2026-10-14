@@ -18,6 +18,7 @@ const pushRouter = require('./routes/push');
 const legalRouter = require('./routes/legal');
 const { createAccountRouter, createTroyReportHandler } = require('./routes/account');
 const supabaseClient = require('./lib/supabase');
+const stripeClient = process.env.STRIPE_SECRET_KEY ? require('stripe')(process.env.STRIPE_SECRET_KEY) : null;
 const stripeRouter = require('./routes/stripe');
 const { stripeWebhookHandler, revenueCatWebhookHandler } = require('./routes/stripe');
 const widgetRouter = require('./routes/widget');
@@ -203,7 +204,7 @@ app.use('/v1/min-version', minVersionRouter);
 // review (see routes/account.js). The report route sits ahead of the Troy
 // routers so nothing there answers it first.
 app.post('/v1/troy/report', publicLimiter, createTroyReportHandler({ supabase: supabaseClient }));
-app.use('/v1/account', publicLimiter, createAccountRouter({ supabase: supabaseClient }));
+app.use('/v1/account', publicLimiter, createAccountRouter({ supabase: supabaseClient, stripe: stripeClient }));
 
 // Troy for visitors on troystack.ai who haven't signed in: capped per
 // visitor and by a daily budget (see routes/troy-ask.js)
