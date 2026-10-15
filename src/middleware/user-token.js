@@ -14,16 +14,20 @@
 // Step three. Once the count says they do, a user id with no valid token is
 // refused. Alerts a signed-out phone keeps by device_id stay as they are.
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 
-// Every user id the call names. pathUserId reads the first path segment, for
-// routes such as GET /v1/snapshots/:userId, since app-level middleware runs
-// before the router has parsed its params.
+// Every user id the call names, as the routes will read it. Any value counts,
+// not only a well-formed one: a route coerces a one-element array to its
+// string, and Express decodes a percent-escaped path segment before the
+// router sees it, so the check flattens arrays and decodes the path the same
+// way. pathUserId reads the first path segment, for GET /v1/snapshots/:userId,
+// since app-level middleware runs before the router has parsed its params.
 function claimedUserIds(req, { pathUserId = false } = {}) {
   const ids = [];
   const add = (value) => {
-    if (typeof value === 'string' && UUID_RE.test(value)) ids.push(value.toLowerCase());
+    if (value === undefined || value === null || value === '') return;
+    if (Array.isArray(value)) return value.forEach(add);
+    ids.push(String(value).toLowerCase());
   };
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const query = req.query || {};
@@ -31,7 +35,16 @@ function claimedUserIds(req, { pathUserId = false } = {}) {
   add(body.user_id);
   add(query.userId);
   add(query.user_id);
-  if (pathUserId) add(String(req.path || '').split('/')[1]);
+  if (pathUserId) {
+    const segment = String(req.path || '').split('/')[1] || '';
+    let decoded = segment;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      // Express answers a malformed escape with 400, so the raw text stands.
+    }
+    add(decoded);
+  }
   return [...new Set(ids)];
 }
 

@@ -102,6 +102,30 @@ test('snapshots read the user id from the path', async () => {
   assert.equal(own.passed, true);
 });
 
+test('a user id sent as an array is checked like a string', async () => {
+  const { check } = setup();
+  const other = await call(check, { body: { userId: [OTHER] }, method: 'POST', token: GOOD });
+  assert.equal(other.res.statusCode, 403);
+  const own = await call(check, { query: { userId: [USER] }, token: GOOD });
+  assert.equal(own.passed, true);
+});
+
+test('a user id that is not a string still counts as a claim', async () => {
+  const { check, logs } = setup();
+  const signed = await call(check, { body: { userId: { id: OTHER } }, method: 'POST', token: GOOD });
+  assert.equal(signed.res.statusCode, 403);
+  const unsigned = await call(check, { body: { userId: [OTHER] }, method: 'POST' });
+  assert.equal(unsigned.passed, true);
+  assert.match(logs[logs.length - 1], /no session/);
+});
+
+test('a percent-escaped snapshot path is decoded before it is checked', async () => {
+  const { check } = setup({ pathUserId: true });
+  const escaped = OTHER.replace(/2/g, '%32');
+  const { res } = await call(check, { baseUrl: '/v1/snapshots', path: `/${escaped}`, token: GOOD });
+  assert.equal(res.statusCode, 403);
+});
+
 test('a conversation id in the path is not taken for a user id', () => {
   const ids = claimedUserIds({ path: `/conversations/${OTHER}`, query: { userId: USER } });
   assert.deepEqual(ids, [USER]);
