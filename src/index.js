@@ -99,9 +99,14 @@ app.post('/v1/webhooks/stripe', cors(corsOptions), express.raw({ type: 'applicat
 // POST bodies don't get rejected by the global JSON parser. Single /mcp
 // endpoint handles POST (client→server), GET (SSE stream), DELETE (session end).
 // ============================================================
-app.post('/mcp', cors(corsOptions), publicLimiter, handleMcp);
-app.get('/mcp', cors(corsOptions), publicLimiter, handleMcp);
-app.delete('/mcp', cors(corsOptions), publicLimiter, handleMcp);
+// Any origin may call /mcp, since it uses no cookies and its tools that take
+// a user check a key or token sent with the call. The site allow-list threw on
+// other origins, so a browser client's preflight got a 500.
+const mcpCors = cors({ exposedHeaders: ['Mcp-Session-Id'] });
+app.options('/mcp', mcpCors);
+app.post('/mcp', mcpCors, publicLimiter, handleMcp);
+app.get('/mcp', mcpCors, publicLimiter, handleMcp);
+app.delete('/mcp', mcpCors, publicLimiter, handleMcp);
 
 // Apply CORS and JSON parsing for everything else
 app.use(cors(corsOptions));
