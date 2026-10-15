@@ -1293,7 +1293,7 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
       filename: 'audio.m4a',
     });
 
-    console.log('🎤 [STT] Provider:', sttResult.provider, 'model:', sttResult.model, 'text:', sttResult.text);
+    console.log('🎤 [STT] Provider:', sttResult.provider, 'model:', sttResult.model, 'chars:', (sttResult.text || '').length);
 
     // Increment voice usage counter
     await supabase.from('app_state').upsert({
