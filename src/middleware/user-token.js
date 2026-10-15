@@ -56,10 +56,20 @@ function sessionToken(req) {
 }
 
 // The route the call hit with ids taken out, so the count never logs whose
-// account a call named.
-function routeLabel(req) {
-  const path = `${req.baseUrl || ''}${req.path || ''}`.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, ':id');
-  return `${req.method} ${path}`;
+// account a call named. Each segment is decoded first, so an escaped id is
+// caught too, and on a pathUserId route the first segment is always the id.
+function routeLabel(req, { pathUserId = false } = {}) {
+  const segments = String(req.path || '').split('/').map((segment, i) => {
+    if (pathUserId && i === 1 && segment) return ':id';
+    let decoded = segment;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      // A malformed escape is logged as sent, after the id check below.
+    }
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(decoded) ? ':id' : segment;
+  });
+  return `${req.method} ${req.baseUrl || ''}${segments.join('/')}`;
 }
 
 function createUserTokenCheck({ supabase, pathUserId = false, log = console.log } = {}) {
@@ -67,27 +77,30 @@ function createUserTokenCheck({ supabase, pathUserId = false, log = console.log 
     const claimed = claimedUserIds(req, { pathUserId });
     if (claimed.length === 0) return next();
 
+    const label = routeLabel(req, { pathUserId });
     const token = sessionToken(req);
     if (!token) {
-      log(`[UserToken] no session ${routeLabel(req)}`);
+      log(`[UserToken] no session ${label}`);
       return next();
     }
 
+    // One line per call, whether the token was refused or the check threw.
     let user = null;
+    let failure = '';
     try {
       const { data, error } = await supabase.auth.getUser(token);
       if (!error && data?.user?.id) user = data.user;
     } catch (err) {
-      log(`[UserToken] session check failed ${routeLabel(req)}: ${err.message}`);
+      failure = `, check failed: ${err.message}`;
     }
     if (!user) {
-      log(`[UserToken] session not verified ${routeLabel(req)}`);
+      log(`[UserToken] session not verified ${label}${failure}`);
       return next();
     }
 
     const own = String(user.id).toLowerCase();
     if (claimed.some((id) => id !== own)) {
-      log(`[UserToken] refused another account ${routeLabel(req)}`);
+      log(`[UserToken] refused another account ${label}`);
       return res.status(403).json({ error: "That user id isn't the signed-in account." });
     }
     req.sessionUserId = user.id;

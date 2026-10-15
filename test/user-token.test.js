@@ -131,7 +131,27 @@ test('a conversation id in the path is not taken for a user id', () => {
   assert.deepEqual(ids, [USER]);
 });
 
+test('a percent-escaped snapshot id stays out of the log', async () => {
+  const { check, logs } = setup({ pathUserId: true });
+  const escaped = OTHER.replace(/2/g, '%32');
+  await call(check, { baseUrl: '/v1/snapshots', path: `/${escaped}` });
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0], '[UserToken] no session GET /v1/snapshots/:id');
+});
+
+test('a session check that throws is one log line, and the call passes', async () => {
+  const logs = [];
+  const supabase = { auth: { getUser: async () => { throw new Error('fetch failed'); } } };
+  const check = createUserTokenCheck({ supabase, log: (line) => logs.push(line) });
+  const { passed } = await call(check, { query: { userId: USER }, token: GOOD });
+  assert.equal(passed, true);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /session not verified GET \/v1\/push\/price-alerts, check failed: fetch failed/);
+});
+
 test('route labels hide every id', () => {
   const label = routeLabel({ method: 'GET', baseUrl: '/v1/troy', path: `/conversations/${OTHER}` });
   assert.equal(label, 'GET /v1/troy/conversations/:id');
+  const escaped = routeLabel({ method: 'GET', baseUrl: '/v1/troy', path: `/conversations/${OTHER.replace(/2/g, '%32')}` });
+  assert.equal(escaped, 'GET /v1/troy/conversations/:id');
 });
