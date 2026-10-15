@@ -3,6 +3,7 @@ const converter = require('number-to-words');
 const multer = require('multer');
 const { PassThrough } = require('node:stream');
 const supabase = require('../lib/supabase');
+const { createUserTokenCheck } = require('../middleware/user-token');
 const { getPriceSnapshot, getSpotPrices } = require('../services/price-fetcher');
 const { getTopIntelligence } = require('../services/intelligence-scraper');
 const { sharedMarketBlock } = require('../services/troy-context');
@@ -1236,7 +1237,9 @@ router.get('/speak', async (req, res) => {
 // STT — POST /v1/troy/transcribe
 // Whisper speech-to-text ($0.006/min)
 // ============================================
-router.post('/transcribe', upload.single('audio'), async (req, res) => {
+// The form body is only read here, after multer, so the session check runs
+// again at the route to see its userId.
+router.post('/transcribe', upload.single('audio'), createUserTokenCheck({ supabase }), async (req, res) => {
   try {
     console.log('🎤 [STT] Endpoint hit');
 

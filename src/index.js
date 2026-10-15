@@ -18,6 +18,7 @@ const pushRouter = require('./routes/push');
 const legalRouter = require('./routes/legal');
 const { createAccountRouter, createTroyReportHandler } = require('./routes/account');
 const supabaseClient = require('./lib/supabase');
+const { createUserTokenCheck } = require('./middleware/user-token');
 const stripeClient = process.env.STRIPE_SECRET_KEY ? require('stripe')(process.env.STRIPE_SECRET_KEY) : null;
 const stripeRouter = require('./routes/stripe');
 const { stripeWebhookHandler, revenueCatWebhookHandler } = require('./routes/stripe');
@@ -166,7 +167,10 @@ app.use('/v1', publicLimiter, intelligenceRouter); // daily-brief + advisor + po
 app.use('/v1/scan-receipt', authenticatedLimiter, scanReceiptRouter);
 
 // Push notifications — public (mobile app sends tokens)
-app.use('/v1/push', publicLimiter, pushRouter);
+// A session token, when one comes, has to name the user the call does
+// (see middleware/user-token.js).
+const userTokenCheck = createUserTokenCheck({ supabase: supabaseClient });
+app.use('/v1/push', publicLimiter, userTokenCheck, pushRouter);
 
 // RevenueCat webhook — iOS subscription events (needs JSON body, so goes after express.json)
 app.post('/v1/webhooks/revenuecat', revenueCatWebhookHandler);
@@ -185,7 +189,7 @@ app.use('/v1', publicLimiter, stripeRouter);
 app.use('/v1', publicLimiter, widgetRouter);
 
 // Portfolio snapshots — public (mobile app saves/reads)
-app.use('/v1/snapshots', publicLimiter, snapshotsRouter);
+app.use('/v1/snapshots', publicLimiter, createUserTokenCheck({ supabase: supabaseClient, pathUserId: true }), snapshotsRouter);
 
 // Scan usage tracking — public (mobile app checks limits)
 app.use('/v1', publicLimiter, scanUsageRouter);
@@ -229,7 +233,7 @@ app.use('/v1/troy', publicLimiter, createTroyAskRouter({
 }));
 
 // Troy Chat — persistent conversations (mobile app sends userId)
-app.use('/v1/troy', publicLimiter, troyChatRouter);
+app.use('/v1/troy', publicLimiter, userTokenCheck, troyChatRouter);
 
 // Stack Signal — curated precious metals news with Troy's commentary
 app.use('/v1/stack-signal', publicLimiter, stackSignalRouter);
