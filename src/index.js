@@ -240,6 +240,9 @@ app.use('/v1/stack-signal', publicLimiter, stackSignalRouter);
 
 // Social features — views, likes, comments on Stack Signal articles
 app.use('/v1/stack-signal', publicLimiter, socialRouter);
+// The iPhone app calls the same routes at /v1/articles/:id/..., which nothing
+// served, so its views and likes never landed. Serve them there too.
+app.use('/v1', publicLimiter, socialRouter);
 
 // Dealer price comparison
 app.use('/v1/dealer-prices', publicLimiter, dealerPricesRouter);
