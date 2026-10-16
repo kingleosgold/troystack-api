@@ -1,7 +1,8 @@
 /**
  * Social Features — Views, Likes, Comments for Stack Signal articles
  *
- * Mounted at /v1/stack-signal (alongside stack-signal.js routes).
+ * Mounted at /v1/stack-signal (alongside stack-signal.js routes) and at /v1,
+ * since the iPhone app calls /v1/articles/:id/... directly.
  * All endpoints use /articles/:id/... paths.
  *
  * Auth pattern: mobile app passes userId via body/query (same as push, troy-chat).
@@ -27,14 +28,26 @@ function getUserId(req) {
 // VIEWS
 // ════════════════════════════════════════════════════════════
 
-// POST /v1/stack-signal/articles/:id/view
-// Records a view. Deduplicates by user_id (or device_id for anonymous).
+// POST /v1/stack-signal/articles/:id/view, and /v1/articles/:id/view, the
+// path the iPhone app calls.
+// Records a view. Deduplicates by user_id (or device_id for anonymous), and
+// answers with the article's view_count, which the app shows.
 router.post('/articles/:id/view', async (req, res) => {
   const { id } = req.params;
+  if (!isUUID(id)) return res.status(400).json({ error: 'Invalid article id' });
   const userId = getUserId(req);
-  const deviceId = req.body?.deviceId || null;
+  const deviceId = typeof req.body?.deviceId === 'string' ? req.body.deviceId.slice(0, 200) : null;
 
   try {
+    // A view only counts for an article that exists
+    const { data: article } = await supabase
+      .from('stack_signal_articles')
+      .select('view_count')
+      .eq('id', id)
+      .single();
+    if (!article) return res.status(404).json({ error: 'Article not found' });
+    let viewCount = article.view_count || 0;
+
     // Check if already viewed by this user/device
     let existingQuery = supabase
       .from('article_views')
@@ -57,26 +70,19 @@ router.post('/articles/:id/view', async (req, res) => {
     }
 
     if (!alreadyViewed) {
-      await supabase
+      const { error: insertError } = await supabase
         .from('article_views')
         .insert({ article_id: id, user_id: userId, device_id: deviceId });
+      if (insertError) throw new Error(insertError.message);
 
-      // Increment view_count
-      const { data: article } = await supabase
+      viewCount += 1;
+      await supabase
         .from('stack_signal_articles')
-        .select('view_count')
-        .eq('id', id)
-        .single();
-
-      if (article) {
-        await supabase
-          .from('stack_signal_articles')
-          .update({ view_count: (article.view_count || 0) + 1 })
-          .eq('id', id);
-      }
+        .update({ view_count: viewCount })
+        .eq('id', id);
     }
 
-    res.json({ success: true });
+    res.json({ success: true, view_count: viewCount });
   } catch (err) {
     console.error('[Social] View error:', err.message);
     res.status(500).json({ error: 'Failed to record view' });
