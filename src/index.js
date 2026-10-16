@@ -79,7 +79,9 @@ const corsOptions = {
     // Allow requests with no origin (mobile apps, curl, server-to-server)
     if (!origin) return callback(null, true);
     if (ALLOWED_ORIGINS.includes(origin) || PREVIEW_ORIGIN.test(origin)) return callback(null, true);
-    callback(new Error('Not allowed by CORS'));
+    const refused = new Error('Not allowed by CORS');
+    refused.status = 403;
+    callback(refused);
   },
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'X-API-Key', 'Stripe-Signature'],
@@ -117,10 +119,15 @@ app.use((req, res, next) => {
   express.json({ limit: '20mb' })(req, res, next);
 });
 
-// JSON parse error handler — must run after express.json() and before routes
+// JSON parse and CORS error handler — must run after express.json() and before routes
 app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed') {
     return res.status(400).json({ error: 'Invalid JSON' });
+  }
+  // An origin off the allow-list is refused, not a server fault, so it gets a
+  // 403 and no stack trace in the logs.
+  if (err.status === 403 && err.message === 'Not allowed by CORS') {
+    return res.status(403).json({ error: 'Origin not allowed' });
   }
   next(err);
 });

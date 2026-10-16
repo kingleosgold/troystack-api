@@ -82,3 +82,12 @@ test('mcp chat_with_troy draws anonymous calls from the daily budget', () => {
   assert.ok(fn.includes('if (!keyed && !anonChatBudget.take())'), 'anonymous calls must take a budget slot before the model call');
   assert.ok(fn.indexOf('anonChatBudget.take()') < fn.indexOf('callGemini('), 'the budget check runs before the model call');
 });
+
+test('an origin off the allow-list is refused with 403, not a 500', () => {
+  const src = require('node:fs').readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+  const origin = src.slice(src.indexOf('const corsOptions = {'), src.indexOf('const openCors'));
+  assert.ok(origin.includes('refused.status = 403;'), 'the CORS refusal carries a 403');
+  const handler = src.slice(src.indexOf('// JSON parse and CORS error handler'), src.indexOf('// Request logging'));
+  assert.ok(handler.includes("return res.status(403).json({ error: 'Origin not allowed' });"), 'the early error handler answers it');
+  assert.ok(src.indexOf('// JSON parse and CORS error handler') < src.indexOf('// Error handler\napp.use((err'), 'before the catch-all 500');
+});
