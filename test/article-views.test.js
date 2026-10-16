@@ -15,6 +15,8 @@ process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-dummy-service-role-key';
 const ARTICLE = '33333333-3333-4333-8333-333333333333';
 const MISSING = '44444444-4444-4444-8444-444444444444';
 const USER = '11111111-1111-4111-8111-111111111111';
+const OTHER = '22222222-2222-4222-8222-222222222222';
+const GOOD = 'aaa.bbb.ccc';
 
 // Holds the two tables the view route touches.
 function fakeSupabase({ insertError = null } = {}) {
@@ -48,7 +50,12 @@ function fakeSupabase({ insertError = null } = {}) {
     };
     return chain;
   }
-  return { db, client: { from: query } };
+  const auth = {
+    getUser: async (token) => (token === GOOD
+      ? { data: { user: { id: USER } }, error: null }
+      : { data: { user: null }, error: { message: 'invalid JWT' } }),
+  };
+  return { db, client: { from: query, auth } };
 }
 
 function loadSocialRouter(client) {
@@ -75,9 +82,9 @@ async function withApp(client, fn) {
   const server = app.listen(0);
   try {
     const base = `http://127.0.0.1:${server.address().port}`;
-    await fn((p, body) => fetch(base + p, {
+    await fn((p, body, token) => fetch(base + p, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(token && { Authorization: `Bearer ${token}` }) },
       body: JSON.stringify(body),
     }).then(async (r) => ({ status: r.status, body: await r.json() })));
   } finally {
@@ -130,4 +137,34 @@ test('a failed insert is an error, not a silent success', async () => {
     assert.equal(res.status, 500);
     assert.equal(db.articles[ARTICLE].view_count, 4);
   });
+});
+
+test('a session naming another account is refused on both paths', async () => {
+  const { db, client } = fakeSupabase();
+  await withApp(client, async (post) => {
+    const app = await post(`/v1/articles/${ARTICLE}/view`, { userId: OTHER }, GOOD);
+    assert.equal(app.status, 403);
+    const site = await post(`/v1/stack-signal/articles/${ARTICLE}/view`, { userId: OTHER }, GOOD);
+    assert.equal(site.status, 403);
+    assert.equal(db.views.length, 0);
+    const own = await post(`/v1/articles/${ARTICLE}/view`, { userId: USER }, GOOD);
+    assert.equal(own.status, 200);
+  });
+});
+
+test('the check stays on article paths, so other /v1 calls pass untouched', async () => {
+  const { client } = fakeSupabase();
+  const lines = [];
+  const original = console.log;
+  console.log = (line) => lines.push(String(line));
+  try {
+    await withApp(client, async (post) => {
+      const other = await post('/v1/push/register', { userId: USER });
+      assert.equal(other.status, 404);
+      await post(`/v1/articles/${ARTICLE}/view`, { userId: USER });
+    });
+  } finally {
+    console.log = original;
+  }
+  assert.deepEqual(lines.filter((l) => l.startsWith('[UserToken]')), ['[UserToken] no session POST /v1/articles/:id/view']);
 });
