@@ -5,13 +5,20 @@
  * since the iPhone app calls /v1/articles/:id/... directly.
  * All endpoints use /articles/:id/... paths.
  *
- * Auth pattern: mobile app passes userId via body/query (same as push, troy-chat).
+ * Auth pattern: mobile app passes userId via body/query (same as push, troy-chat),
+ * checked against the session token when one is sent.
  */
 
 const express = require('express');
 const supabase = require('../lib/supabase');
+const { createUserTokenCheck } = require('../middleware/user-token');
 
 const router = express.Router();
+
+// Views, likes and comments act for the userId they're sent, so they get the
+// same session check as push, Troy and snapshots (src/middleware/user-token.js).
+// Scoped to /articles, since this router is also mounted at /v1.
+router.use('/articles', createUserTokenCheck({ supabase }));
 
 function isUUID(str) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
