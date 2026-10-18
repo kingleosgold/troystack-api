@@ -28,6 +28,13 @@ function generateSlug(title) {
   return `${slug}-${date}`;
 }
 
+// A daily brief's title, like The Stack Signal: October 18, 2026. The house
+// style has no em dashes, and the model sometimes writes one anyway.
+function signalTitle(modelTitle, prefix, today) {
+  const title = (modelTitle || '').trim() || `${prefix}: ${today}`;
+  return title.replace(/\s*\u2014\s*/g, ': ');
+}
+
 // A price as a reader expects it, $4,180.80, or N/A when there isn't one.
 function usd(value) {
   const n = Number(value);
@@ -1093,7 +1100,7 @@ Gold/Silver Ratio: ${prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1
 
 Your articles went out over the past day, so prices in them may be stale. Use the current spot above for every price you give, written like $4,180.80, and don't point out that the articles had other numbers.
 
-Return JSON: { "title": "The Stack Signal — [date]", "commentary": "...", "one_liner": "..." }
+Return JSON: { "title": "The Stack Signal: [date]", "commentary": "...", "one_liner": "..." }
 The one_liner is the headline summary (max 20 words).
 Return ONLY valid JSON.`;
 
@@ -1205,7 +1212,7 @@ Return ONLY valid JSON.`;
     const slug = `${slugPrefixMap[timeOfDay] || 'the-stack-signal'}-${dateStr}`;
     const row = {
       slug,
-      title: parsed.title || `${titlePrefix} — ${today}`,
+      title: signalTitle(parsed.title, titlePrefix, today),
       troy_commentary: parsed.commentary || '',
       troy_one_liner: parsed.one_liner || '',
       category: 'macro',
@@ -1679,6 +1686,7 @@ module.exports = {
   runStackSignalPipeline,
   generateTweetText,
   sanitizeTweetText,
+  signalTitle,
   parseJsonObject,
   generateArticleMetadata,
   findWrittenLinks,
