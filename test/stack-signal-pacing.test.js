@@ -686,3 +686,18 @@ test("the flagship gets today's spot written as dollars and is told the articles
   assert.match(prompt, /Current spot: Gold \$4,000\.00, Silver \$48\.00\./);
   assert.match(prompt, /prices in them may be stale/);
 });
+
+test('a daily brief title never carries an em dash', () => {
+  assert.strictEqual(ssp.signalTitle('The Stack Signal — October 18, 2026', 'The Stack Signal', 'x'), 'The Stack Signal: October 18, 2026');
+  assert.strictEqual(ssp.signalTitle('The Stack Signal: October 18, 2026', 'The Stack Signal', 'x'), 'The Stack Signal: October 18, 2026');
+  assert.strictEqual(ssp.signalTitle('', 'Evening Signal', 'October 18, 2026'), 'Evening Signal: October 18, 2026');
+  assert.strictEqual(ssp.signalTitle(undefined, 'Weekly Recap', 'October 16, 2026'), 'Weekly Recap: October 16, 2026');
+});
+
+test('the flagship asks for its title with a colon, not an em dash', async () => {
+  db.recentFeed = [{ title: 'Perth Mint backlog tightens silver', published_at: '2026-10-09T09:00:00.000Z' }];
+  calls.claudePrompts.length = 0;
+  await ssp.generateStackSignal('morning');
+  assert.match(calls.claudePrompts[0], /"title": "The Stack Signal: \[date\]"/);
+  assert.doesNotMatch(calls.claudePrompts[0], /"title": "[^"]*—/);
+});
