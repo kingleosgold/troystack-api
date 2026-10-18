@@ -1878,6 +1878,27 @@ test('reconcile stops ending plans past its limit for one run', async () => {
   assert.equal(result.stopped, true);
 });
 
+test('reconcile runs once a UTC day, whichever instance claims it first', async () => {
+  reset({ profile: webGold(), subscriptions: [] });
+  const now = new Date('2026-10-19T09:40:00.000Z');
+  const first = await reconcile({ now });
+  assert.equal(first.ended, 1);
+  state.profile = webGold();
+  state.updates = [];
+  const second = await quietly(() => reconcile({ now: new Date('2026-10-19T09:40:05.000Z') }));
+  assert.equal(second.alreadyRan, true, 'a second instance on the same schedule stands down');
+  assert.equal(second.checked, 0);
+  assert.equal(state.updates.length, 0);
+  const nextDay = await reconcile({ now: new Date('2026-10-20T09:40:00.000Z') });
+  assert.equal(nextDay.ended, 1, 'the next day runs');
+});
+
+test('reconcile doesn\'t run when the day can\'t be claimed', async () => {
+  reset({ profile: webGold(), subscriptions: [], turnError: { message: 'connection reset' } });
+  await assert.rejects(reconcile(), /Run claim failed/);
+  assert.equal(state.updates.length, 0);
+});
+
 test('reconcile never lists lifetime or free profiles', async () => {
   reset({ profile: webGold({ subscription_tier: 'lifetime' }), subscriptions: [] });
   const result = await reconcile();

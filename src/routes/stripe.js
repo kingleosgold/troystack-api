@@ -1399,10 +1399,24 @@ router.get('/sync-subscription', async (req, res) => {
 // account Stripe can't be read for is skipped and tried the next day. Past
 // maxEndings in one run the rest are left alone and the run says so, since
 // that many lost deletions on one day means a setting is wrong, not Stripe.
+// One run a UTC day: the first to claim the day's row in app_state runs, so
+// the limit holds when a deploy puts two instances on the 9:40 schedule.
+// A run that dies partway leaves the day claimed and the next day picks up.
 const RECONCILE_PAGE = 500;
-async function reconcileWebGold({ maxEndings = 10 } = {}) {
+async function reconcileWebGold({ maxEndings = 10, now = new Date() } = {}) {
   const result = { checked: 0, ended: 0, updated: 0, skipped: 0, failed: 0, stopped: false };
   if (!stripe) return result;
+  const day = now.toISOString().slice(0, 10);
+  const { error: claimError } = await supabase
+    .from('app_state')
+    .insert({ key: `stripe_reconcile_cron_fire_${day}`, value: JSON.stringify({ count: 1, last_fired: now.toISOString() }) });
+  if (claimError) {
+    if (claimError.code === '23505') {
+      console.log(`🔁 [Stripe Reconcile] ${day} already ran, skipping`);
+      return { ...result, alreadyRan: true };
+    }
+    throw new Error(`Run claim failed: ${claimError.message}`);
+  }
   const candidates = [];
   for (let from = 0; ; from += RECONCILE_PAGE) {
     const { data, error } = await supabase
