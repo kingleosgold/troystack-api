@@ -1381,6 +1381,76 @@ router.get('/sync-subscription', async (req, res) => {
   }
 });
 
+// ============================================
+// DAILY RECONCILE
+// ============================================
+
+// Web Gold whose Stripe deletion never arrived stays Gold until a webhook or
+// a checkout settles it. Once a day every Gold profile with a Stripe customer
+// is checked against Stripe and gets the plan Stripe holds now. A profile the
+// App Store may be paying for is left to the RevenueCat webhook: one with an
+// App Store expiry, or one whose RevenueCat record still holds a plan. An
+// account Stripe can't be read for is skipped and tried the next day. Past
+// maxEndings in one run the rest are left alone and the run says so, since
+// that many lost deletions on one day means a setting is wrong, not Stripe.
+const RECONCILE_PAGE = 500;
+async function reconcileWebGold({ maxEndings = 10 } = {}) {
+  const result = { checked: 0, ended: 0, updated: 0, skipped: 0, failed: 0, stopped: false };
+  if (!stripe) return result;
+  const candidates = [];
+  for (let from = 0; ; from += RECONCILE_PAGE) {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('subscription_tier', 'gold')
+      .not('stripe_customer_id', 'is', null)
+      .order('id')
+      .range(from, from + RECONCILE_PAGE - 1);
+    if (error) throw new Error(`Profile list failed: ${error.message}`);
+    candidates.push(...(data || []).map((row) => row.id));
+    if (!data || data.length < RECONCILE_PAGE) break;
+  }
+
+  for (const userId of candidates) {
+    result.checked += 1;
+    try {
+      const outcome = await withAccountTurn(userId, async () => {
+        const profile = profileRead(await supabase
+          .from('profiles')
+          .select('subscription_tier, subscription_status, trial_end, stripe_customer_id, subscription_expires_at')
+          .eq('id', userId)
+          .single());
+        if (!profile || profile.subscription_tier !== 'gold' || !profile.stripe_customer_id) return 'skipped';
+        if (profile.subscription_expires_at) return 'skipped';
+        const plan = await planForUser(userId, profile.stripe_customer_id);
+        if (!plan) {
+          if (await appStorePlanOnRecord(userId)) return 'skipped';
+          if (result.ended >= maxEndings) {
+            result.stopped = true;
+            return 'skipped';
+          }
+        } else if (plan.tier === profile.subscription_tier && (plan.status ?? null) === (profile.subscription_status ?? null) && (plan.trialEnd ?? null) === (profile.trial_end ?? null)) {
+          return 'skipped';
+        }
+        const fields = plan
+          ? { subscription_tier: plan.tier, subscription_status: plan.status ?? null, trial_end: plan.trialEnd ?? null }
+          : { subscription_tier: 'free', subscription_status: null, trial_end: null };
+        const { error } = await supabase.from('profiles').update(fields).eq('id', userId);
+        if (error) throw new Error(`Profile update failed: ${error.message}`);
+        console.log(`🔁 [Stripe Reconcile] user=${userId} ${profile.subscription_tier}/${profile.subscription_status} -> ${fields.subscription_tier}/${fields.subscription_status}`);
+        return plan ? 'updated' : 'ended';
+      });
+      result[outcome] += 1;
+    } catch (e) {
+      result.failed += 1;
+      console.error(`❌ [Stripe Reconcile] user=${userId} not checked:`, e.message);
+    }
+  }
+  if (result.stopped) console.error(`❌ [Stripe Reconcile] Stopped ending plans after ${maxEndings} in one run. Check the Gold price settings before the next run.`);
+  return result;
+}
+router.reconcileWebGold = reconcileWebGold;
+
 module.exports = router;
 module.exports.stripeWebhookHandler = stripeWebhookHandler;
 // The RevenueCat webhook lives in its own module. index.js still imports it from here.

@@ -80,6 +80,8 @@ function reset(over = {}) {
     cancelled: [],
     voidFails: false,
     cancelFails: false,
+    // Listing profiles for the daily reconcile fails with this error.
+    listError: null,
   }, over);
   router.resetGoldProductCache();
   router.resetCustomerSearchCache();
@@ -160,6 +162,17 @@ const fakeSupabase = {
               const matches = p && (p[col] === undefined || p[col] === val);
               return matches ? { data: p, error: null } : { data: null, error: { code: 'PGRST116', message: 'no rows' } };
             },
+            // The daily reconcile lists Gold profiles that have a customer:
+            // the one profile, as user USER, when it's both.
+            not: () => ({
+              order: () => ({
+                range: async () => {
+                  if (state.listError) return { data: null, error: state.listError };
+                  const p = state.profile;
+                  return { data: p && p[col] === val && p.stripe_customer_id ? [{ id: USER }] : [], error: null };
+                },
+              }),
+            }),
             // The RevenueCat webhook reads with maybeSingle: no row is null data.
             maybeSingle: async () => {
               if (state.profileError) return { data: null, error: state.profileError };
@@ -1795,4 +1808,83 @@ test('web Gold whose Stripe plan is gone is checked again when the RevenueCat ke
     assert.equal(res.statusCode, 409, 'a live web plan still turns it away');
     assert.equal(res.body.reason, 'has_plan');
   });
+});
+
+// The daily reconcile: web Gold whose Stripe deletion never arrived.
+const reconcileSub = (status, extra = {}) => ({ status, items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] }, ...extra });
+const webGold = (over = {}) => ({ subscription_tier: 'gold', subscription_status: 'active', trial_end: null, stripe_customer_id: 'cus_1', subscription_expires_at: null, ...over });
+
+test('reconcile ends web Gold when Stripe holds no live subscription', async () => {
+  reset({ profile: webGold(), subscriptions: [reconcileSub('canceled')] });
+  const result = await router.reconcileWebGold();
+  assert.deepEqual(state.updates, [{ subscription_tier: 'free', subscription_status: null, trial_end: null }]);
+  assert.equal(result.ended, 1);
+  assert.equal(result.checked, 1);
+});
+
+test('reconcile leaves web Gold alone while Stripe still bills it', async () => {
+  reset({ profile: webGold(), subscriptions: [reconcileSub('active')] });
+  const result = await router.reconcileWebGold();
+  assert.equal(state.updates.length, 0);
+  assert.equal(result.skipped, 1);
+});
+
+test('reconcile moves a finished free week to active', async () => {
+  reset({ profile: webGold({ subscription_status: 'trialing', trial_end: '2026-10-10T00:00:00.000Z' }), subscriptions: [reconcileSub('active')] });
+  const result = await router.reconcileWebGold();
+  assert.deepEqual(state.updates, [{ subscription_tier: 'gold', subscription_status: 'active', trial_end: null }]);
+  assert.equal(result.updated, 1);
+});
+
+test('reconcile gives lifetime when a paid lifetime checkout outlasts the subscription', async () => {
+  reset({
+    profile: webGold(),
+    subscriptions: [reconcileSub('canceled')],
+    sessions: [{ mode: 'payment', status: 'complete', payment_status: 'paid', metadata: { tier: 'lifetime' }, payment_intent: 'pi_1' }],
+    charge: { refunded: false },
+  });
+  await router.reconcileWebGold();
+  assert.deepEqual(state.updates, [{ subscription_tier: 'lifetime', subscription_status: 'active', trial_end: null }]);
+});
+
+test('reconcile never reads Stripe for Gold with an App Store expiry', async () => {
+  reset({ profile: webGold({ subscription_expires_at: '2026-01-01T00:00:00.000Z' }), subscriptions: [] });
+  const result = await router.reconcileWebGold();
+  assert.equal(state.updates.length, 0);
+  assert.equal(state.stripeCalls.length, 0);
+  assert.equal(result.skipped, 1);
+});
+
+test('reconcile keeps Gold the App Store record still holds', async () => {
+  reset({ profile: webGold(), subscriptions: [], appState: { [`revenuecat_grant:${USER}`]: { subscriptionUntil: Date.now() + 86400000 } } });
+  const result = await router.reconcileWebGold();
+  assert.equal(state.updates.length, 0);
+  assert.equal(result.skipped, 1);
+});
+
+test('reconcile changes nothing when Stripe can\'t be read', async () => {
+  reset({ profile: webGold(), subscriptionsFail: true });
+  const result = await router.reconcileWebGold();
+  assert.equal(state.updates.length, 0);
+  assert.equal(result.failed, 1);
+});
+
+test('reconcile stops ending plans past its limit for one run', async () => {
+  reset({ profile: webGold(), subscriptions: [] });
+  const result = await router.reconcileWebGold({ maxEndings: 0 });
+  assert.equal(state.updates.length, 0);
+  assert.equal(result.stopped, true);
+});
+
+test('reconcile never lists lifetime or free profiles', async () => {
+  reset({ profile: webGold({ subscription_tier: 'lifetime' }), subscriptions: [] });
+  const result = await router.reconcileWebGold();
+  assert.equal(result.checked, 0);
+  assert.equal(state.updates.length, 0);
+});
+
+test('reconcile throws when the profile list fails', async () => {
+  reset({ profile: webGold(), listError: { message: 'connection reset' } });
+  await assert.rejects(router.reconcileWebGold(), /Profile list failed/);
+  assert.equal(state.updates.length, 0);
 });
