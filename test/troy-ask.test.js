@@ -8,7 +8,7 @@ const assert = require('node:assert');
 const http = require('node:http');
 const express = require('express');
 
-const { createTroyAskRouter, cleanHistory, visitorBlock } = require('../src/routes/troy-ask');
+const { createTroyAskRouter, cleanHistory, visitorBlock, askSource } = require('../src/routes/troy-ask');
 const { TROY_PERSONA, TROY_KNOWLEDGE } = require('../src/services/troy-prompt');
 
 const PRICES = { gold: 4173.3, silver: 59.88, platinum: 1658.6, palladium: 1135 };
@@ -42,10 +42,13 @@ async function withApp(router, fn) {
   }
 }
 
-function ask(base, body, ip = '203.0.113.7') {
+// A browser on troystack.ai sends an Origin header. The app sends none.
+function ask(base, body, ip = '203.0.113.7', origin = 'https://troystack.ai') {
+  const headers = { 'Content-Type': 'application/json', 'X-Forwarded-For': ip };
+  if (origin) headers.Origin = origin;
   return fetch(`${base}/v1/troy/ask`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ip },
+    headers,
     body: JSON.stringify(body),
   });
 }
@@ -216,4 +219,31 @@ test('CURRENT SPOT and the market block come from one price snapshot', async () 
   });
   assert.strictEqual(given, snapshot, 'the market block is built from the same reading');
   assert.ok(llm.calls[0].prompt.stack.startsWith(visitorBlock(PRICES)), 'CURRENT SPOT shows that reading');
+});
+
+test('an app guest hears about the app, not troystack.ai', async () => {
+  const llm = fakeLlm();
+  const router = createTroyAskRouter({ llm, getPrices: async () => PRICES, env: {} });
+  await withApp(router, async (base) => {
+    assert.strictEqual((await ask(base, { message: 'How is my stack doing?' }, '203.0.113.8', null)).status, 200);
+    assert.strictEqual((await ask(base, { message: 'And mine?', source: 'app' }, '203.0.113.9')).status, 200);
+    assert.strictEqual((await ask(base, { message: 'Mine?', source: 'web' }, '203.0.113.10', null)).status, 200);
+  });
+  const [noOrigin, saysApp, saysWeb] = llm.calls.map((c) => c.prompt.stack);
+  for (const stack of [noOrigin, saysApp]) {
+    assert.match(stack, /guest in the TroyStack app/);
+    assert.doesNotMatch(stack, /troystack\.ai\/stack|iPhone app/);
+    assert.match(stack, /Gold: \$4173\.3/);
+  }
+  assert.match(saysWeb, /visitor on troystack\.ai/);
+});
+
+test('askSource reads the body first, then the Origin header', () => {
+  const req = (body, origin) => ({ body, get: (h) => (h.toLowerCase() === 'origin' ? origin : undefined) });
+  assert.strictEqual(askSource(req({}, 'https://troystack.ai')), 'web');
+  assert.strictEqual(askSource(req({}, undefined)), 'app');
+  assert.strictEqual(askSource(req({ source: 'app' }, 'https://troystack.ai')), 'app');
+  assert.strictEqual(askSource(req({ source: 'web' }, undefined)), 'web');
+  assert.strictEqual(askSource(req({ source: 'other' }, 'https://troystack.ai')), 'web');
+  assert.strictEqual(visitorBlock(PRICES, 'nonsense'), visitorBlock(PRICES));
 });
