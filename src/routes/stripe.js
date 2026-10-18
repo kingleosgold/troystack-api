@@ -642,21 +642,24 @@ async function stripeWebhookHandler(req, res) {
             break;
           }
         }
-        tier = await keepLifetime(userId, tier);
-        if (tier === 'lifetime') {
-          subscriptionStatus = 'active';
-          trialEnd = null;
-        }
-
-        const { error } = await supabase
-          .from('profiles')
-          .update({
-            subscription_tier: tier,
-            stripe_customer_id: session.customer,
-            subscription_status: subscriptionStatus,
-            trial_end: trialEnd,
-          })
-          .eq('id', userId);
+        // Written in the account's turn, which the daily reconcile takes too,
+        // so a purchase landing while it checks the account isn't written over.
+        const { error } = await withAccountTurn(userId, async () => {
+          tier = await keepLifetime(userId, tier);
+          if (tier === 'lifetime') {
+            subscriptionStatus = 'active';
+            trialEnd = null;
+          }
+          return supabase
+            .from('profiles')
+            .update({
+              subscription_tier: tier,
+              stripe_customer_id: session.customer,
+              subscription_status: subscriptionStatus,
+              trial_end: trialEnd,
+            })
+            .eq('id', userId);
+        });
 
         // A failed write is answered 500 so Stripe sends the event again.
         if (error) {
@@ -1183,21 +1186,23 @@ router.post('/verify-session', async (req, res) => {
         return res.json({ success: false, reason: 'That purchase was refunded' });
       }
     }
-    tier = await keepLifetime(userId, tier);
-    if (tier === 'lifetime') {
-      subscriptionStatus = 'active';
-      trialEnd = null;
-    }
-
-    const { error } = await supabase
-      .from('profiles')
-      .update({
-        subscription_tier: tier,
-        stripe_customer_id: session.customer,
-        subscription_status: subscriptionStatus,
-        trial_end: trialEnd,
-      })
-      .eq('id', userId);
+    // Written in the account's turn, as the checkout webhook writes it.
+    const { error } = await withAccountTurn(userId, async () => {
+      tier = await keepLifetime(userId, tier);
+      if (tier === 'lifetime') {
+        subscriptionStatus = 'active';
+        trialEnd = null;
+      }
+      return supabase
+        .from('profiles')
+        .update({
+          subscription_tier: tier,
+          stripe_customer_id: session.customer,
+          subscription_status: subscriptionStatus,
+          trial_end: trialEnd,
+        })
+        .eq('id', userId);
+    });
 
     if (error) {
       console.error('❌ [Stripe Verify] Failed to update profile:', error.message);
@@ -1380,6 +1385,82 @@ router.get('/sync-subscription', async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch subscription status' });
   }
 });
+
+// ============================================
+// DAILY RECONCILE
+// ============================================
+
+// Web Gold whose Stripe deletion never arrived stays Gold until a webhook or
+// a checkout settles it. Once a day every Gold profile with a Stripe customer
+// is checked against Stripe and gets the plan Stripe holds now. A profile the
+// App Store may be paying for is left to the RevenueCat webhook: one with an
+// App Store expiry, one whose RevenueCat record still holds a plan, or one
+// RevenueCat itself lists a running plan for or can't be asked about. An
+// account Stripe can't be read for is skipped and tried the next day. Past
+// maxEndings in one run the rest are left alone and the run says so, since
+// that many lost deletions on one day means a setting is wrong, not Stripe.
+const RECONCILE_PAGE = 500;
+async function reconcileWebGold({ maxEndings = 10 } = {}) {
+  const result = { checked: 0, ended: 0, updated: 0, skipped: 0, failed: 0, stopped: false };
+  if (!stripe) return result;
+  const candidates = [];
+  for (let from = 0; ; from += RECONCILE_PAGE) {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('subscription_tier', 'gold')
+      .not('stripe_customer_id', 'is', null)
+      .order('id')
+      .range(from, from + RECONCILE_PAGE - 1);
+    if (error) throw new Error(`Profile list failed: ${error.message}`);
+    candidates.push(...(data || []).map((row) => row.id));
+    if (!data || data.length < RECONCILE_PAGE) break;
+  }
+
+  for (const userId of candidates) {
+    result.checked += 1;
+    try {
+      const outcome = await withAccountTurn(userId, async () => {
+        const profile = profileRead(await supabase
+          .from('profiles')
+          .select('subscription_tier, subscription_status, trial_end, stripe_customer_id, subscription_expires_at')
+          .eq('id', userId)
+          .single());
+        if (!profile || profile.subscription_tier !== 'gold' || !profile.stripe_customer_id) return 'skipped';
+        if (profile.subscription_expires_at) return 'skipped';
+        const plan = await planForUser(userId, profile.stripe_customer_id);
+        if (!plan) {
+          if (await appStorePlanOnRecord(userId)) return 'skipped';
+          // Gold with no App Store expiry can still be an older App Store plan
+          // the record never saw, so RevenueCat is asked before it ends.
+          // Without REVENUECAT_SECRET_KEY it can't be, and the plan stays.
+          const store = await revenueCatHoldings(userId, { timeoutMs: revenueCatRead.timeoutMs });
+          if (!store || store.lifetime || Math.max(store.until ?? 0, store.graceUntil ?? 0) > Date.now()) return 'skipped';
+          if (result.ended >= maxEndings) {
+            result.stopped = true;
+            return 'skipped';
+          }
+        } else if (plan.tier === profile.subscription_tier && (plan.status ?? null) === (profile.subscription_status ?? null) && (plan.trialEnd ?? null) === (profile.trial_end ?? null)) {
+          return 'skipped';
+        }
+        const fields = plan
+          ? { subscription_tier: plan.tier, subscription_status: plan.status ?? null, trial_end: plan.trialEnd ?? null }
+          : { subscription_tier: 'free', subscription_status: null, trial_end: null };
+        const { error } = await supabase.from('profiles').update(fields).eq('id', userId);
+        if (error) throw new Error(`Profile update failed: ${error.message}`);
+        console.log(`🔁 [Stripe Reconcile] user=${userId} ${profile.subscription_tier}/${profile.subscription_status} -> ${fields.subscription_tier}/${fields.subscription_status}`);
+        return plan ? 'updated' : 'ended';
+      });
+      result[outcome] += 1;
+    } catch (e) {
+      result.failed += 1;
+      console.error(`❌ [Stripe Reconcile] user=${userId} not checked:`, e.message);
+    }
+  }
+  if (result.stopped) console.error(`❌ [Stripe Reconcile] Stopped ending plans after ${maxEndings} in one run. Check the Gold price settings before the next run.`);
+  return result;
+}
+router.reconcileWebGold = reconcileWebGold;
 
 module.exports = router;
 module.exports.stripeWebhookHandler = stripeWebhookHandler;

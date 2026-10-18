@@ -748,6 +748,21 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('📊 [Composite Price] Scheduled: every 5m (market), every 15m (off-hours)');
 
+  // ── Web Gold reconcile: daily at 9:40 UTC ──
+  // A Stripe deletion that never arrived leaves web Gold standing. Stripe is
+  // read for every Gold profile with a customer and the profile follows it.
+  if (process.env.STRIPE_SECRET_KEY) {
+    cron.schedule('40 9 * * *', async () => {
+      try {
+        const result = await stripeRouter.reconcileWebGold();
+        console.log('🔁 [Stripe Reconcile] Complete:', result);
+      } catch (err) {
+        console.error('🔁 [Stripe Reconcile] Failed:', err.message);
+      }
+    }, { timezone: 'UTC' });
+    console.log('🔁 [Stripe Reconcile] Scheduled: daily at 9:40 UTC');
+  }
+
   // ── price_log decimator: nightly at 3:00 AM EST ──
   const { decimatePriceLog } = require('./services/price-log-decimator');
   cron.schedule('0 3 * * *', async () => {
