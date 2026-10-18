@@ -1,6 +1,6 @@
 // Troy for visitors on troystack.ai who haven't signed in.
 //
-// POST /v1/troy/ask        { message, history? }  -> { reply, questionsUsed, questionsLimit, resetsAt }
+// POST /v1/troy/ask        { message, history?, source? }  -> { reply, questionsUsed, questionsLimit, resetsAt }
 // GET  /v1/troy/ask/status                         -> { questionsUsed, questionsLimit, resetsAt }
 //
 // Single answers with no saved history. The page keeps the last few turns and
@@ -10,6 +10,11 @@
 // budget caps total spend across all visitors, the way the MCP chat's
 // anonymous budget does. Both counters live in memory, so a restart resets
 // them, which errs toward answering people.
+//
+// The TroyStack app sends its guests here too. source 'app' says so, and a
+// call with no Origin header counts as the app, since a browser always sends
+// one on a cross-origin POST and the app never does. An app guest hears about
+// adding their stack in the app instead of at troystack.ai.
 
 const express = require('express');
 const { ipKeyGenerator } = require('express-rate-limit');
@@ -46,10 +51,21 @@ function money(n) {
   return Number.isFinite(n) && n > 0 ? `$${n}` : 'unavailable';
 }
 
-function visitorBlock(prices) {
+function askSource(req) {
+  const source = req.body && req.body.source;
+  if (source === 'app' || source === 'web') return source;
+  return req.get('origin') ? 'web' : 'app';
+}
+
+const WHO = {
+  web: "A visitor on troystack.ai who hasn't signed in. You don't know what they hold, so never invent a stack for them. If they ask about their own stack, tell them they can add it at troystack.ai/stack or in the TroyStack iPhone app, and you'll know it from then on.",
+  app: "A guest in the TroyStack app who hasn't made an account. You can't see what they hold, even if they've added holdings on this phone, so never invent a stack for them. If they ask about their own stack, tell them a free account lets you see the stack they've added in the app, and what they've saved on this phone moves over with it.",
+};
+
+function visitorBlock(prices, source = 'web') {
   const ratio = prices.gold > 0 && prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1) : 'unavailable';
   return `THE PERSON YOU'RE TALKING TO:
-A visitor on troystack.ai who hasn't signed in. You don't know what they hold, so never invent a stack for them. If they ask about their own stack, tell them they can add it at troystack.ai/stack or in the TroyStack iPhone app, and you'll know it from then on. Keep this answer under 180 words.
+${WHO[source] || WHO.web} Keep this answer under 180 words.
 
 CURRENT SPOT:
 Gold: ${money(prices.gold)}, Silver: ${money(prices.silver)}, Platinum: ${money(prices.platinum)}, Palladium: ${money(prices.palladium)}
@@ -163,7 +179,7 @@ function createTroyAskRouter({ llm, getPrices, getIntel = async () => '', getMar
         message: message.trim(),
         prompt: {
           persona: TROY_PERSONA,
-          stack: visitorBlock(prices) + market,
+          stack: visitorBlock(prices, askSource(req)) + market,
           knowledge: TROY_KNOWLEDGE,
           community: communityBlock(intel),
         },
@@ -187,4 +203,4 @@ function createTroyAskRouter({ llm, getPrices, getIntel = async () => '', getMar
   return router;
 }
 
-module.exports = { createTroyAskRouter, cleanHistory, visitorBlock, DEFAULT_LIMIT, MAX_MESSAGE_CHARS };
+module.exports = { createTroyAskRouter, cleanHistory, visitorBlock, askSource, DEFAULT_LIMIT, MAX_MESSAGE_CHARS };
