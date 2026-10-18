@@ -642,21 +642,24 @@ async function stripeWebhookHandler(req, res) {
             break;
           }
         }
-        tier = await keepLifetime(userId, tier);
-        if (tier === 'lifetime') {
-          subscriptionStatus = 'active';
-          trialEnd = null;
-        }
-
-        const { error } = await supabase
-          .from('profiles')
-          .update({
-            subscription_tier: tier,
-            stripe_customer_id: session.customer,
-            subscription_status: subscriptionStatus,
-            trial_end: trialEnd,
-          })
-          .eq('id', userId);
+        // Written in the account's turn, which the daily reconcile takes too,
+        // so a purchase landing while it checks the account isn't written over.
+        const { error } = await withAccountTurn(userId, async () => {
+          tier = await keepLifetime(userId, tier);
+          if (tier === 'lifetime') {
+            subscriptionStatus = 'active';
+            trialEnd = null;
+          }
+          return supabase
+            .from('profiles')
+            .update({
+              subscription_tier: tier,
+              stripe_customer_id: session.customer,
+              subscription_status: subscriptionStatus,
+              trial_end: trialEnd,
+            })
+            .eq('id', userId);
+        });
 
         // A failed write is answered 500 so Stripe sends the event again.
         if (error) {
@@ -1183,21 +1186,23 @@ router.post('/verify-session', async (req, res) => {
         return res.json({ success: false, reason: 'That purchase was refunded' });
       }
     }
-    tier = await keepLifetime(userId, tier);
-    if (tier === 'lifetime') {
-      subscriptionStatus = 'active';
-      trialEnd = null;
-    }
-
-    const { error } = await supabase
-      .from('profiles')
-      .update({
-        subscription_tier: tier,
-        stripe_customer_id: session.customer,
-        subscription_status: subscriptionStatus,
-        trial_end: trialEnd,
-      })
-      .eq('id', userId);
+    // Written in the account's turn, as the checkout webhook writes it.
+    const { error } = await withAccountTurn(userId, async () => {
+      tier = await keepLifetime(userId, tier);
+      if (tier === 'lifetime') {
+        subscriptionStatus = 'active';
+        trialEnd = null;
+      }
+      return supabase
+        .from('profiles')
+        .update({
+          subscription_tier: tier,
+          stripe_customer_id: session.customer,
+          subscription_status: subscriptionStatus,
+          trial_end: trialEnd,
+        })
+        .eq('id', userId);
+    });
 
     if (error) {
       console.error('❌ [Stripe Verify] Failed to update profile:', error.message);
@@ -1389,7 +1394,8 @@ router.get('/sync-subscription', async (req, res) => {
 // a checkout settles it. Once a day every Gold profile with a Stripe customer
 // is checked against Stripe and gets the plan Stripe holds now. A profile the
 // App Store may be paying for is left to the RevenueCat webhook: one with an
-// App Store expiry, or one whose RevenueCat record still holds a plan. An
+// App Store expiry, one whose RevenueCat record still holds a plan, or one
+// RevenueCat itself lists a running plan for or can't be asked about. An
 // account Stripe can't be read for is skipped and tried the next day. Past
 // maxEndings in one run the rest are left alone and the run says so, since
 // that many lost deletions on one day means a setting is wrong, not Stripe.
@@ -1425,6 +1431,11 @@ async function reconcileWebGold({ maxEndings = 10 } = {}) {
         const plan = await planForUser(userId, profile.stripe_customer_id);
         if (!plan) {
           if (await appStorePlanOnRecord(userId)) return 'skipped';
+          // Gold with no App Store expiry can still be an older App Store plan
+          // the record never saw, so RevenueCat is asked before it ends.
+          // Without REVENUECAT_SECRET_KEY it can't be, and the plan stays.
+          const store = await revenueCatHoldings(userId, { timeoutMs: revenueCatRead.timeoutMs });
+          if (!store || store.lifetime || Math.max(store.until ?? 0, store.graceUntil ?? 0) > Date.now()) return 'skipped';
           if (result.ended >= maxEndings) {
             result.stopped = true;
             return 'skipped';
