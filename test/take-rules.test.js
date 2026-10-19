@@ -12,6 +12,7 @@ process.env.SUPABASE_URL ||= 'http://localhost:54321';
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-dummy-service-role-key';
 
 const prompts = [];
+let geminiReply = 'Gold held while the dollar slipped';
 
 function stub(rel, exportsObj) {
   const file = require.resolve(path.join(__dirname, '..', rel));
@@ -23,7 +24,7 @@ function stub(rel, exportsObj) {
 }
 
 stub('src/services/ai-router', {
-  callGemini: async (model, system) => { prompts.push(system); return 'Gold held while the dollar slipped'; },
+  callGemini: async (model, system) => { prompts.push(system); return geminiReply; },
   callClaude: async (system) => { prompts.push(system); return 'Gold held while the dollar slipped.'; },
   generateImage: async () => { throw new Error('no images in tests'); },
   MODELS: { flash: 'flash', editorial: 'editorial' },
@@ -72,4 +73,34 @@ test('the writers no longer tell Troy to call dips buys or say what everyone is 
   assert.ok(!/Dips are buying opportunities/i.test(src));
   assert.ok(!src.includes('what everyone else is missing'));
   assert.ok(!src.includes('was this a good month to stack'));
+});
+
+test('findTakeBreaks catches a banned opening only at the start and a trade call anywhere', () => {
+  const { findTakeBreaks } = require('../src/services/take-rules');
+  assert.deepStrictEqual(findTakeBreaks('Gold held while the dollar slipped.'), []);
+  assert.deepStrictEqual(findTakeBreaks(''), []);
+  assert.deepStrictEqual(findTakeBreaks(null), []);
+  assert.deepStrictEqual(findTakeBreaks('"The Real Story here is rates.'), ['the real story']);
+  const late = 'Gold slid 1% after CPI. '.repeat(10) + 'Some call the real story rates.';
+  assert.deepStrictEqual(findTakeBreaks(late), []);
+  assert.deepStrictEqual(findTakeBreaks('Spot fell. Honestly, it sounds like a sale.'), ['sounds like a sale']);
+  assert.deepStrictEqual(findTakeBreaks('Don’t get distracted by the CPI print.'), ["don't get distracted"]);
+});
+
+test('a feed reaction that makes a trade call is set aside like a failed draft', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'stack-signal-processor.js'), 'utf8');
+  assert.match(src, /const breaks = findTakeBreaks\(articleText\);/);
+  assert.match(src, /articleText\.length < MIN_ARTICLE_CHARS \|\| breaks\.length\)/);
+  assert.match(src, /logTakeBreaks\('Claude Synthesis', articleText\)/);
+  assert.match(src, /logTakeBreaks\('Stack Signal'/);
+});
+
+test('a one-liner that makes a trade call falls back to the theme', async () => {
+  geminiReply = 'Buy the dip while it lasts';
+  try {
+    const meta = await ssp.generateArticleMetadata(cluster, 'Gold slipped after the print.');
+    assert.strictEqual(meta.troy_one_liner, cluster.theme);
+  } finally {
+    geminiReply = 'Gold held while the dollar slipped';
+  }
 });
