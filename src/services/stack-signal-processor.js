@@ -28,11 +28,12 @@ function generateSlug(title) {
   return `${slug}-${date}`;
 }
 
-// A daily brief's title, like The Stack Signal: October 18, 2026. The house
-// style has no em dashes, and the model sometimes writes one anyway.
-function signalTitle(modelTitle, prefix, today) {
-  const title = (modelTitle || '').trim() || `${prefix}: ${today}`;
-  return title.replace(/\s*\u2014\s*/g, ': ');
+// A daily brief's title, like Evening Signal: October 18, 2026. It comes
+// from the edition and the date, never the model, which titled every edition
+// The Stack Signal and gave the morning, evening and weekly pages the same
+// title. The house style has no em dashes.
+function signalTitle(prefix, today) {
+  return `${prefix}: ${today}`;
 }
 
 // A price as a reader expects it, $4,180.80, or N/A when there isn't one.
@@ -1100,7 +1101,7 @@ Gold/Silver Ratio: ${prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1
 
 Your articles went out over the past day, so prices in them may be stale. Use the current spot above for every price you give, written like $4,180.80, and don't point out that the articles had other numbers.
 
-Return JSON: { "title": "The Stack Signal: [date]", "commentary": "...", "one_liner": "..." }
+Return JSON: { "commentary": "...", "one_liner": "..." }
 The one_liner is the headline summary (max 20 words).
 Return ONLY valid JSON.`;
 
@@ -1212,7 +1213,7 @@ Return ONLY valid JSON.`;
     const slug = `${slugPrefixMap[timeOfDay] || 'the-stack-signal'}-${dateStr}`;
     const row = {
       slug,
-      title: signalTitle(parsed.title, titlePrefix, today),
+      title: signalTitle(titlePrefix, today),
       troy_commentary: parsed.commentary || '',
       troy_one_liner: parsed.one_liner || '',
       category: 'macro',

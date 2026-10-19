@@ -112,6 +112,7 @@ const fakeSupabase = {
 
 const calls = { gemini: [], claude: 0, claudePrompts: [], rss: 0 };
 let clusterReply = '[]';
+let claudeReply = null; // what Claude returns; null means the long article
 let scoreValue = 80;
 let draft = null; // what the feed writer returns; null means the long article
 let draftQueue = []; // one reply per feed-writer call, in order, before falling back to draft; an Error is thrown
@@ -155,7 +156,7 @@ let rssItems = rssArticles;
 stub('src/lib/supabase', fakeSupabase);
 stub('src/services/ai-router', {
   callGemini: fakeGemini,
-  callClaude: async (system) => { calls.claude += 1; calls.claudePrompts.push(system); return longArticle; },
+  callClaude: async (system) => { calls.claude += 1; calls.claudePrompts.push(system); return claudeReply ?? longArticle; },
   generateImage: async () => { throw new Error('no images in tests'); },
   MODELS: { flash: 'flash', editorial: 'editorial' },
 });
@@ -687,17 +688,42 @@ test("the flagship gets today's spot written as dollars and is told the articles
   assert.match(prompt, /prices in them may be stale/);
 });
 
-test('a daily brief title never carries an em dash', () => {
-  assert.strictEqual(ssp.signalTitle('The Stack Signal — October 18, 2026', 'The Stack Signal', 'x'), 'The Stack Signal: October 18, 2026');
-  assert.strictEqual(ssp.signalTitle('The Stack Signal: October 18, 2026', 'The Stack Signal', 'x'), 'The Stack Signal: October 18, 2026');
-  assert.strictEqual(ssp.signalTitle('', 'Evening Signal', 'October 18, 2026'), 'Evening Signal: October 18, 2026');
-  assert.strictEqual(ssp.signalTitle(undefined, 'Weekly Recap', 'October 16, 2026'), 'Weekly Recap: October 16, 2026');
+test('a daily brief title is its edition and the date, with a colon', () => {
+  assert.strictEqual(ssp.signalTitle('The Stack Signal', 'October 18, 2026'), 'The Stack Signal: October 18, 2026');
+  assert.strictEqual(ssp.signalTitle('Evening Signal', 'October 18, 2026'), 'Evening Signal: October 18, 2026');
+  assert.strictEqual(ssp.signalTitle('Weekly Recap', 'October 16, 2026'), 'Weekly Recap: October 16, 2026');
 });
 
-test('the flagship asks for its title with a colon, not an em dash', async () => {
+test("the brief doesn't ask the model for a title", async () => {
   db.recentFeed = [{ title: 'Perth Mint backlog tightens silver', published_at: '2026-10-09T09:00:00.000Z' }];
   calls.claudePrompts.length = 0;
   await ssp.generateStackSignal('morning');
-  assert.match(calls.claudePrompts[0], /"title": "The Stack Signal: \[date\]"/);
-  assert.doesNotMatch(calls.claudePrompts[0], /"title": "[^"]*—/);
+  assert.match(calls.claudePrompts[0], /Return JSON: \{ "commentary": "\.\.\.", "one_liner": "\.\.\." \}/);
+  assert.doesNotMatch(calls.claudePrompts[0], /"title":/);
+});
+
+test('each edition saves under its own title, whatever the model wrote', async () => {
+  const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+  const editions = [
+    ['morning', 'The Stack Signal', 'the-stack-signal'],
+    ['evening', 'Evening Signal', 'evening-signal'],
+    ['weekly_recap', 'Weekly Recap', 'weekly-recap'],
+    ['weekly_preview', 'The Week Ahead', 'week-ahead'],
+    ['monthly_recap', 'Monthly Review', 'monthly-review'],
+  ];
+  try {
+    claudeReply = JSON.stringify({ title: 'The Stack Signal \u2014 October 18, 2026', commentary: 'Gold held.', one_liner: 'Gold held.' });
+    for (const [edition, prefix, slugPrefix] of editions) {
+      db.recentFeed = [{ title: 'Perth Mint backlog tightens silver', published_at: '2026-10-09T09:00:00.000Z' }];
+      db.upserts.length = 0;
+      await ssp.generateStackSignal(edition);
+      const saved = savedFeedRows().filter(r => r.is_stack_signal);
+      assert.strictEqual(saved.length, 1, edition);
+      assert.strictEqual(saved[0].title, `${prefix}: ${today}`);
+      assert.ok(saved[0].slug.startsWith(`${slugPrefix}-`), saved[0].slug);
+      assert.doesNotMatch(saved[0].title, /\u2014/);
+    }
+  } finally {
+    claudeReply = null;
+  }
 });
