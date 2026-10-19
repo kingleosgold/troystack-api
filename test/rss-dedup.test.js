@@ -21,6 +21,8 @@ const fakeSupabase = {
           { title: 'Gold holds as the dollar slips', sources: [{ url: 'https://example.com/written' }] },
           // Saved without Google News' publisher tag. The feed still prints it.
           { title: 'Gold steady as yields rise', sources: [{ url: 'https://news.google.com/rss/articles/one', title: 'Gold steady as yields rise - Reuters' }] },
+          // Troy's own title over another feed's headline. That headline isn't a written-up title.
+          { title: 'Mints run short of silver', sources: [{ url: 'https://example.com/column-1', title: 'Weekly silver column' }] },
         ];
         return Promise.resolve({ data, error: null }).then(resolve, reject);
       },
@@ -44,6 +46,7 @@ test('items already written up, undated or misdated are dropped, from a read of 
   const feed = `<?xml version="1.0"?><rss><channel>
     <item><title>Gold holds as the dollar slips</title><link>https://example.com/written</link><pubDate>${now.toUTCString()}</pubDate><description>Spot steady</description></item>
     <item><title>Gold steady as yields rise - Reuters</title><link>https://news.google.com/rss/articles/two</link><pubDate>${now.toUTCString()}</pubDate><description>Same story, new link</description></item>
+    <item><title>Weekly silver column</title><link>https://example.com/column-2</link><pubDate>${now.toUTCString()}</pubDate><description>This week's column</description></item>
     <item><title>Central banks keep buying gold</title><link>https://example.com/new</link><pubDate>${now.toUTCString()}</pubDate><description>Purchases continue</description></item>
     <item><title>Silver demand hits a record</title><link>https://example.com/undated</link><description>No date on this one</description></item>
     <item><title>Mints ration silver bars</title><link>https://example.com/bad-date</link><pubDate>sometime last week</pubDate><description>Unparseable date</description></item>
@@ -53,7 +56,7 @@ test('items already written up, undated or misdated are dropped, from a read of 
   axios.get = async url => ({ data: url === RSS_FEEDS[0].url ? feed : '<rss><channel></channel></rss>' });
   try {
     const items = await fetchNewArticles();
-    assert.deepStrictEqual(items.map(i => i.link), ['https://example.com/new']);
+    assert.deepStrictEqual(items.map(i => i.link).sort(), ['https://example.com/column-2', 'https://example.com/new']);
   } finally {
     axios.get = real;
   }

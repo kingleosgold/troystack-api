@@ -38,6 +38,7 @@ cross join lateral (
 where a.is_stack_signal is not true
   and t.head is not null
   and btrim(t.head) <> ''
+  and a.title !~ ' -  '
   and jsonb_typeof(a.sources) = 'array'
   and exists (
     select 1

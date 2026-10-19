@@ -50,3 +50,8 @@ test('titles with no tag, or odd input, come back as they were', () => {
   assert.strictEqual(stripSourceTag('A - B', null), 'A - B');
   assert.strictEqual(stripSourceTag('A - B', [{ url: 'not a url', title: 'A - B' }]), 'A - B');
 });
+
+test('a title with a dash before a double space stays whole, as the migration leaves it', () => {
+  const title = 'Gold rallies - silver -  Reuters';
+  assert.strictEqual(stripSourceTag(title, [{ url: gn, title }]), title);
+});

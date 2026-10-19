@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { XMLParser } = require('fast-xml-parser');
 const supabase = require('../lib/supabase');
+const { stripSourceTag } = require('./headline');
 
 // ============================================
 // RSS FEED SOURCES (~45 feeds)
@@ -244,11 +245,14 @@ async function fetchNewArticles() {
       for (const row of data) {
         if (row.title) existingTitles.add(row.title.toLowerCase().trim());
         const sources = row.sources || [];
-        // Titles drop Google News' publisher tag when they're saved, so the
-        // headline as the feed printed it is matched from the source too.
+        // A title saved without Google News' publisher tag is matched by the
+        // headline as the feed printed it too. Other sources' headlines stay
+        // out, so they don't drop or mark down items they never covered.
         for (const src of sources) {
           if (src.url) existingUrls.add(src.url);
-          if (src.title) existingTitles.add(String(src.title).toLowerCase().trim());
+          if (src.title && src.title !== row.title && stripSourceTag(src.title, [src]) === row.title) {
+            existingTitles.add(String(src.title).toLowerCase().trim());
+          }
         }
       }
     }

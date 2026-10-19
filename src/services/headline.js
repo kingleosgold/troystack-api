@@ -23,7 +23,7 @@ function stripSourceTag(title, sources) {
   if (cut < 1) return title;
   const head = title.slice(0, cut);
   const tail = title.slice(cut + 3);
-  if (!head.trim() || !tail || tail.startsWith(' ')) return title;
+  if (!head.trim() || !tail || title.includes(' -  ')) return title;
 
   const copied = (Array.isArray(sources) ? sources : []).some(s => {
     if (!s || !isGoogleNews(s.url || s.link)) return false;
