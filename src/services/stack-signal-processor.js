@@ -2,6 +2,7 @@ const axios = require('axios');
 const supabase = require('../lib/supabase');
 const { callGemini, callClaude, generateImage, MODELS } = require('./ai-router');
 const { fetchNewArticles } = require('./rss-fetcher');
+const { stripSourceTag } = require('./headline');
 const { getCachedPrices } = require('./price-fetcher');
 const { enqueueTweet } = require('./auto-tweet');
 const { getTopIntelligence } = require('./intelligence-scraper');
@@ -757,11 +758,11 @@ async function generateArticleMetadata(cluster, articleText) {
     oneLiner = raw.trim().replace(/^["']|["']$/g, '');
   } catch (err) {
     console.log(`[Metadata] One-liner generation failed: ${err.message}`);
-    oneLiner = cluster.theme;
+    oneLiner = stripSourceTag(cluster.theme, cluster.articles);
   }
 
   return {
-    title: cluster.theme,
+    title: stripSourceTag(cluster.theme, cluster.articles),
     troy_one_liner: oneLiner,
     category: cluster.category || 'macro',
     relevance_score: cluster.importance,
