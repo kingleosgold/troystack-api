@@ -223,6 +223,7 @@ async function fetchSingleFeed(feed) {
 async function fetchNewArticles() {
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const allArticles = [];
+  const seenHeads = new Set();
 
   // Fetch existing URLs and titles from DB to deduplicate. Reading the whole
   // table hit the API's 1,000-row cap, in no set order, so links already
@@ -305,6 +306,16 @@ async function fetchNewArticles() {
 
       if (existingUrls.has(link)) continue;
       if (existingTitles.has(String(title).toLowerCase().trim())) continue;
+
+      // Two publishers can carry one wire story, and with the publisher tag
+      // off its title the second would land on the first one's slug. Keep
+      // the first a week or a run has seen.
+      const head = stripSourceTag(String(title).trim(), [{ link, title: String(title).trim() }]);
+      if (head !== String(title).trim()) {
+        const key = head.toLowerCase().trim();
+        if (existingTitles.has(key) || seenHeads.has(key)) continue;
+        seenHeads.add(key);
+      }
 
       const article = {
         title: String(title).trim(),
