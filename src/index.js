@@ -16,6 +16,10 @@ const intelligenceRouter = require('./routes/intelligence');
 const scanReceiptRouter = require('./routes/scan-receipt');
 const pushRouter = require('./routes/push');
 const legalRouter = require('./routes/legal');
+const { createAccountRouter, createTroyReportHandler } = require('./routes/account');
+const supabaseClient = require('./lib/supabase');
+const { createUserTokenCheck } = require('./middleware/user-token');
+const stripeClient = process.env.STRIPE_SECRET_KEY ? require('stripe')(process.env.STRIPE_SECRET_KEY) : null;
 const stripeRouter = require('./routes/stripe');
 const { stripeWebhookHandler, revenueCatWebhookHandler } = require('./routes/stripe');
 const widgetRouter = require('./routes/widget');
@@ -23,6 +27,10 @@ const snapshotsRouter = require('./routes/snapshots');
 const scanUsageRouter = require('./routes/scan-usage');
 const minVersionRouter = require('./routes/min-version');
 const troyChatRouter = require('./routes/troy-chat');
+const { createTroyAskRouter } = require('./routes/troy-ask');
+const { sharedMarketBlock } = require('./services/troy-context');
+const troyLlm = require('./services/troy-llm');
+const { getTopIntelligence } = require('./services/intelligence-scraper');
 const stackSignalRouter = require('./routes/stack-signal');
 const socialRouter = require('./routes/social');
 const dealerPricesRouter = require('./routes/dealerPrices');
@@ -33,7 +41,7 @@ const adminEngagementRouter = require('./routes/admin-engagement');
 const { apiKeyAuth } = require('./middleware/api-key-auth');
 const { handleMcp } = require('./routes/mcp');
 
-const { initPriceFetcher, fetchLiveSpotPrices, areMarketsClosed } = require('./services/price-fetcher');
+const { initPriceFetcher, fetchLiveSpotPrices, areMarketsClosed, getSpotPrices, getPriceSnapshot } = require('./services/price-fetcher');
 const { publicLimiter, authenticatedLimiter, developerLimiter } = require('./middleware/rateLimit');
 
 const app = express();
@@ -62,12 +70,18 @@ const ALLOWED_ORIGINS = [
   'http://localhost:3000',
 ];
 
+// Vercel previews of the web app, so a pull request's preview reads the API
+// the way troystack.ai does. Scoped to the troystack-webapp project.
+const PREVIEW_ORIGIN = /^https:\/\/troystack-webapp-[a-z0-9-]+-jon-5842s-projects\.vercel\.app$/;
+
 const corsOptions = {
   origin: (origin, callback) => {
     // Allow requests with no origin (mobile apps, curl, server-to-server)
     if (!origin) return callback(null, true);
-    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    callback(new Error('Not allowed by CORS'));
+    if (ALLOWED_ORIGINS.includes(origin) || PREVIEW_ORIGIN.test(origin)) return callback(null, true);
+    const refused = new Error('Not allowed by CORS');
+    refused.status = 403;
+    callback(refused);
   },
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'X-API-Key', 'Stripe-Signature'],
@@ -88,9 +102,14 @@ app.post('/v1/webhooks/stripe', cors(corsOptions), express.raw({ type: 'applicat
 // POST bodies don't get rejected by the global JSON parser. Single /mcp
 // endpoint handles POST (client→server), GET (SSE stream), DELETE (session end).
 // ============================================================
-app.post('/mcp', cors(corsOptions), publicLimiter, handleMcp);
-app.get('/mcp', cors(corsOptions), publicLimiter, handleMcp);
-app.delete('/mcp', cors(corsOptions), publicLimiter, handleMcp);
+// Any origin may call /mcp, since it uses no cookies and its tools that take
+// a user check a key or token sent with the call. The site allow-list threw on
+// other origins, so a browser client's preflight got a 500.
+const mcpCors = cors({ exposedHeaders: ['Mcp-Session-Id'] });
+app.options('/mcp', mcpCors);
+app.post('/mcp', mcpCors, publicLimiter, handleMcp);
+app.get('/mcp', mcpCors, publicLimiter, handleMcp);
+app.delete('/mcp', mcpCors, publicLimiter, handleMcp);
 
 // Apply CORS and JSON parsing for everything else
 app.use(cors(corsOptions));
@@ -100,10 +119,15 @@ app.use((req, res, next) => {
   express.json({ limit: '20mb' })(req, res, next);
 });
 
-// JSON parse error handler — must run after express.json() and before routes
+// JSON parse and CORS error handler — must run after express.json() and before routes
 app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed') {
     return res.status(400).json({ error: 'Invalid JSON' });
+  }
+  // An origin off the allow-list is refused, not a server fault, so it gets a
+  // 403 and no stack trace in the logs.
+  if (err.status === 403 && err.message === 'Not allowed by CORS') {
+    return res.status(403).json({ error: 'Origin not allowed' });
   }
   next(err);
 });
@@ -150,10 +174,17 @@ app.use('/v1', publicLimiter, intelligenceRouter); // daily-brief + advisor + po
 app.use('/v1/scan-receipt', authenticatedLimiter, scanReceiptRouter);
 
 // Push notifications — public (mobile app sends tokens)
-app.use('/v1/push', publicLimiter, pushRouter);
+// A session token, when one comes, has to name the user the call does
+// (see middleware/user-token.js).
+const userTokenCheck = createUserTokenCheck({ supabase: supabaseClient });
+app.use('/v1/push', publicLimiter, userTokenCheck, pushRouter);
 
 // RevenueCat webhook — iOS subscription events (needs JSON body, so goes after express.json)
 app.post('/v1/webhooks/revenuecat', revenueCatWebhookHandler);
+
+// App Store plan sync for the signed-in account, from RevenueCat's REST API.
+// The app calls it after Purchases.logIn and after restoring purchases.
+app.post('/v1/revenuecat/sync', authenticatedLimiter, require('./routes/revenuecat-webhook').revenueCatSyncHandler);
 
 // Stripe billing (non-webhook routes)
 app.use('/v1/stripe', publicLimiter, stripeRouter);
@@ -165,7 +196,7 @@ app.use('/v1', publicLimiter, stripeRouter);
 app.use('/v1', publicLimiter, widgetRouter);
 
 // Portfolio snapshots — public (mobile app saves/reads)
-app.use('/v1/snapshots', publicLimiter, snapshotsRouter);
+app.use('/v1/snapshots', publicLimiter, createUserTokenCheck({ supabase: supabaseClient, pathUserId: true }), snapshotsRouter);
 
 // Scan usage tracking — public (mobile app checks limits)
 app.use('/v1', publicLimiter, scanUsageRouter);
@@ -189,14 +220,40 @@ app.use('/', openCors, legalRouter);
 // Minimum app version check — no auth, no rate limit
 app.use('/v1/min-version', minVersionRouter);
 
+// Reports on Troy's replies, and deleting an account, for Google Play's
+// review (see routes/account.js). The report route sits ahead of the Troy
+// routers so nothing there answers it first.
+app.post('/v1/troy/report', publicLimiter, createTroyReportHandler({ supabase: supabaseClient }));
+
+// Funnel counts from troystack.ai's Gold page (see routes/funnel.js).
+const { createFunnelHandler, funnelLimiter } = require('./routes/funnel');
+app.post('/v1/funnel', publicLimiter, funnelLimiter, createFunnelHandler({ supabase: supabaseClient }));
+app.use('/v1/account', publicLimiter, createAccountRouter({ supabase: supabaseClient, stripe: stripeClient }));
+
+// Troy for visitors on troystack.ai who haven't signed in: capped per
+// visitor and by a daily budget (see routes/troy-ask.js)
+app.use('/v1/troy', publicLimiter, createTroyAskRouter({
+  llm: troyLlm,
+  getPrices: async () => {
+    const snapshot = getPriceSnapshot();
+    if (snapshot.source !== 'static-fallback' && snapshot.prices.gold && snapshot.prices.silver) return snapshot;
+    return getSpotPrices();
+  },
+  getIntel: () => getTopIntelligence(8),
+  getMarket: (snapshot) => sharedMarketBlock(snapshot),
+}));
+
 // Troy Chat — persistent conversations (mobile app sends userId)
-app.use('/v1/troy', publicLimiter, troyChatRouter);
+app.use('/v1/troy', publicLimiter, userTokenCheck, troyChatRouter);
 
 // Stack Signal — curated precious metals news with Troy's commentary
 app.use('/v1/stack-signal', publicLimiter, stackSignalRouter);
 
 // Social features — views, likes, comments on Stack Signal articles
 app.use('/v1/stack-signal', publicLimiter, socialRouter);
+// The iPhone app calls the same routes at /v1/articles/:id/..., which nothing
+// served, so its views and likes never landed. Serve them there too.
+app.use('/v1', publicLimiter, socialRouter);
 
 // Dealer price comparison
 app.use('/v1/dealer-prices', publicLimiter, dealerPricesRouter);
@@ -694,6 +751,21 @@ app.listen(PORT, () => {
     }
   }, { timezone: 'UTC' });
   console.log('📊 [Composite Price] Scheduled: every 5m (market), every 15m (off-hours)');
+
+  // ── Web Gold reconcile: daily at 9:40 UTC ──
+  // A Stripe deletion that never arrived leaves web Gold standing. Stripe is
+  // read for every Gold profile with a customer and the profile follows it.
+  if (process.env.STRIPE_SECRET_KEY) {
+    cron.schedule('40 9 * * *', async () => {
+      try {
+        const result = await stripeRouter.reconcileWebGold();
+        console.log('🔁 [Stripe Reconcile] Complete:', result);
+      } catch (err) {
+        console.error('🔁 [Stripe Reconcile] Failed:', err.message);
+      }
+    }, { timezone: 'UTC' });
+    console.log('🔁 [Stripe Reconcile] Scheduled: daily at 9:40 UTC');
+  }
 
   // ── price_log decimator: nightly at 3:00 AM EST ──
   const { decimatePriceLog } = require('./services/price-log-decimator');

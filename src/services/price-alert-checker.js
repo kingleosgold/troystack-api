@@ -11,6 +11,9 @@ const supabase = require('../lib/supabase');
 const { sendPush, isValidExpoPushToken } = require('../routes/push');
 const { getCachedPrices, getSpotPrices } = require('./price-fetcher');
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DEVICE_ID_RE = /^[A-Za-z0-9_-]{1,100}$/;
+
 function capitalize(s) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
@@ -115,9 +118,10 @@ async function checkPriceAlerts() {
         console.log(`[AlertChecker] Triggered: ${alert.metal} ${alert.direction} $${alert.target_price} (now $${currentPrice})`);
 
         // Find push token
+        // Both values go into an or() filter, so only well-formed ids are used.
         const orConditions = [];
-        if (alert.user_id) orConditions.push(`user_id.eq.${alert.user_id}`);
-        if (alert.device_id) orConditions.push(`device_id.eq.${alert.device_id}`);
+        if (alert.user_id && UUID_RE.test(alert.user_id)) orConditions.push(`user_id.eq.${alert.user_id}`);
+        if (alert.device_id && DEVICE_ID_RE.test(alert.device_id)) orConditions.push(`device_id.eq.${alert.device_id}`);
 
         if (orConditions.length === 0) {
           stats.errors++;
