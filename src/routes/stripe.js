@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 const supabase = require('../lib/supabase');
 const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions, soldLifetime } = require('../lib/stripe-checks');
+const { bumpFunnel } = require('./funnel');
 const { appStorePlanOnRecord, hadAppStorePlan, revenueCatHoldings, syncStorePlan, withAccountTurn } = require('./revenuecat-webhook');
 
 const router = express.Router();
@@ -1113,6 +1114,8 @@ router.post('/create-checkout-session', async (req, res) => {
     }
 
     const session = await stripe.checkout.sessions.create(sessionParams);
+    const plan = isLifetime ? 'lifetime' : price_id === STRIPE_GOLD_YEARLY_PRICE_ID ? 'yearly' : price_id === STRIPE_GOLD_MONTHLY_PRICE_ID ? 'monthly' : '';
+    await bumpFunnel(supabase, { step: 'checkout_open', plan, campaign });
 
     console.log(`💳 [Stripe] Checkout session created for user ${user_id}, tier=${tier}${!isLifetime && !firstGold ? ', no trial (had Gold before)' : ''}`);
     return res.json({ url: session.url, trial: !isLifetime && firstGold });
