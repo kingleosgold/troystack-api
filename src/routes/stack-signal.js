@@ -29,8 +29,12 @@ router.get('/', async (req, res) => {
     if (category) {
       query = query.eq('category', category);
     }
-    if (type) {
-      query = query.eq('is_stack_signal', type === 'signal');
+    // A feed row's flag can be null, and troy-context.js counts those as
+    // news too, so news is anything that isn't a recap.
+    if (type === 'signal') {
+      query = query.eq('is_stack_signal', true);
+    } else if (type === 'news') {
+      query = query.or('is_stack_signal.is.null,is_stack_signal.eq.false');
     }
 
     const { data, error } = await query;

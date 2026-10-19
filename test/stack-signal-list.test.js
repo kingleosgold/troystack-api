@@ -17,6 +17,7 @@ const ROWS = [
   { slug: 'gold-rises-2026-10-19', is_stack_signal: false, category: 'gold' },
   { slug: 'evening-signal-2026-10-18', is_stack_signal: true, category: 'macro' },
   { slug: 'silver-dips-2026-10-18', is_stack_signal: false, category: 'silver' },
+  { slug: 'old-import-2026-02-26', is_stack_signal: null, category: 'gold' },
 ];
 
 // Records every filter the route applies and answers the rows that match.
@@ -25,14 +26,20 @@ function fakeSupabase() {
   function from() {
     const filters = {};
     let range = null;
+    let orExpr = null;
     const chain = {
       select() { return chain; },
       order() { return chain; },
       range(a, b) { range = [a, b]; return chain; },
       eq(col, val) { filters[col] = val; return chain; },
+      or(expr) { orExpr = expr; return chain; },
       then(resolve) {
-        calls.push({ filters: { ...filters }, range });
-        const data = ROWS.filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v));
+        calls.push({ filters: { ...filters }, range, or: orExpr });
+        // The one or() the route sends: the flag is null or false.
+        const news = (r) => r.is_stack_signal === null || r.is_stack_signal === false;
+        const data = ROWS
+          .filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v))
+          .filter((r) => !orExpr || news(r));
         return Promise.resolve({ data, error: null }).then(resolve);
       },
     };
@@ -71,7 +78,7 @@ test('no type lists recaps and news items alike', async () => {
   await withApp(client, async (get) => {
     const res = await get('/v1/stack-signal?limit=10');
     assert.equal(res.status, 200);
-    assert.equal(res.body.articles.length, 4);
+    assert.equal(res.body.articles.length, 5);
     assert.deepEqual(calls[0].filters, {});
   });
 });
@@ -87,13 +94,14 @@ test('type=signal lists only recaps', async () => {
   });
 });
 
-test('type=news lists only news items', async () => {
+test('type=news lists only news items, a null flag included', async () => {
   const { calls, client } = fakeSupabase();
   await withApp(client, async (get) => {
     const res = await get('/v1/stack-signal?type=news&category=gold');
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body.articles.map((a) => a.slug), ['gold-rises-2026-10-19']);
-    assert.deepEqual(calls[0].filters, { category: 'gold', is_stack_signal: false });
+    assert.deepEqual(res.body.articles.map((a) => a.slug), ['gold-rises-2026-10-19', 'old-import-2026-02-26']);
+    assert.deepEqual(calls[0].filters, { category: 'gold' });
+    assert.equal(calls[0].or, 'is_stack_signal.is.null,is_stack_signal.eq.false');
   });
 });
 
