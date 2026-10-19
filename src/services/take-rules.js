@@ -46,8 +46,21 @@ function findTakeBreaks(text) {
   const opening = plain.replace(/^[^a-z0-9]+/, '').slice(0, OPENING_CHARS);
   return [
     ...BANNED_OPENINGS.filter(p => opening.includes(p)),
-    ...BANNED_TRADE_CALLS.filter(p => plain.includes(p)),
+    ...BANNED_TRADE_CALLS.filter(p => usesCall(plain, p)),
   ];
+}
+
+// "Nothing here says it's time to sell" follows the rules, so a call the
+// few words before it deny doesn't count.
+const DENIALS = /\b(not|isn't|aren't|wasn't|no|nothing|never|nor)\b[^.!?]{0,24}$/;
+
+function usesCall(plain, phrase) {
+  let at = plain.indexOf(phrase);
+  while (at >= 0) {
+    if (!DENIALS.test(plain.slice(Math.max(0, at - 40), at))) return true;
+    at = plain.indexOf(phrase, at + 1);
+  }
+  return false;
 }
 
 module.exports = { TAKE_RULES, BANNED_OPENINGS, BANNED_TRADE_CALLS, findTakeBreaks };

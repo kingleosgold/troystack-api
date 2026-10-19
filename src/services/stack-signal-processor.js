@@ -36,7 +36,6 @@ function signalTitle(modelTitle, prefix, today) {
   return title.replace(/\s*\u2014\s*/g, ': ');
 }
 
-// A price as a reader expects it, $4,180.80, or N/A when there isn't one.
 // Logs a written piece that still uses a banned opening or trade call. Only
 // the feed reaction is set aside for it, since its slot can take another
 // draft. The daily Signal and the long synthesis have no second try.
@@ -46,6 +45,7 @@ function logTakeBreaks(where, text) {
   return breaks;
 }
 
+// A price as a reader expects it, $4,180.80, or N/A when there isn't one.
 function usd(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return 'N/A';
