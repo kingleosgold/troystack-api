@@ -50,24 +50,14 @@ function findTakeBreaks(text) {
   ];
 }
 
-// "Nothing here says it's time to sell" follows the rules, so a call the
-// same clause denies doesn't count. A comma or a turn ends the denial, so
-// "This isn't a crash, it's a buying opportunity" still counts, and so does
-// "never been a better time to buy".
-const DENIALS = /\b(not|isn't|aren't|wasn't|don't|doesn't|won't|can't|no|nothing|never|nor)\b([^.!?,;:\u2014]{0,24})$/;
-const TURNS = /\b(but|it's|it is|better|best|hard|short of)\b/;
-
-function denied(before) {
-  // Start at a whole word, so a cut "cannot" doesn't read as "not".
-  const words = before.length === 40 ? before.slice(before.indexOf(' ') + 1) : before;
-  const m = DENIALS.exec(words);
-  return Boolean(m) && !TURNS.test(m[2]);
-}
-
+// Strict on purpose. The prompt bans these phrases outright, so a draft that
+// uses one, even to deny it, is set aside rather than risk passing a call
+// like "never a bad time to buy". A phrase must end on a word break, so
+// "buyback" isn't "buy".
 function usesCall(plain, phrase) {
   let at = plain.indexOf(phrase);
   while (at >= 0) {
-    if (!denied(plain.slice(Math.max(0, at - 40), at))) return true;
+    if (!/[a-z0-9]/.test(plain[at + phrase.length] || '')) return true;
     at = plain.indexOf(phrase, at + 1);
   }
   return false;

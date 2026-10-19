@@ -85,6 +85,15 @@ test('findTakeBreaks catches a banned opening only at the start and a trade call
   assert.deepStrictEqual(findTakeBreaks(late), []);
   assert.deepStrictEqual(findTakeBreaks('Spot fell. Honestly, it sounds like a sale.'), ['sounds like a sale']);
   assert.deepStrictEqual(findTakeBreaks('Don’t get distracted by the CPI print.'), ["don't get distracted"]);
+  for (const text of [
+    'Gold fell 2%. Nothing here says it is time to sell.',
+    "Gold fell 2%. This isn't a crash, it's a buying opportunity.",
+    'Gold fell 2%. There is never a bad time to buy gold.',
+    "Gold fell 2%. Don't miss a buying opportunity like this.",
+    'Gold fell 2%. Prices are not falling; buy the dip.',
+  ]) assert.ok(findTakeBreaks(text).length, text);
+  assert.deepStrictEqual(findTakeBreaks('Gold fell 2%. Miners say it is time to buyback stock.'), []);
+  assert.deepStrictEqual(findTakeBreaks('Gold fell 2%. Time to buy, said the desk.'), ['time to buy']);
 });
 
 test('a feed reaction that makes a trade call is set aside like a failed draft', () => {
