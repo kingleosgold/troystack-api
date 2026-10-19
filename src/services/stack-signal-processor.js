@@ -1244,7 +1244,7 @@ Return ONLY valid JSON.`;
       return null;
     }
 
-    console.log(`[Stack Signal] Daily synthesis saved: "${parsed.title || slug}"`);
+    console.log(`[Stack Signal] Daily synthesis saved: "${row.title}"`);
     return row;
   } catch (err) {
     console.log(`[Stack Signal] Synthesis failed: ${err.message}`);
@@ -1345,7 +1345,7 @@ async function generateClaudeDailySynthesis() {
     const metadata = await generateArticleMetadata(pseudoCluster, articleText);
     oneLiner = metadata.troy_one_liner;
   } catch (err) {
-    oneLiner = `Today's market synthesis — ${todayEST}`;
+    oneLiner = `Today's market synthesis: ${todayEST}`;
   }
 
   // Distinct title that won't match any feed article
