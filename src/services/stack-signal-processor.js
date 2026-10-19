@@ -575,7 +575,7 @@ PARAGRAPH 6 — WHAT TO WATCH (200-300 words)
 Specific dates, price levels, thresholds, upcoming events. Be precise: "Watch the March 5 COMEX delivery report" not "watch upcoming data." What triggers would escalate the situation? What would de-escalate it?
 
 PARAGRAPH 7 (optional) — THE STACKER'S EDGE (150-200 words)
-Direct take on what this means for someone building a physical stack.
+What this move means for someone who already holds physical metal, without telling them to buy, add or wait.
 
 CRITICAL FORMAT RULES:
 - Separate each paragraph with a blank line (two newlines: \\n\\n)
@@ -1099,7 +1099,7 @@ Your voice: Direct, analytical, conversational. You've been stacking since 2008.
 Structure your synthesis as flowing prose in 3-4 paragraphs:
 1. The headline — what's the single most important thing today
 2. The context — how your articles connect and what the pattern means
-3. What it means for your stack — concrete implications for physical stackers
+3. What it means for your stack — concrete implications for people who hold physical metal, with no buy, sell or add calls
 4. One thing to watch — a forward-looking signal
 
 Current spot: Gold ${usd(prices.gold)}, Silver ${usd(prices.silver)}.
@@ -1119,7 +1119,7 @@ ${TAKE_RULES}`;
     weekly_recap: 'This is the FRIDAY WEEKLY RECAP. Summarize the entire week in precious metals: key price moves day by day, biggest stories, COMEX activity, and what shifted for stackers this week. End with what to watch next week.',
     weekly_preview: 'This is the MONDAY WEEKLY PREVIEW. Look ahead at the week: scheduled economic data releases, Fed speakers, geopolitical developments, and technical levels to watch for gold and silver. Frame this as what stackers should have on their radar this week.',
     monthly_recap: 'This is the MONTH-END REVIEW. Summarize the entire month in precious metals: opening vs closing prices, percentage changes, biggest stories and themes, COMEX trends, central bank activity, and how the month shaped up for stackers. Provide monthly context for people who already hold metal, without telling them to buy or sell.',
-    yearly_recap: 'This is the YEAR-END REVIEW. Summarize the entire year in precious metals: January opening vs December closing prices for gold, silver, platinum, and palladium. Percentage changes for the year. The biggest stories, themes, and turning points. COMEX trends across the year. Central bank buying patterns. How the gold-silver ratio evolved. What stackers who bought consistently this year gained. Frame this as the definitive year-end retrospective for precious metals stackers.'
+    yearly_recap: 'This is the YEAR-END REVIEW. Summarize the entire year in precious metals: January opening vs December closing prices for gold, silver, platinum, and palladium. Percentage changes for the year. The biggest stories, themes, and turning points. COMEX trends across the year. Central bank buying patterns. How the gold-silver ratio evolved. What the year meant for people who held metal through it. Frame this as the definitive year-end retrospective for precious metals stackers.'
   };
   const preamble = preambleMap[timeOfDay] || '';
   const userMessage = `${preamble ? preamble + '\n\n' : ''}Write today's Stack Signal for ${today}.\n\nToday's articles (${recentArticles.length}):\n\n${articleSummaries}`;
