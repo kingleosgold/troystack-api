@@ -17,7 +17,11 @@ const fakeSupabase = {
       gte(col, val) { q.filters[`${col}>=`] = val; return api; },
       then(resolve, reject) {
         reads.push(q);
-        const data = [{ title: 'Gold holds as the dollar slips', sources: [{ url: 'https://example.com/written' }] }];
+        const data = [
+          { title: 'Gold holds as the dollar slips', sources: [{ url: 'https://example.com/written' }] },
+          // Saved without Google News' publisher tag. The feed still prints it.
+          { title: 'Gold steady as yields rise', sources: [{ url: 'https://news.google.com/rss/articles/one', title: 'Gold steady as yields rise - Reuters' }] },
+        ];
         return Promise.resolve({ data, error: null }).then(resolve, reject);
       },
     };
@@ -39,6 +43,7 @@ test('items already written up, undated or misdated are dropped, from a read of 
   const now = new Date();
   const feed = `<?xml version="1.0"?><rss><channel>
     <item><title>Gold holds as the dollar slips</title><link>https://example.com/written</link><pubDate>${now.toUTCString()}</pubDate><description>Spot steady</description></item>
+    <item><title>Gold steady as yields rise - Reuters</title><link>https://news.google.com/rss/articles/two</link><pubDate>${now.toUTCString()}</pubDate><description>Same story, new link</description></item>
     <item><title>Central banks keep buying gold</title><link>https://example.com/new</link><pubDate>${now.toUTCString()}</pubDate><description>Purchases continue</description></item>
     <item><title>Silver demand hits a record</title><link>https://example.com/undated</link><description>No date on this one</description></item>
     <item><title>Mints ration silver bars</title><link>https://example.com/bad-date</link><pubDate>sometime last week</pubDate><description>Unparseable date</description></item>

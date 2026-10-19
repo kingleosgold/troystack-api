@@ -244,8 +244,11 @@ async function fetchNewArticles() {
       for (const row of data) {
         if (row.title) existingTitles.add(row.title.toLowerCase().trim());
         const sources = row.sources || [];
+        // Titles drop Google News' publisher tag when they're saved, so the
+        // headline as the feed printed it is matched from the source too.
         for (const src of sources) {
           if (src.url) existingUrls.add(src.url);
+          if (src.title) existingTitles.add(String(src.title).toLowerCase().trim());
         }
       }
     }
