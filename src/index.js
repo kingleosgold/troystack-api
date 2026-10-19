@@ -224,6 +224,10 @@ app.use('/v1/min-version', minVersionRouter);
 // review (see routes/account.js). The report route sits ahead of the Troy
 // routers so nothing there answers it first.
 app.post('/v1/troy/report', publicLimiter, createTroyReportHandler({ supabase: supabaseClient }));
+
+// Funnel counts from troystack.ai's Gold page (see routes/funnel.js).
+const { createFunnelHandler, funnelLimiter } = require('./routes/funnel');
+app.post('/v1/funnel', publicLimiter, funnelLimiter, createFunnelHandler({ supabase: supabaseClient }));
 app.use('/v1/account', publicLimiter, createAccountRouter({ supabase: supabaseClient, stripe: stripeClient }));
 
 // Troy for visitors on troystack.ai who haven't signed in: capped per

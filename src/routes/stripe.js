@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 const supabase = require('../lib/supabase');
 const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions, soldLifetime } = require('../lib/stripe-checks');
+const { bumpFunnel } = require('./funnel');
 const { appStorePlanOnRecord, hadAppStorePlan, revenueCatHoldings, syncStorePlan, withAccountTurn } = require('./revenuecat-webhook');
 
 const router = express.Router();
@@ -875,6 +876,8 @@ router.post('/create-checkout-session', async (req, res) => {
     // it could later be mistaken for Gold.
     let tier = mapStripePriceToTier(price_id);
     const isLifetime = isLifetimePrice(price_id);
+    // The plan the funnel counts this checkout under.
+    let plan = isLifetime ? 'lifetime' : price_id === STRIPE_GOLD_YEARLY_PRICE_ID ? 'yearly' : price_id === STRIPE_GOLD_MONTHLY_PRICE_ID ? 'monthly' : '';
     if (tier === 'free') {
       let price = null;
       try {
@@ -888,6 +891,7 @@ router.post('/create-checkout-session', async (req, res) => {
         return res.status(400).json({ error: 'That price is not a TroyStack Gold plan' });
       }
       tier = 'gold';
+      plan = price.recurring?.interval === 'year' ? 'yearly' : price.recurring?.interval === 'month' ? 'monthly' : '';
     }
 
     // From the profile read to the new session, an account's requests run one
@@ -1113,6 +1117,8 @@ router.post('/create-checkout-session', async (req, res) => {
     }
 
     const session = await stripe.checkout.sessions.create(sessionParams);
+    // Not waited on, so a slow count never holds the checkout's URL back.
+    void bumpFunnel(supabase, { step: 'checkout_open', plan, campaign });
 
     console.log(`💳 [Stripe] Checkout session created for user ${user_id}, tier=${tier}${!isLifetime && !firstGold ? ', no trial (had Gold before)' : ''}`);
     return res.json({ url: session.url, trial: !isLifetime && firstGold });
