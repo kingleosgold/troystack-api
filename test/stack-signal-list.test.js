@@ -25,16 +25,17 @@ function fakeSupabase() {
   const calls = [];
   function from() {
     const filters = {};
+    const orders = [];
     let range = null;
     let orExpr = null;
     const chain = {
       select() { return chain; },
-      order() { return chain; },
+      order(col, opts) { orders.push([col, opts?.ascending]); return chain; },
       range(a, b) { range = [a, b]; return chain; },
       eq(col, val) { filters[col] = val; return chain; },
       or(expr) { orExpr = expr; return chain; },
       then(resolve) {
-        calls.push({ filters: { ...filters }, range, or: orExpr });
+        calls.push({ filters: { ...filters }, orders: orders.slice(), range, or: orExpr });
         // The one or() the route sends: the flag is null or false.
         const news = (r) => r.is_stack_signal === null || r.is_stack_signal === false;
         const data = ROWS
@@ -114,4 +115,14 @@ test('any other type is refused before the database is asked', async () => {
     }
     assert.equal(calls.length, 0);
   });
+});
+
+test('the list sorts by published_at, then id, so equal timestamps page in a fixed order', async () => {
+  const { calls, client } = fakeSupabase();
+  await withApp(client, async (get) => {
+    const res = await get('/v1/stack-signal?type=signal&limit=5&offset=10');
+    assert.equal(res.status, 200);
+  });
+  assert.deepStrictEqual(calls[0].orders, [['published_at', false], ['id', false]]);
+  assert.deepStrictEqual(calls[0].range, [10, 14]);
 });
