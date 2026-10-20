@@ -9,9 +9,11 @@
 // session's own user, or it's refused with 403.
 // Step two. The iPhone app and troystack.ai send their session token on
 // these calls.
-// Step three, with enforce on. Monday 10/19 had app traffic on /v1/push,
-// /v1/troy/conversations and /v1/snapshots and not one [UserToken] line all
-// day, neither no session nor session not verified. So on those a user id
+// Step three, with enforce on. Monday 10/19 had traffic on /v1/push,
+// /v1/troy/conversations and /v1/snapshots from about two accounts and not
+// one [UserToken] line all day, neither no session nor session not verified.
+// That's too few phones to prove the token reaches every one, so this ships
+// only after a longer window with many accounts and no line. So on those a user id
 // with no token, or with one Supabase refuses, gets a 401. A check that fails
 // on Supabase's side is a 503, since the caller did nothing wrong. Each
 // refusal is still one log line. Alerts a signed-out phone keeps by device_id
@@ -81,12 +83,21 @@ function routeLabel(req, { pathUserId = false } = {}) {
   return `${req.method} ${req.baseUrl || ''}${segments.join('/')}`;
 }
 
-// Supabase answers a bad or expired token with a 4xx. A network failure, a
-// 5xx or a rate limit comes back as an error too, and that isn't the caller's
-// fault, so it's a 503 and the app tries again rather than signing out.
+// Supabase answers a bad or expired token with a 403 bad_jwt, a 400 for a
+// session that's gone or a 404 for a deleted user. A network failure, a 5xx,
+// a rate limit or a 401 with no code, which is the gateway refusing our own
+// key, isn't the caller's fault, so it's a 503 and the app tries again
+// rather than signing out.
 function tokenRefused(error) {
   const status = Number(error?.status);
+  if (status === 401) return Boolean(error?.code);
   return status >= 400 && status < 500 && status !== 429;
+}
+
+function failureText(error) {
+  const parts = [error?.name, Number.isFinite(Number(error?.status)) ? String(error.status) : '', error?.message]
+    .filter((part) => part && part !== '{}');
+  return parts.join(' ') || 'unknown error';
 }
 
 function enforcing(enforce, req) {
@@ -112,7 +123,7 @@ function createUserTokenCheck({ supabase, pathUserId = false, enforce = false, l
     try {
       const { data, error } = await supabase.auth.getUser(token);
       if (error) {
-        if (!tokenRefused(error)) failure = `, check failed: ${error.message}`;
+        if (!tokenRefused(error)) failure = `, check failed: ${failureText(error)}`;
       } else if (data?.user?.id) {
         user = data.user;
       }

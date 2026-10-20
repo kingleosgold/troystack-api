@@ -166,7 +166,8 @@ for (const [name, error] of [
     const { passed, res } = await call(check, { body: { userId: USER }, method: 'POST', token: GOOD });
     assert.equal(passed, false);
     assert.equal(res.statusCode, 503);
-    assert.match(logs[0], new RegExp(`check failed: ${error.message}$`));
+    assert.match(logs[0], /check failed: /);
+    assert.ok(logs[0].endsWith(error.message));
   });
 }
 
@@ -236,4 +237,26 @@ test('/v1/troy refuses conversations with no session but only counts /speak', as
   const speaker = await call(check, { baseUrl: '/v1/troy', path: '/speakers', query: { userId: USER } });
   assert.equal(speaker.res.statusCode, 401);
   assert.equal(logs.length, 5);
+});
+
+test('a 401 with no code is our own key refused, so a 503, and a coded 401 is the caller', async () => {
+  for (const [error, want] of [
+    [{ name: 'AuthApiError', message: 'Invalid API key', status: 401 }, 503],
+    [{ name: 'AuthApiError', message: 'invalid JWT', status: 401, code: 'bad_jwt' }, 401],
+  ]) {
+    const logs = [];
+    const supabase = { auth: { getUser: async () => ({ data: { user: null }, error }) } };
+    const check = createUserTokenCheck({ supabase, enforce: true, log: (line) => logs.push(line) });
+    const { res } = await call(check, { query: { userId: USER }, token: GOOD });
+    assert.equal(res.statusCode, want);
+  }
+});
+
+test('a 5xx whose message is an empty object still logs its name and status', async () => {
+  const logs = [];
+  const error = { name: 'AuthRetryableFetchError', message: '{}', status: 502 };
+  const supabase = { auth: { getUser: async () => ({ data: { user: null }, error }) } };
+  const check = createUserTokenCheck({ supabase, enforce: true, log: (line) => logs.push(line) });
+  await call(check, { query: { userId: USER }, token: GOOD });
+  assert.match(logs[0], /check failed: AuthRetryableFetchError 502$/);
 });
