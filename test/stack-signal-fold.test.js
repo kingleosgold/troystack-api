@@ -151,8 +151,10 @@ test('a news item whose day has no morning recap gets null', async () => {
   });
 });
 
-test('a busy day lists every item up to 200', async () => {
+test('a busy day lists every item, the evening before left out', async () => {
   const rows = [{ id: 0, slug: 'the-stack-signal-2026-03-02', is_stack_signal: true, published_at: '2026-03-02T12:15:00Z' }];
+  // 23:30 ET the night before.
+  rows.push({ id: 999, slug: 'eve', is_stack_signal: false, published_at: '2026-03-02T04:30:00Z', title: 'eve' });
   for (let i = 1; i <= 210; i++) {
     const at = new Date(Date.parse('2026-03-02T05:00:00Z') + i * 60000).toISOString();
     rows.push({ id: i, slug: `n${i}`, is_stack_signal: false, published_at: at, title: `n${i}` });
@@ -160,7 +162,7 @@ test('a busy day lists every item up to 200', async () => {
   const { calls, client } = fakeSupabase(rows);
   await withApp(client, async (get) => {
     const { body } = await get('/v1/stack-signal/the-stack-signal-2026-03-02');
-    assert.equal(body.article.news.length, 200);
+    assert.equal(body.article.news.length, 210);
     assert.equal(body.article.news[0].slug, 'n1');
   });
   assert.deepEqual(calls[1].orders, [['published_at', true], ['id', true]]);
@@ -173,4 +175,37 @@ test('ET days follow daylight saving time', () => {
   assert.equal(etDay('2026-10-20T04:00:00Z'), '2026-10-20');
   assert.equal(etDay('2026-03-02T04:59:00Z'), '2026-03-01');
   assert.equal(etDay('2026-03-02T05:00:00Z'), '2026-03-02');
+});
+
+test('a recap whose slug is not a real date answers without a news list', async () => {
+  const rows = [{ id: 1, slug: 'the-stack-signal-2026-13-45', is_stack_signal: true, published_at: '2026-10-19T11:15:00Z' }];
+  const { client } = fakeSupabase(rows);
+  await withApp(client, async (get) => {
+    const res = await get('/v1/stack-signal/the-stack-signal-2026-13-45');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.article.news, undefined);
+  });
+});
+
+test('a failed fold query still answers the article, with no home', async () => {
+  const { client } = fakeSupabase();
+  let n = 0;
+  const failing = { from(t) { n += 1; return n === 1 ? client.from(t) : { select() { throw new Error('down'); } }; } };
+  await withApp(failing, async (get) => {
+    const res = await get('/v1/stack-signal/early-2026-10-19');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.article.home_slug, null);
+  });
+});
+
+test('ET day bounds hold across both daylight saving changes', () => {
+  const { client } = fakeSupabase();
+  const { etDay } = loadRouter(client);
+  assert.equal(etDay('2026-11-01T04:59:00Z'), '2026-11-01');
+  assert.equal(etDay('2026-11-02T04:59:00Z'), '2026-11-01');
+  assert.equal(etDay('2026-11-02T05:00:00Z'), '2026-11-02');
+  assert.equal(etDay('2026-03-08T04:59:00Z'), '2026-03-07');
+  assert.equal(etDay('2026-03-08T05:00:00Z'), '2026-03-08');
+  assert.equal(etDay('2026-03-09T03:59:00Z'), '2026-03-08');
+  assert.equal(etDay('not a date'), null);
 });

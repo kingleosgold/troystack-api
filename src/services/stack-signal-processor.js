@@ -1022,6 +1022,15 @@ async function saveArticles(articles) {
         }
       }
 
+      // A story saved again keeps its first published_at, so the morning
+      // recap it folds into on troystack.com never changes under a cached 301.
+      const { data: existing } = await supabase
+        .from('stack_signal_articles')
+        .select('published_at')
+        .eq('slug', row.slug)
+        .maybeSingle();
+      if (existing?.published_at) row.published_at = existing.published_at;
+
       const { data: savedRow, error } = await supabase
         .from('stack_signal_articles')
         .upsert(row, { onConflict: 'slug' })
