@@ -54,14 +54,20 @@ const DIRECTIVE_START = new RegExp(
 );
 // Said to the reader, never "if you", "when you" or "told clients you", and
 // never "you sell your gold" as a description.
+// Who else trades, so their buying stays reporting.
+const OTHERS = 'central banks|banks|miners|producers|funds|institutions|investors|traders|buyers|sellers|dealers|mints|hedge funds|etfs';
 const DIRECTIVE_ANYWHERE = [
   /(?<!\b(?:you|we|they|i|he|she|who|that|if|when|will|can|need to|have to|want to|plan to|people|investors|stackers|dealers|shops) )\b(?:buy|sell|add to|add more to|load up on|stock up on|dump|unload) your (?:stack|position|gold|silver|metal|metals|holdings|bars|coins)\b/,
   new RegExp(`(?<!\\b(?:if|when|whether|that|says|said|say|told \\w+|tell \\w+) )\\byou (?:should|ought to|need to|must|may want to|might want to|could|may|might)(?: (?:also|still|really|now|then))? (?:(?:consider|start|be) )?(?:${CALL}|${WAIT})`),
   new RegExp(`(?<!\\b(?:if|when|whether|that|says|said|say|told \\w+|tell \\w+) )\\byou (?:should|ought to|need to|must|may want to|might want to)(?: (?:also|still|really|now|then))? (?:consider )?${BARE}`),
-  // Framing a move as the moment to trade, which the rules ban too.
-  /\b(?:buying|selling|accumulation|stacking|entry|exit) (?:opportunit(?:y|ies)|window|point)\b/,
-  new RegExp(`\\b(?:opportunit(?:y|ies)|chance|window) to (?:start )?${CALL}`),
-  /\btreat (?:the|this|that|any|a|every) (?:dip|pullback|drop|selloff|sell-off|correction|rally) as (?:an? )?opportunity\b/,
+  // Framing a move as the moment to trade, which the rules ban too. Others
+  // taking a chance ("Producers took the chance to sell gold forward") or a
+  // window "for central banks" is reporting.
+  new RegExp(`\\b(?:buying|selling|stacking|entry) (?:opportunit(?:y|ies)|window|point)\\b(?! for (?:${OTHERS})\\b)`),
+  new RegExp(`(?<!\\b(?:took|takes|taking|seized|had|using|used|missed|got) (?:\\w+ ){0,4})\\b(?:opportunit(?:y|ies)|chance|window|time|moment) to (?:start )?(?:buy|sell|add|stack|accumulate|load up|stock up|get into)\\b`),
+  new RegExp(`(?<!\\b(?:${OTHERS}|they|who) )\\b(?:treat|see|view|consider|use)(?:s|ed|ing)? (?:the |this |that |any |every |today's |these |such )?(?:dips?|pullbacks?|drops?|sell-?offs?|corrections?|weakness|rally|rallies|move) (?:as )?(?:an? |another )?(?:buying )?(?:opportunit(?:y|ies)|chance)\\b`),
+  new RegExp(`\\b(?:dips?|pullbacks?|drops?|sell-?offs?|corrections?|weakness) (?:is|are|was|looks like|becomes) (?:an?|another|just another|exactly the kind of) (?:buying )?(?:opportunit(?:y|ies)|chance)\\b(?! for (?:${OTHERS})\\b)`),
+  /\bstackers (?:should )?(?:see|view|treat) (?:it as |this as |the dip as )?(?:an? )?opportunity\b/,
   /\b(?:now'?s|now is) the (?:time|moment) to (?:start |be )?(?:buy|sell|add|load up|stock up|accumulate|stack|get into|pick up|act)(?:ing)?\b/,
 ];
 
@@ -74,8 +80,9 @@ function directiveCalls(text) {
     const m = DIRECTIVE_START.exec(start);
     if (m) found.push(m[0]);
   }
+  const flat = plain.replace(/\s+/g, ' ');
   for (const re of DIRECTIVE_ANYWHERE) {
-    const m = re.exec(plain);
+    const m = re.exec(flat);
     if (m) found.push(m[0]);
   }
   return found;
@@ -93,11 +100,11 @@ function findTakeBreaks(text) {
   const lower = String(text).toLowerCase().replace(/[\u2018\u2019]/g, "'");
   const plain = lower.replace(/\s+/g, ' ');
   const opening = plain.replace(/^[^a-z0-9]+/, '').slice(0, OPENING_CHARS);
-  return [
+  return [...new Set([
     ...BANNED_OPENINGS.filter(p => opening.includes(p)),
     ...BANNED_TRADE_CALLS.filter(p => usesCall(plain, p)),
     ...directiveCalls(lower.replace(/[ \t]+/g, ' ')),
-  ];
+  ])];
 }
 
 // Strict on purpose. The prompt bans these phrases outright, so a draft that
