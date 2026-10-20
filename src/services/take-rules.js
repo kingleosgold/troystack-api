@@ -63,11 +63,15 @@ const DIRECTIVE_ANYWHERE = [
   // Framing a move as the moment to trade, which the rules ban too. Others
   // taking a chance ("Producers took the chance to sell gold forward") or a
   // window "for central banks" is reporting.
-  new RegExp(`\\b(?:buying|selling|stacking|entry) (?:opportunit(?:y|ies)|window|point)\\b(?! for (?:${OTHERS})\\b)`),
-  new RegExp(`(?<!\\b(?:took|takes|taking|seized|had|using|used|missed|got) (?:\\w+ ){0,4})\\b(?:opportunit(?:y|ies)|chance|window|time|moment) to (?:start )?(?:buy|sell|add|stack|accumulate|load up|stock up|get into)\\b`),
-  new RegExp(`(?<!\\b(?:${OTHERS}|they|who) )\\b(?:treat|see|view|consider|use)(?:s|ed|ing)? (?:the |this |that |any |every |today's |these |such )?(?:dips?|pullbacks?|drops?|sell-?offs?|corrections?|weakness|rally|rallies|move) (?:as )?(?:an? |another )?(?:buying )?(?:opportunit(?:y|ies)|chance)\\b`),
-  new RegExp(`\\b(?:dips?|pullbacks?|drops?|sell-?offs?|corrections?|weakness) (?:is|are|was|looks like|becomes) (?:an?|another|just another|exactly the kind of) (?:buying )?(?:opportunit(?:y|ies)|chance)\\b(?! for (?:${OTHERS})\\b)`),
+  new RegExp(`(?<!\\b(?:${OTHERS}|they|who)\\b[^.!?]{0,40})\\b(?:buying|selling|stacking) (?:opportunit(?:y|ies)|window)\\b(?! for (?:${OTHERS})\\b)`),
+  /\b(?:you(?:'ll| will| may| might| could|'ve| have)? (?:get|see|have|find) (?:the |a |an |another |your )?(?:better |good |great |lower |cheaper )?entry point|(?:better|good|great|lower|cheaper) entry point)\b/,
+  new RegExp(`(?<!\\b(?:took|take|takes|taking|seized|had|missed|gave|given|need|needs|needed|using|used) (?:\\S+ ){0,6})\\b(?:opportunit(?:y|ies)|chance|window|time|moment) to (?:start |be )?(?:buy|sell|add|stack|accumulate|load up|stock up|get into)(?:ing)?\\b(?! (?:back|out|forward|capacity|shares|stock)\\b)`),
+  new RegExp(`(?<!\\b(?:${OTHERS}|they|who)\\b[^.!?]{0,40})\\b(?:treat(?:s|ed|ing)?|see(?:s|ing)?|saw|view(?:s|ed|ing)?|consider(?:s|ed|ing)?|us(?:e|es|ed|ing)) (?:the |this |that |any |every |today's |these |such )?(?:dips?|pullbacks?|drops?|sell-?offs?|corrections?|weakness|rally|rallies|move) (?:as )?(?:an? |another )?(?:buying )?(?:opportunit(?:y|ies)|chance)\\b`),
+  new RegExp(`\\b(?:dips?|pullbacks?|drops?|sell-?offs?|corrections?|weakness) (?:like this |like these )?(?:is|are|was|looks like|becomes) (?:(?:an?|another|just another|exactly the kind of) )?(?:great |good |golden |rare |real |perfect |buying )*(?:opportunit(?:y|ies)|chance)\\b(?! for (?:${OTHERS})\\b)`),
   /\bstackers (?:should )?(?:see|view|treat) (?:it as |this as |the dip as )?(?:an? )?opportunity\b/,
+  new RegExp(`\\b(?:stackers|long-term holders|holders|stacker) (?:should|ought to|need to|must|may want to|might want to)(?: (?:also|still|really|now|then))? (?:(?:consider|start|be) )?(?:${CALL}|${BARE}|${WAIT}|add (?:on|to) (?:weakness|dips|the dip|this dip|their)\\b)`),
+  /\b(?:take advantage of|use|seize) (?:the |this |that |any |today's )?(?:dip|pullback|drop|weakness|sell-?off|correction) to (?:buy|add|stack|accumulate|load up|stock up)\b/,
+  /\badd to (?:their|its) (?:stack|position|positions|holdings)\b(?=[^.!?]{0,30}\b(?:dip|weakness|pullback|here|now)\b)/,
   /\b(?:now'?s|now is) the (?:time|moment) to (?:start |be )?(?:buy|sell|add|load up|stock up|accumulate|stack|get into|pick up|act)(?:ing)?\b/,
 ];
 
