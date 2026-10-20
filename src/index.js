@@ -580,6 +580,21 @@ app.listen(PORT, () => {
   }, { timezone: 'UTC' });
   console.log('📰 [Stack Signal Cron] Scheduled: every 15 minutes');
 
+  // ── Signal hero images: light JPEG copies of the 3 MB PNGs, every 10 minutes ──
+  // 20 images a run until all 510 have one, then a no-op. See signal-image-web.js.
+  cron.schedule('7-59/10 * * * *', async () => {
+    try {
+      const { runSignalImageWeb } = require('./services/signal-image-web');
+      const r = await runSignalImageWeb();
+      if (r.made || r.moved || r.waiting) {
+        console.log(`🖼️ [Signal Images] ${r.made} copies made, ${r.left} left, ${r.moved} articles moved${r.waiting ? `, rows wait on ${r.waiting}` : ''}`);
+      }
+    } catch (err) {
+      console.error('🖼️ [Signal Images] Failed:', err.message);
+    }
+  }, { timezone: 'UTC', noOverlap: true });
+  console.log('🖼️ [Signal Images] Scheduled: every 10 minutes');
+
   // ── Stack Signal daily synthesis: 6:15 AM EST (11:15 UTC) ──
   // Runs 20 min before Daily Brief so synthesis is ready for the combined morning push
   cron.schedule('15 11 * * *', async () => {
