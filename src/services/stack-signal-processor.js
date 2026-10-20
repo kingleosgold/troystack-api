@@ -774,7 +774,9 @@ ${TAKE_RULES}`;
     oneLiner = raw.trim().replace(/^["']|["']$/g, '');
     // A one-liner that makes a trade call falls back to the theme, as a
     // failed call does.
-    if (logTakeBreaks('Metadata', oneLiner).length) oneLiner = cluster.theme;
+    if (logTakeBreaks('Metadata', oneLiner).length) {
+      oneLiner = stripSourceTag(cluster.theme, cluster.articles);
+    }
   } catch (err) {
     console.log(`[Metadata] One-liner generation failed: ${err.message}`);
     oneLiner = stripSourceTag(cluster.theme, cluster.articles);
