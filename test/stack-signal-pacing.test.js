@@ -19,6 +19,8 @@ const db = {
   writtenLinks: new Set(), // source links some saved article already lists, however old
   lookups: [],           // every link looked up in saved articles' sources
   upserts: [],           // every upsert, as { table, row }
+  savedAt: {},           // slug -> published_at of a row already saved
+  failLookups: new Set(), // slugs whose saved-before lookup errors
   failReads: new Set(),  // app_state keys, 'recentFeed' or 'writtenLinks', whose read errors
   failUpserts: new Set(), // app_state keys whose upsert errors
 };
@@ -30,6 +32,8 @@ function resetDb() {
   db.writtenLinks = new Set();
   db.lookups = [];
   db.upserts = [];
+  db.savedAt = {};
+  db.failLookups = new Set();
   db.failReads = new Set();
   db.failUpserts = new Set();
 }
@@ -87,14 +91,22 @@ const fakeSupabase = {
         }
         return Promise.resolve({ data: null, error: { code: 'PGRST116' } });
       },
+      // saveArticles looks up a slug it may have saved before.
+      maybeSingle() {
+        if (table === 'stack_signal_articles' && db.failLookups.has(q.filters.slug)) {
+          return Promise.resolve({ data: null, error: { message: 'lookup failed' } });
+        }
+        const at = table === 'stack_signal_articles' && db.savedAt[q.filters.slug];
+        return Promise.resolve({ data: at ? { published_at: at } : null, error: null });
+      },
       insert() { return Promise.resolve({ error: null }); },
-      upsert(row) {
+      upsert(row, opts) {
         if (table === 'app_state' && db.failUpserts.has(row.key)) {
           const failed = Promise.resolve({ error: { message: 'write failed' } });
           failed.select = () => ({ single: () => Promise.resolve({ data: null, error: { message: 'write failed' } }) });
           return failed;
         }
-        db.upserts.push({ table, row });
+        db.upserts.push({ table, row, opts });
         if (table === 'app_state') {
           if (row.key === 'commentary_daily_count') db.dailyCount = row.value.count;
           else db.appState[row.key] = row.value;
@@ -726,4 +738,26 @@ test('each edition saves under its own title, whatever the model wrote', async (
   } finally {
     claudeReply = null;
   }
+});
+
+test('a story saved again keeps its first published_at', async () => {
+  resetDb();
+  db.savedAt['gold-holds-2026-10-19'] = '2026-10-19T02:00:00.000Z';
+  const article = { slug: 'gold-holds-2026-10-19', title: 'Gold holds', troy_commentary: longArticle, sources: [] };
+  const fresh = { slug: 'silver-slips-2026-10-19', title: 'Silver slips', troy_commentary: longArticle, sources: [] };
+  await ssp.saveArticles([article, fresh]);
+  const rows = savedFeedRows();
+  assert.strictEqual(rows.find(r => r.slug === article.slug).published_at, '2026-10-19T02:00:00.000Z');
+  assert.notStrictEqual(rows.find(r => r.slug === fresh.slug).published_at, '2026-10-19T02:00:00.000Z');
+});
+
+test('a story whose saved-before lookup fails is saved insert-only, never moving a date', async () => {
+  resetDb();
+  db.failLookups.add('gold-holds-2026-10-19');
+  const article = { slug: 'gold-holds-2026-10-19', title: 'Gold holds', troy_commentary: longArticle, sources: [] };
+  const fresh = { slug: 'silver-slips-2026-10-19', title: 'Silver slips', troy_commentary: longArticle, sources: [] };
+  await ssp.saveArticles([article, fresh]);
+  const ups = db.upserts.filter(u => u.table === 'stack_signal_articles');
+  assert.strictEqual(ups.find(u => u.row.slug === article.slug).opts.ignoreDuplicates, true);
+  assert.strictEqual(ups.find(u => u.row.slug === fresh.slug).opts.ignoreDuplicates, false);
 });

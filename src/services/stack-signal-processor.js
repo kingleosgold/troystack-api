@@ -1022,9 +1022,23 @@ async function saveArticles(articles) {
         }
       }
 
+      // A story saved again keeps its first published_at, so the morning
+      // recap it folds into on troystack.com never changes under a cached 301.
+      // If that lookup fails the save only inserts, so a new story still
+      // lands in its counted slot and a saved one keeps its date.
+      const { data: existing, error: lookupError } = await supabase
+        .from('stack_signal_articles')
+        .select('published_at')
+        .eq('slug', row.slug)
+        .maybeSingle();
+      if (lookupError) {
+        console.log(`[Save] Slug lookup failed for "${article.title.slice(0, 40)}", inserting only: ${lookupError.message}`);
+      }
+      if (existing?.published_at) row.published_at = existing.published_at;
+
       const { data: savedRow, error } = await supabase
         .from('stack_signal_articles')
-        .upsert(row, { onConflict: 'slug' })
+        .upsert(row, { onConflict: 'slug', ignoreDuplicates: Boolean(lookupError) })
         .select('id')
         .single();
 
