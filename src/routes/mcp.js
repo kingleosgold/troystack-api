@@ -62,6 +62,7 @@ async function tool_getStackSignal({ limit = 20, offset = 0, category }) {
     .from('stack_signal_articles')
     .select('id, slug, title, troy_one_liner, troy_commentary, sources, category, image_url, relevance_score, is_stack_signal, published_at, view_count, like_count, comment_count')
     .order('published_at', { ascending: false })
+    .order('id', { ascending: false })
     .range(safeOffset, safeOffset + cappedLimit - 1);
 
   if (category) query = query.eq('category', category);

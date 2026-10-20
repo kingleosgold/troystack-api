@@ -2,6 +2,7 @@ const axios = require('axios');
 const supabase = require('../lib/supabase');
 const { callGemini, callClaude, generateImage, MODELS } = require('./ai-router');
 const { fetchNewArticles } = require('./rss-fetcher');
+const { stripSourceTag } = require('./headline');
 const { getCachedPrices } = require('./price-fetcher');
 const { enqueueTweet } = require('./auto-tweet');
 const { getTopIntelligence } = require('./intelligence-scraper');
@@ -29,11 +30,12 @@ function generateSlug(title) {
   return `${slug}-${date}`;
 }
 
-// A daily brief's title, like The Stack Signal: October 18, 2026. The house
-// style has no em dashes, and the model sometimes writes one anyway.
-function signalTitle(modelTitle, prefix, today) {
-  const title = (modelTitle || '').trim() || `${prefix}: ${today}`;
-  return title.replace(/\s*\u2014\s*/g, ': ');
+// A daily brief's title, like Evening Signal: October 18, 2026. It comes
+// from the edition and the date, never the model, which titled every edition
+// The Stack Signal and gave the morning, evening and weekly pages the same
+// title. The house style has no em dashes.
+function signalTitle(prefix, today) {
+  return `${prefix}: ${today}`;
 }
 
 // Logs a written piece that still uses a banned opening or trade call. Only
@@ -775,11 +777,11 @@ ${TAKE_RULES}`;
     if (logTakeBreaks('Metadata', oneLiner).length) oneLiner = cluster.theme;
   } catch (err) {
     console.log(`[Metadata] One-liner generation failed: ${err.message}`);
-    oneLiner = cluster.theme;
+    oneLiner = stripSourceTag(cluster.theme, cluster.articles);
   }
 
   return {
-    title: cluster.theme,
+    title: stripSourceTag(cluster.theme, cluster.articles),
     troy_one_liner: oneLiner,
     category: cluster.category || 'macro',
     relevance_score: cluster.importance,
@@ -1119,7 +1121,7 @@ Gold/Silver Ratio: ${prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1
 
 Your articles went out over the past day, so prices in them may be stale. Use the current spot above for every price you give, written like $4,180.80, and don't point out that the articles had other numbers.
 
-Return JSON: { "title": "The Stack Signal: [date]", "commentary": "...", "one_liner": "..." }
+Return JSON: { "commentary": "...", "one_liner": "..." }
 The one_liner is the headline summary (max 20 words).
 Return ONLY valid JSON.
 
@@ -1234,7 +1236,7 @@ ${TAKE_RULES}`;
     const slug = `${slugPrefixMap[timeOfDay] || 'the-stack-signal'}-${dateStr}`;
     const row = {
       slug,
-      title: signalTitle(parsed.title, titlePrefix, today),
+      title: signalTitle(titlePrefix, today),
       troy_commentary: parsed.commentary || '',
       troy_one_liner: parsed.one_liner || '',
       category: 'macro',
@@ -1265,7 +1267,7 @@ ${TAKE_RULES}`;
       return null;
     }
 
-    console.log(`[Stack Signal] Daily synthesis saved: "${parsed.title || slug}"`);
+    console.log(`[Stack Signal] Daily synthesis saved: "${row.title}"`);
     return row;
   } catch (err) {
     console.log(`[Stack Signal] Synthesis failed: ${err.message}`);
@@ -1367,7 +1369,7 @@ async function generateClaudeDailySynthesis() {
     const metadata = await generateArticleMetadata(pseudoCluster, articleText);
     oneLiner = metadata.troy_one_liner;
   } catch (err) {
-    oneLiner = `Today's market synthesis — ${todayEST}`;
+    oneLiner = `Today's market synthesis: ${todayEST}`;
   }
 
   // Distinct title that won't match any feed article

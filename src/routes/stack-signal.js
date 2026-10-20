@@ -9,6 +9,13 @@ router.get('/', async (req, res) => {
     let limit = parseInt(req.query.limit) || 20;
     let offset = parseInt(req.query.offset) || 0;
     const category = req.query.category;
+    // type=signal lists only Troy's recaps (daily, evening, weekly, week
+    // ahead), type=news only the feed items, so troystack.com's sitemap can
+    // list every recap without paging through thousands of news items.
+    const type = req.query.type;
+    if (type !== undefined && type !== 'signal' && type !== 'news') {
+      return res.status(400).json({ error: 'type must be signal or news' });
+    }
 
     limit = Math.min(Math.max(limit, 1), 50);
     offset = Math.max(offset, 0);
@@ -17,10 +24,20 @@ router.get('/', async (req, res) => {
       .from('stack_signal_articles')
       .select('id, slug, title, troy_one_liner, troy_commentary, sources, category, image_url, relevance_score, is_stack_signal, published_at, gold_price_at_publish, silver_price_at_publish, view_count, like_count, comment_count')
       .order('published_at', { ascending: false })
+      // Hundreds of articles share a published_at with another, so id breaks
+      // the tie and a row can't skip or repeat across offset pages.
+      .order('id', { ascending: false })
       .range(offset, offset + limit - 1);
 
     if (category) {
       query = query.eq('category', category);
+    }
+    // A feed row's flag can be null, and troy-context.js counts those as
+    // news too, so news is anything that isn't a recap.
+    if (type === 'signal') {
+      query = query.eq('is_stack_signal', true);
+    } else if (type === 'news') {
+      query = query.or('is_stack_signal.is.null,is_stack_signal.eq.false');
     }
 
     const { data, error } = await query;
