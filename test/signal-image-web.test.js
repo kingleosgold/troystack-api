@@ -11,7 +11,7 @@ const { runSignalImageWeb, webName, webUrlFor, toJpeg, WIDTH } = require('../src
 const BASE = 'https://proj.supabase.co/storage/v1/object/public/stack-signal-images/';
 
 // A 1792x1024 PNG of soft noise, close to a photo: large as a PNG and well
-// above the 10 KB floor as a JPEG. Built once, it takes a moment.
+// above the 2 KB floor as a JPEG. Built once, it takes a moment.
 let pngCache = null;
 async function bigPng() {
   if (pngCache) return pngCache;
