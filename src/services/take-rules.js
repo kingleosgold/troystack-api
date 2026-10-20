@@ -58,6 +58,10 @@ const DIRECTIVE_ANYWHERE = [
   /(?<!\b(?:you|we|they|i|he|she|who|that|if|when|will|can|need to|have to|want to|plan to|people|investors|stackers|dealers|shops) )\b(?:buy|sell|add to|add more to|load up on|stock up on|dump|unload) your (?:stack|position|gold|silver|metal|metals|holdings|bars|coins)\b/,
   new RegExp(`(?<!\\b(?:if|when|whether|that|says|said|say|told \\w+|tell \\w+) )\\byou (?:should|ought to|need to|must|may want to|might want to|could|may|might)(?: (?:also|still|really|now|then))? (?:(?:consider|start|be) )?(?:${CALL}|${WAIT})`),
   new RegExp(`(?<!\\b(?:if|when|whether|that|says|said|say|told \\w+|tell \\w+) )\\byou (?:should|ought to|need to|must|may want to|might want to)(?: (?:also|still|really|now|then))? (?:consider )?${BARE}`),
+  // Framing a move as the moment to trade, which the rules ban too.
+  /\b(?:buying|selling|accumulation|stacking|entry|exit) (?:opportunit(?:y|ies)|window|point)\b/,
+  new RegExp(`\\b(?:opportunit(?:y|ies)|chance|window) to (?:start )?${CALL}`),
+  /\btreat (?:the|this|that|any|a|every) (?:dip|pullback|drop|selloff|sell-off|correction|rally) as (?:an? )?opportunity\b/,
   /\b(?:now'?s|now is) the (?:time|moment) to (?:start |be )?(?:buy|sell|add|load up|stock up|accumulate|stack|get into|pick up|act)(?:ing)?\b/,
 ];
 

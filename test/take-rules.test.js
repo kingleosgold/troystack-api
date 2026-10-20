@@ -129,6 +129,11 @@ test('an order to buy, sell, add or wait counts in any wording', () => {
     'You should wait for a pullback.',
     'Consider buying silver while it lasts.',
     'Consider buying while it lasts.',
+    'This pullback is an opportunity to buy gold.',
+    'The rally is a selling opportunity.',
+    'This is an opportunity to add silver.',
+    'This dip is exactly the kind of buying opportunity you should be looking for.',
+    'Stackers should treat the dip as opportunity.',
     'Gold slid. This is another opportunity to add to your stack.',
     'A dip like this is a chance to add to your holdings.',
     'You should sell.',
@@ -177,6 +182,8 @@ test('reporting what others buy or sell is not a call', () => {
     'Consider selling pressure from ETFs.',
     'Dealers will buy your gold at spot.',
     'You can sell your gold back to any dealer.',
+    'Miners had a chance to sell forward at higher prices.',
+    'The opportunity cost of holding gold rises with rates.',
   ]) {
     assert.deepStrictEqual(findTakeBreaks(t), [], t);
   }
