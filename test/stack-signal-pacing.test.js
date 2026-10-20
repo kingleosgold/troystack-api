@@ -20,6 +20,7 @@ const db = {
   lookups: [],           // every link looked up in saved articles' sources
   upserts: [],           // every upsert, as { table, row }
   savedAt: {},           // slug -> published_at of a row already saved
+  failLookups: new Set(), // slugs whose saved-before lookup errors
   failReads: new Set(),  // app_state keys, 'recentFeed' or 'writtenLinks', whose read errors
   failUpserts: new Set(), // app_state keys whose upsert errors
 };
@@ -32,6 +33,7 @@ function resetDb() {
   db.lookups = [];
   db.upserts = [];
   db.savedAt = {};
+  db.failLookups = new Set();
   db.failReads = new Set();
   db.failUpserts = new Set();
 }
@@ -91,6 +93,9 @@ const fakeSupabase = {
       },
       // saveArticles looks up a slug it may have saved before.
       maybeSingle() {
+        if (table === 'stack_signal_articles' && db.failLookups.has(q.filters.slug)) {
+          return Promise.resolve({ data: null, error: { message: 'lookup failed' } });
+        }
         const at = table === 'stack_signal_articles' && db.savedAt[q.filters.slug];
         return Promise.resolve({ data: at ? { published_at: at } : null, error: null });
       },
@@ -744,4 +749,14 @@ test('a story saved again keeps its first published_at', async () => {
   const rows = savedFeedRows();
   assert.strictEqual(rows.find(r => r.slug === article.slug).published_at, '2026-10-19T02:00:00.000Z');
   assert.notStrictEqual(rows.find(r => r.slug === fresh.slug).published_at, '2026-10-19T02:00:00.000Z');
+});
+
+test('a story whose saved-before lookup fails is not saved this run', async () => {
+  resetDb();
+  db.failLookups.add('gold-holds-2026-10-19');
+  const article = { slug: 'gold-holds-2026-10-19', title: 'Gold holds', troy_commentary: longArticle, sources: [] };
+  const fresh = { slug: 'silver-slips-2026-10-19', title: 'Silver slips', troy_commentary: longArticle, sources: [] };
+  const saved = await ssp.saveArticles([article, fresh]);
+  assert.strictEqual(saved, 1);
+  assert.deepStrictEqual(savedFeedRows().map(r => r.slug), ['silver-slips-2026-10-19']);
 });

@@ -209,3 +209,14 @@ test('ET day bounds hold across both daylight saving changes', () => {
   assert.equal(etDay('2026-03-09T03:59:00Z'), '2026-03-08');
   assert.equal(etDay('not a date'), null);
 });
+
+test('a recap whose fold query fails still answers, with no news list', async () => {
+  const { client } = fakeSupabase();
+  let n = 0;
+  const failing = { from(t) { n += 1; return n === 1 ? client.from(t) : { select() { throw new Error('down'); } }; } };
+  await withApp(failing, async (get) => {
+    const res = await get('/v1/stack-signal/the-stack-signal-2026-10-19');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.article.news, undefined);
+  });
+});

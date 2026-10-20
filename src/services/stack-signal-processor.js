@@ -1024,11 +1024,17 @@ async function saveArticles(articles) {
 
       // A story saved again keeps its first published_at, so the morning
       // recap it folds into on troystack.com never changes under a cached 301.
-      const { data: existing } = await supabase
+      // If that lookup fails the save waits for a later run rather than risk
+      // moving the date.
+      const { data: existing, error: lookupError } = await supabase
         .from('stack_signal_articles')
         .select('published_at')
         .eq('slug', row.slug)
         .maybeSingle();
+      if (lookupError) {
+        console.log(`[Save] Skipped "${article.title.slice(0, 40)}": slug lookup failed: ${lookupError.message}`);
+        continue;
+      }
       if (existing?.published_at) row.published_at = existing.published_at;
 
       const { data: savedRow, error } = await supabase
