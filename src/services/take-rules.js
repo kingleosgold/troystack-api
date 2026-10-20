@@ -34,21 +34,30 @@ const TAKE_RULES = `TAKE RULES (these override any voice rule above):
 - Don't write "not financial advice" inside the piece. The site already carries that line, so never contradict it with a trade call.`;
 
 // The listed phrases are examples. A call can be any order to buy, sell, add
-// or wait, so these catch the directive forms too: a sentence that starts on
-// the verb ("Buy gold before the next leg"), and "you should", "consider"
-// and "add to your stack" anywhere.
-// The verb has to be followed by a space or comma, so "U.S. sell-off" isn't one.
-const DIRECTIVE_START = /^(buy|sell|add|wait|load up|stock up|grab|accumulate|dump|unload)(?=[ ,])/;
+// or wait, so these catch the directive forms too. A sentence that starts on
+// the verb counts only when what follows is metal, the stack or a moment
+// ("Buy gold before the next leg", "Wait for a pullback"), since Troy also
+// writes "Add to that the dollar" and reports "Sell orders piled up".
+const METAL = '(?:gold|silver|platinum|palladium|metals?|bullion|ounces|oz|bars|coins|rounds|physical|the dip|dips|weakness|strength|here|now|today|this|it|them)';
+const AMOUNT = '(?:(?:some|more|a little|a few|a bit|any|extra|your|the|physical|real) )*';
+const INTO = '(?:(?:into|on|during) (?:this kind of |this |the |any )?)?';
+const DIRECTIVE_START = new RegExp(
+  `^(?:(?:keep|start) )?(?:buy(?:ing)?|sell(?:ing)?|add(?:ing)?(?: to)?|accumulat(?:e|ing)|grab|dump|unload|load up(?: on)?|stock up(?: on)?|stack(?:ing)?) ${INTO}${AMOUNT}${METAL}\\b` +
+  '|^wait (?:for|until|on) (?:a |the |another )?(?:dip|pullback|lower|better|cheaper|drop|correction)\\b' +
+  '|^(?:keep|start) (?:buying|stacking|adding|accumulating)\\b',
+);
 const DIRECTIVE_ANYWHERE = [
   /\b(?:buy|sell|add to|add more to|load up on|stock up on|dump|unload) your (?:stack|position|gold|silver|metal|metals|holdings|bars|coins)\b/,
   /\byou (?:should|could|might want to|may want to|need to|must|ought to) (?:buy|sell|add|wait|load up|stock up|accumulate|dump|unload)\b/,
-  /\b(?:consider|start|keep) (?:buying|selling|adding|accumulating|loading up|stocking up)\b/,
+  /\bconsider (?:buying|selling|adding|accumulating|loading up|stocking up)\b/,
   /\b(?:now'?s|now is) the (?:time|moment) to\b/,
 ];
 
-function directiveCalls(plain) {
+function directiveCalls(text) {
   const found = [];
-  for (const sentence of plain.split(/[.!?;](?=\s)|\n+/)) {
+  // Markdown and quote marks around a word don't hide it.
+  const plain = text.replace(/[*_`"\u201c\u201d]/g, '');
+  for (const sentence of plain.split(/[.!?;:\u2014\u2013](?=\s|[a-z])|\n+/)) {
     const start = sentence.replace(/^[^a-z0-9]+/, '');
     const m = DIRECTIVE_START.exec(start);
     if (m) found.push(m[0]);

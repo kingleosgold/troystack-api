@@ -124,6 +124,10 @@ test('an order to buy, sell, add or wait counts in any wording', () => {
     'You should add here.',
     'Consider buying while it lasts.',
     "Now's the time to load up.",
+    'Gold rose. **Buy** gold.',
+    'Gold rose: buy gold.',
+    'Accumulate into this kind of weakness.',
+    'Keep buying on your schedule.',
   ]) {
     assert.ok(findTakeBreaks(t).length > 0, t);
   }
@@ -136,6 +140,15 @@ test('reporting what others buy or sell is not a call', () => {
     'The U.S. sell-off deepened as yields rose.',
     'Buyback programs grew at the majors.',
     'Gold traded at $2,650.50. Silver followed.',
+    'Central banks keep buying gold.',
+    'Funds start selling as yields climb.',
+    'Add to that the relentless demand from India.',
+    'Add in the central bank buying backdrop.',
+    'Wait times at the Mint stretched to six weeks.',
+    'Wait, there is more.',
+    'Sell orders piled up on COMEX.',
+    'Buy orders surged at the open.',
+    'Sell in May and go away, the old saw says.',
   ]) {
     assert.deepStrictEqual(findTakeBreaks(t), [], t);
   }
