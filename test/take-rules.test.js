@@ -113,3 +113,30 @@ test('a one-liner that makes a trade call falls back to the theme', async () => 
     geminiReply = 'Gold held while the dollar slipped';
   }
 });
+
+test('an order to buy, sell, add or wait counts in any wording', () => {
+  const { findTakeBreaks } = require('../src/services/take-rules');
+  for (const t of [
+    'Buy gold before the next leg higher.',
+    'Add to your stack.',
+    'Gold slid. Sell your silver now.',
+    'Wait for a lower price.',
+    'You should add here.',
+    'Consider buying while it lasts.',
+    "Now's the time to load up.",
+  ]) {
+    assert.ok(findTakeBreaks(t).length > 0, t);
+  }
+});
+
+test('reporting what others buy or sell is not a call', () => {
+  const { findTakeBreaks } = require('../src/services/take-rules');
+  for (const t of [
+    'Central banks buy gold every quarter.',
+    'The U.S. sell-off deepened as yields rose.',
+    'Buyback programs grew at the majors.',
+    'Gold traded at $2,650.50. Silver followed.',
+  ]) {
+    assert.deepStrictEqual(findTakeBreaks(t), [], t);
+  }
+});

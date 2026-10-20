@@ -33,6 +33,33 @@ const TAKE_RULES = `TAKE RULES (these override any voice rule above):
 - Never recommend selling.
 - Don't write "not financial advice" inside the piece. The site already carries that line, so never contradict it with a trade call.`;
 
+// The listed phrases are examples. A call can be any order to buy, sell, add
+// or wait, so these catch the directive forms too: a sentence that starts on
+// the verb ("Buy gold before the next leg"), and "you should", "consider"
+// and "add to your stack" anywhere.
+// The verb has to be followed by a space or comma, so "U.S. sell-off" isn't one.
+const DIRECTIVE_START = /^(buy|sell|add|wait|load up|stock up|grab|accumulate|dump|unload)(?=[ ,])/;
+const DIRECTIVE_ANYWHERE = [
+  /\b(?:buy|sell|add to|add more to|load up on|stock up on|dump|unload) your (?:stack|position|gold|silver|metal|metals|holdings|bars|coins)\b/,
+  /\byou (?:should|could|might want to|may want to|need to|must|ought to) (?:buy|sell|add|wait|load up|stock up|accumulate|dump|unload)\b/,
+  /\b(?:consider|start|keep) (?:buying|selling|adding|accumulating|loading up|stocking up)\b/,
+  /\b(?:now'?s|now is) the (?:time|moment) to\b/,
+];
+
+function directiveCalls(plain) {
+  const found = [];
+  for (const sentence of plain.split(/[.!?;](?=\s)|\n+/)) {
+    const start = sentence.replace(/^[^a-z0-9]+/, '');
+    const m = DIRECTIVE_START.exec(start);
+    if (m) found.push(m[0]);
+  }
+  for (const re of DIRECTIVE_ANYWHERE) {
+    const m = re.exec(plain);
+    if (m) found.push(m[0]);
+  }
+  return found;
+}
+
 // How far into a piece an opening can run. The banned openings only count
 // when they start the piece, so a later "the real story" in a quote is fine.
 const OPENING_CHARS = 160;
@@ -42,11 +69,13 @@ const OPENING_CHARS = 160;
 // asks for this already. This checks what the model actually wrote.
 function findTakeBreaks(text) {
   if (!text) return [];
-  const plain = String(text).toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ');
+  const lower = String(text).toLowerCase().replace(/[\u2018\u2019]/g, "'");
+  const plain = lower.replace(/\s+/g, ' ');
   const opening = plain.replace(/^[^a-z0-9]+/, '').slice(0, OPENING_CHARS);
   return [
     ...BANNED_OPENINGS.filter(p => opening.includes(p)),
     ...BANNED_TRADE_CALLS.filter(p => usesCall(plain, p)),
+    ...directiveCalls(lower.replace(/[ \t]+/g, ' ')),
   ];
 }
 

@@ -775,7 +775,11 @@ ${TAKE_RULES}`;
     // A one-liner that makes a trade call falls back to the theme, as a
     // failed call does.
     if (logTakeBreaks('Metadata', oneLiner).length) {
-      oneLiner = stripSourceTag(cluster.theme, cluster.articles);
+      // The theme comes from a prompt without the take rules, or straight
+      // from a headline, so it's checked too. With no safe line the piece
+      // goes out with none, which every reader of troy_one_liner handles.
+      const theme = stripSourceTag(cluster.theme, cluster.articles);
+      oneLiner = findTakeBreaks(theme).length ? null : theme;
     }
   } catch (err) {
     console.log(`[Metadata] One-liner generation failed: ${err.message}`);
