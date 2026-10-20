@@ -48,7 +48,23 @@ router.get('/', async (req, res) => {
       return res.status(500).json({ error: 'Failed to fetch articles' });
     }
 
-    return res.json({ success: true, articles: data || [], limit, offset });
+    // Each news item carries home_slug like the single article does, so a
+    // card can link straight to its anchor on the recap. If that lookup fails
+    // the list still answers, with no home on any item.
+    const rows = data || [];
+    let homes = new Set();
+    try {
+      homes = await recapsFor(rows);
+    } catch (err) {
+      console.error('[Stack Signal] Fold error:', err.message);
+    }
+    const articles = rows.map((r) => {
+      if (!isNews(r)) return r;
+      const home = recapSlugFor(r);
+      return { ...r, home_slug: home && homes.has(home) ? home : null };
+    });
+
+    return res.json({ success: true, articles, limit, offset });
   } catch (err) {
     console.error('[Stack Signal] List error:', err.message);
     return res.status(500).json({ error: 'Internal server error' });
@@ -147,13 +163,31 @@ async function newsOfDay(day) {
   });
 }
 
-// The morning recap a news item folds into, or null until that recap exists.
-// The item's own published_at day decides, never today's, so a late reader
-// is never sent to a different day.
-async function homeSlug(article) {
+// The slug of the morning recap a news item would fold into, whether or not
+// that recap exists yet. The item's own published_at day decides, never
+// today's, so a late reader is never sent to a different day.
+function recapSlugFor(article) {
   const day = article.published_at ? etDay(article.published_at) : null;
-  if (!day) return null;
-  const slug = `the-stack-signal-${day}`;
+  return day ? `the-stack-signal-${day}` : null;
+}
+
+// The morning recaps that exist for a page of list rows, in one query.
+async function recapsFor(rows) {
+  const wanted = [...new Set(rows.filter(isNews).map(recapSlugFor).filter(Boolean))];
+  if (wanted.length === 0) return new Set();
+  const { data, error } = await supabase
+    .from('stack_signal_articles')
+    .select('slug')
+    .in('slug', wanted)
+    .eq('is_stack_signal', true);
+  if (error) throw new Error(error.message);
+  return new Set((data || []).map((r) => r.slug));
+}
+
+// The morning recap a news item folds into, or null until that recap exists.
+async function homeSlug(article) {
+  const slug = recapSlugFor(article);
+  if (!slug) return null;
   const { data, error } = await supabase
     .from('stack_signal_articles')
     .select('slug')
