@@ -26,6 +26,7 @@ async function bigPng() {
 function fakeSupabase({ files, rows, backup = true, failDownload = new Set() }) {
   const uploads = [];
   const updates = [];
+  const selects = [];
   const storage = {
     async list(dir, { limit, offset }) {
       const prefix = dir ? `${dir}/` : '';
@@ -49,10 +50,14 @@ function fakeSupabase({ files, rows, backup = true, failDownload = new Set() }) 
   return {
     uploads,
     updates,
+    selects,
     storage: { from: (bucket) => { assert.strictEqual(bucket, 'stack-signal-images'); return storage; } },
     from(table) {
       if (table === 'signal_image_url_backup') {
-        const q = { select() { return q; }, limit() { return Promise.resolve({ error: backup ? null : { message: 'relation does not exist' } }); } };
+        const q = {
+          select(cols, opts) { assert.ok(!opts?.head, 'a HEAD select reads a missing table as fine'); return q; },
+          limit() { return Promise.resolve(backup ? { data: [], error: null } : { data: null, error: { message: 'relation does not exist' } }); },
+        };
         return q;
       }
       assert.strictEqual(table, 'stack_signal_articles');
@@ -65,7 +70,14 @@ function fakeSupabase({ files, rows, backup = true, failDownload = new Set() }) 
               q.matched = rows.filter(r => typeof r.image_url === 'string' && re.test(r.image_url));
               return q;
             },
-            limit(n) { return Promise.resolve({ data: q.matched.slice(0, n).map(r => ({ ...r })), error: null }); },
+            gt(col, v) { assert.strictEqual(col, 'id'); q.matched = q.matched.filter(r => r.id > v); return q; },
+            order(col, opts) {
+              assert.strictEqual(col, 'id');
+              assert.strictEqual(opts.ascending, true);
+              q.matched = q.matched.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+              return q;
+            },
+            limit(n) { selects.push(n); return Promise.resolve({ data: q.matched.slice(0, n).map(r => ({ ...r })), error: null }); },
           };
           return q;
         },
@@ -167,13 +179,28 @@ test('a failed download skips that image and its rows, the rest carry on', async
   assert.ok(lines.some(l => l.includes('a.png skipped')));
 });
 
-test('a copy under 10 KB in the folder counts as missing and is made again', async () => {
+test('a copy under 2 KB in the folder counts as missing and is made again', async () => {
   const png = await bigPng();
   const files = { 'a.png': png, 'web/a.jpg': Buffer.alloc(100) };
   const rows = [{ id: '1', image_url: `${BASE}a.png` }];
   const sb = fakeSupabase({ files, rows });
   const r = await runSignalImageWeb({ supabase: sb, sharp, log: () => {} });
   assert.strictEqual(r.made, 1);
-  assert.ok(files['web/a.jpg'].length > 10 * 1024);
+  assert.ok(files['web/a.jpg'].length > 2 * 1024);
   assert.strictEqual(rows[0].image_url, `${BASE}web/a.jpg`);
+});
+
+test('rows are read page by page, so rows waiting on a copy never hide the rest', async () => {
+  const png = await bigPng();
+  const rows = [];
+  // 1,200 rows on an image with no copy yet sort ahead of 5 that have one.
+  for (let i = 0; i < 1200; i++) rows.push({ id: `a${String(i).padStart(5, '0')}`, image_url: `${BASE}waiting.png` });
+  for (let i = 0; i < 5; i++) rows.push({ id: `b${i}`, image_url: `${BASE}ready.png` });
+  const files = { 'ready.png': png };
+  const sb = fakeSupabase({ files, rows });
+  const r = await runSignalImageWeb({ supabase: sb, sharp, log: () => {} });
+  assert.strictEqual(r.moved, 5);
+  assert.ok(sb.selects.length >= 2, 'more than one page');
+  assert.ok(rows.filter(x => x.id.startsWith('b')).every(x => x.image_url === `${BASE}web/ready.jpg`));
+  assert.ok(rows.filter(x => x.id.startsWith('a')).every(x => x.image_url === `${BASE}waiting.png`));
 });

@@ -5,7 +5,7 @@
 // article still on the PNG at its copy. The PNGs stay where they are.
 //
 // Runs in small batches from a cron in index.js until every image has a copy,
-// then each run is two folder lists and one select. Re-run safe.
+// then each run is two folder lists and a select. Re-run safe.
 //
 // Rows only move once migration 013 has copied every image_url to
 // signal_image_url_backup. Rollback is in that migration's header.
@@ -15,8 +15,8 @@ const WEB_DIR = 'web';
 const WIDTH = 1200;
 const QUALITY = 72;
 const BATCH = 20;
-const MIN_BYTES = 10 * 1024;
-const ROWS_PER_RUN = 1000;
+const MIN_BYTES = 2 * 1024;
+const PAGE = 1000;
 const ID_CHUNK = 150;
 
 const MARKER = `/${BUCKET}/`;
@@ -88,21 +88,34 @@ async function makeCopies({ supabase, sharp, batch = BATCH, log = console.log })
   return { ready, made, left: pngs.filter(o => !ready.has(webName(o.name))).length };
 }
 
+// A plain select, not a HEAD: postgrest-js reads a HEAD 404 for a missing
+// table as a 204 with no error.
 async function backupExists(supabase) {
-  const { error } = await supabase.from('signal_image_url_backup').select('id', { head: true, count: 'exact' }).limit(1);
-  return !error;
+  const { data, error } = await supabase.from('signal_image_url_backup').select('id').limit(1);
+  return !error && Array.isArray(data);
+}
+
+// Every article still on a pool PNG, paged by id.
+async function pngRows(supabase) {
+  const rows = [];
+  let lastId = null;
+  for (;;) {
+    let q = supabase
+      .from('stack_signal_articles')
+      .select('id, image_url')
+      .like('image_url', `%${MARKER}%.png`);
+    if (lastId !== null) q = q.gt('id', lastId);
+    const { data, error } = await q.order('id', { ascending: true }).limit(PAGE);
+    if (error) throw new Error(`article read failed: ${error.message}`);
+    rows.push(...(data || []));
+    if (!data || data.length < PAGE) return rows;
+    lastId = data[data.length - 1].id;
+  }
 }
 
 async function moveRows({ supabase, ready }) {
-  const { data, error } = await supabase
-    .from('stack_signal_articles')
-    .select('id, image_url')
-    .like('image_url', `%${MARKER}%.png`)
-    .limit(ROWS_PER_RUN);
-  if (error) throw new Error(`article read failed: ${error.message}`);
-
   const byUrl = new Map();
-  for (const row of data || []) {
+  for (const row of await pngRows(supabase)) {
     const next = webUrlFor(row.image_url, ready);
     if (!next) continue;
     const key = `${row.image_url}\n${next}`;

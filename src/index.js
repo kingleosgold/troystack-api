@@ -592,7 +592,7 @@ app.listen(PORT, () => {
     } catch (err) {
       console.error('🖼️ [Signal Images] Failed:', err.message);
     }
-  }, { timezone: 'UTC' });
+  }, { timezone: 'UTC', noOverlap: true });
   console.log('🖼️ [Signal Images] Scheduled: every 10 minutes');
 
   // ── Stack Signal daily synthesis: 6:15 AM EST (11:15 UTC) ──
