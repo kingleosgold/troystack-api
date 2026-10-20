@@ -128,6 +128,15 @@ test('an order to buy, sell, add or wait counts in any wording', () => {
     "Now's the time to get into silver.",
     'You should wait for a pullback.',
     'Consider buying silver while it lasts.',
+    'Consider buying while it lasts.',
+    'Gold slid. This is another opportunity to add to your stack.',
+    'A dip like this is a chance to add to your holdings.',
+    'You should sell.',
+    'You should buy more.',
+    'You might want to sell before the Fed meets.',
+    'You should buy American Eagles.',
+    'Now is the time to act.',
+    "Don't forget to add to your stack.",
     'Gold fell. Consider adding ounces.',
     "Now's the time to load up.",
     'Gold rose. **Buy** gold.',
@@ -166,6 +175,8 @@ test('reporting what others buy or sell is not a call', () => {
     'You could buy a house with what that bar costs.',
     'Consider buying power: wages lag.',
     'Consider selling pressure from ETFs.',
+    'Dealers will buy your gold at spot.',
+    'You can sell your gold back to any dealer.',
   ]) {
     assert.deepStrictEqual(findTakeBreaks(t), [], t);
   }

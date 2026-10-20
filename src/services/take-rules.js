@@ -40,21 +40,25 @@ const TAKE_RULES = `TAKE RULES (these override any voice rule above):
 // writes "Add to that the dollar" and reports "Sell orders piled up". "Keep",
 // "start" and "consider" only count at the start too, so "central banks keep
 // buying" and "dealers consider buying" stay reporting.
-const METAL = '(?:gold|silver|platinum|palladium|metals?|bullion|ounces|oz|bars|coins|rounds|physical|the dip|dips|weakness|strength|here|now|today|this|it|them)';
-const AMOUNT = '(?:(?:some|more|a little|a few|a bit|any|extra|your|the|physical|real) )*';
+const METAL = '(?:gold|silver|platinum|palladium|metals?|bullion|ounces|oz|bars|coins|rounds|eagles|maples|krugerrands|physical|the dip|dips|weakness|strength|here|now|today|this|it|them)';
+const AMOUNT = '(?:(?:some|more|a little|a few|a bit|any|extra|your|the|physical|real|american|canadian|british) )*';
 const INTO = '(?:(?:into|on|during) (?:this kind of |this |the |any )?)?';
 // An order to trade, with what it trades after it.
 const CALL = `(?:buy(?:ing)?|sell(?:ing)?|add(?:ing)?(?: to)?|accumulat(?:e|ing)|grab|dump|unload|load(?:ing)? up(?: on)?|stock(?:ing)? up(?: on)?|stack(?:ing)?|get into|pick up) ${INTO}${AMOUNT}${METAL}\\b`;
 const WAIT = 'wait (?:for|until|on) (?:a |the |another )?(?:dip|pullback|lower|better|cheaper|drop|correction)\\b';
+// A bare order, "You should sell." or "Consider buying while it lasts.",
+// counts when the clause ends or turns to when.
+const BARE = '(?:buy(?:ing)?|sell(?:ing)?|wait(?:ing)?)(?: more)?(?=\\s*(?:[.,;!?]|$)| (?:before|now|while|here|today|into|on the)\\b)';
 const DIRECTIVE_START = new RegExp(
-  `^(?:(?:keep|start|consider) )?${CALL}|^${WAIT}|^(?:keep|start) (?:buying|stacking|adding|accumulating)\\b`,
+  `^(?:(?:keep|start|consider) )?${CALL}|^${WAIT}|^(?:keep|start) (?:buying|stacking|adding|accumulating)\\b|^consider ${BARE}`,
 );
 // Said to the reader, never "if you", "when you" or "told clients you", and
 // never "you sell your gold" as a description.
 const DIRECTIVE_ANYWHERE = [
-  /(?<!\b(?:you|we|they|i|he|she|who|if|when|to|people|investors|stackers) )\b(?:buy|sell|add to|add more to|load up on|stock up on|dump|unload) your (?:stack|position|gold|silver|metal|metals|holdings|bars|coins)\b/,
+  /(?<!\b(?:you|we|they|i|he|she|who|that|if|when|will|can|need to|have to|want to|plan to|people|investors|stackers|dealers|shops) )\b(?:buy|sell|add to|add more to|load up on|stock up on|dump|unload) your (?:stack|position|gold|silver|metal|metals|holdings|bars|coins)\b/,
   new RegExp(`(?<!\\b(?:if|when|whether|that|says|said|say|told \\w+|tell \\w+) )\\byou (?:should|ought to|need to|must|may want to|might want to|could|may|might)(?: (?:also|still|really|now|then))? (?:(?:consider|start|be) )?(?:${CALL}|${WAIT})`),
-  /\b(?:now'?s|now is) the (?:time|moment) to (?:start |be )?(?:buy|sell|add|load up|stock up|accumulate|stack|get into|pick up)(?:ing)?\b/,
+  new RegExp(`(?<!\\b(?:if|when|whether|that|says|said|say|told \\w+|tell \\w+) )\\byou (?:should|ought to|need to|must|may want to|might want to)(?: (?:also|still|really|now|then))? (?:consider )?${BARE}`),
+  /\b(?:now'?s|now is) the (?:time|moment) to (?:start |be )?(?:buy|sell|add|load up|stock up|accumulate|stack|get into|pick up|act)(?:ing)?\b/,
 ];
 
 function directiveCalls(text) {
