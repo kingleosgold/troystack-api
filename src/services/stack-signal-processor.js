@@ -6,6 +6,7 @@ const { stripSourceTag } = require('./headline');
 const { getCachedPrices } = require('./price-fetcher');
 const { enqueueTweet } = require('./auto-tweet');
 const { getTopIntelligence } = require('./intelligence-scraper');
+const { TAKE_RULES } = require('./take-rules');
 // Master switch for X (Twitter) distribution. When false, the pipeline does NOT
 // enqueue tweets into tweet_queue — gating the machinery at the entry point so no
 // backlog accumulates while the auto-tweet posting cron is disabled. The plumbing
@@ -551,7 +552,7 @@ VOICE RULES (apply to ALL output):
 - No headers, no bullet points, no numbered lists — flowing prose paragraphs only
 - No emojis, no exclamation points
 - Dry humor welcome but rare
-- Never recommend selling. Dips are buying opportunities.
+- Never recommend selling.
 - Respects physical metal over paper markets
 - Aware of COMEX manipulation, silver derivatives, central bank accumulation
 
@@ -576,7 +577,7 @@ PARAGRAPH 6 — WHAT TO WATCH (200-300 words)
 Specific dates, price levels, thresholds, upcoming events. Be precise: "Watch the March 5 COMEX delivery report" not "watch upcoming data." What triggers would escalate the situation? What would de-escalate it?
 
 PARAGRAPH 7 (optional) — THE STACKER'S EDGE (150-200 words)
-Direct take on what this means for someone building a physical stack.
+What this move means for someone who already holds physical metal, without telling them to buy, add or wait.
 
 CRITICAL FORMAT RULES:
 - Separate each paragraph with a blank line (two newlines: \\n\\n)
@@ -597,7 +598,9 @@ ARTICLE DEPTH REQUIREMENTS:
 - Bold key numbers and figures using markdown bold
 - No bullet points or lists — write in flowing paragraphs
 - Reference specific metals data: spot price, ratio, percentage moves, historical comparisons with specific dates
-- The tone is confident and informed, like a seasoned analyst writing a private briefing for serious investors`;
+- The tone is confident and informed, like a seasoned analyst writing a private briefing for serious investors
+
+${TAKE_RULES}`;
 
   const userMessage = `ARTICLE THEME: ${cluster.theme}
 SUGGESTED ANGLE: ${cluster.suggested_angle}
@@ -630,13 +633,13 @@ async function writeFeedReaction(cluster, prices) {
 VOICE:
 - Direct, opinionated, data-driven
 - You REACT to news, you don't summarize it
-- Tell your followers what the real story is and what everyone else is missing
+- Tell your followers what the news means for people who hold physical metal
 - Use specific numbers — spot levels, COMEX data, percentages
 - Say "your stack" not "your portfolio", "spot" not "spot price", "oz" not "troy ounces"
 - No hedging, no "on the other hand", no corporate speak
 - No emojis, no exclamation points
 - Use **bold** for key numbers only
-- Stacker worldview: dips are buying opportunities, never recommend selling
+- Stacker worldview: never recommend selling
 
 FORMAT:
 - 4-6 flowing paragraphs, like a concise analyst briefing
@@ -656,7 +659,9 @@ FEED ARTICLE DEPTH:
 - No bullet points — flowing paragraphs
 - Bold key numbers with markdown bold
 
-Current spot: Gold ${prices.gold || 'N/A'}, Silver ${prices.silver || 'N/A'}, Ratio ${prices.gold && prices.silver ? (prices.gold / prices.silver).toFixed(1) : 'N/A'}:1`;
+Current spot: Gold ${prices.gold || 'N/A'}, Silver ${prices.silver || 'N/A'}, Ratio ${prices.gold && prices.silver ? (prices.gold / prices.silver).toFixed(1) : 'N/A'}:1
+
+${TAKE_RULES}`;
 
   // Inject community intelligence if available
   let intelContext = '';
@@ -742,7 +747,9 @@ async function generateTweetText(title, commentary) {
  * Uses Gemini Flash for the one-liner (cheap).
  */
 async function generateArticleMetadata(cluster, articleText) {
-  const systemPrompt = `You are a precious metals news editor. Write a single punchy headline one-liner (max 100 characters) for this article. The author is Troy, a metals analyst with a stacker worldview. No emojis, no exclamation points.`;
+  const systemPrompt = `You are a precious metals news editor. Write a single punchy headline one-liner (max 100 characters) for this article. The author is Troy, a metals analyst with a stacker worldview. No emojis, no exclamation points.
+
+${TAKE_RULES}`;
 
   const userMessage = `Article title: ${cluster.theme}\nArticle excerpt: ${articleText.substring(0, 500)}\n\nReturn ONLY the one-liner, nothing else.`;
 
@@ -1094,7 +1101,7 @@ Your voice: Direct, analytical, conversational. You've been stacking since 2008.
 Structure your synthesis as flowing prose in 3-4 paragraphs:
 1. The headline — what's the single most important thing today
 2. The context — how your articles connect and what the pattern means
-3. What it means for your stack — concrete implications for physical stackers
+3. What it means for your stack — concrete implications for people who hold physical metal, with no buy, sell or add calls
 4. One thing to watch — a forward-looking signal
 
 Current spot: Gold ${usd(prices.gold)}, Silver ${usd(prices.silver)}.
@@ -1104,15 +1111,17 @@ Your articles went out over the past day, so prices in them may be stale. Use th
 
 Return JSON: { "commentary": "...", "one_liner": "..." }
 The one_liner is the headline summary (max 20 words).
-Return ONLY valid JSON.`;
+Return ONLY valid JSON.
+
+${TAKE_RULES}`;
 
   const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
   const preambleMap = {
     evening: 'This is the EVENING post-market-close edition. Focus on: how the trading day played out, notable price action and volume, what moved markets today, and what to watch overnight. Frame this as a market close recap, not a morning preview.',
     weekly_recap: 'This is the FRIDAY WEEKLY RECAP. Summarize the entire week in precious metals: key price moves day by day, biggest stories, COMEX activity, and what shifted for stackers this week. End with what to watch next week.',
     weekly_preview: 'This is the MONDAY WEEKLY PREVIEW. Look ahead at the week: scheduled economic data releases, Fed speakers, geopolitical developments, and technical levels to watch for gold and silver. Frame this as what stackers should have on their radar this week.',
-    monthly_recap: 'This is the MONTH-END REVIEW. Summarize the entire month in precious metals: opening vs closing prices, percentage changes, biggest stories and themes, COMEX trends, central bank activity, and how the month shaped up for stackers. Provide monthly context — was this a good month to stack?',
-    yearly_recap: 'This is the YEAR-END REVIEW. Summarize the entire year in precious metals: January opening vs December closing prices for gold, silver, platinum, and palladium. Percentage changes for the year. The biggest stories, themes, and turning points. COMEX trends across the year. Central bank buying patterns. How the gold-silver ratio evolved. What stackers who bought consistently this year gained. Frame this as the definitive year-end retrospective for precious metals stackers.'
+    monthly_recap: 'This is the MONTH-END REVIEW. Summarize the entire month in precious metals: opening vs closing prices, percentage changes, biggest stories and themes, COMEX trends, central bank activity, and how the month shaped up for stackers. Provide monthly context for people who already hold metal, without telling them to buy or sell.',
+    yearly_recap: 'This is the YEAR-END REVIEW. Summarize the entire year in precious metals: January opening vs December closing prices for gold, silver, platinum, and palladium. Percentage changes for the year. The biggest stories, themes, and turning points. COMEX trends across the year. Central bank buying patterns. How the gold-silver ratio evolved. What the year meant for people who held metal through it. Frame this as the definitive year-end retrospective for precious metals stackers.'
   };
   const preamble = preambleMap[timeOfDay] || '';
   const userMessage = `${preamble ? preamble + '\n\n' : ''}Write today's Stack Signal for ${today}.\n\nToday's articles (${recentArticles.length}):\n\n${articleSummaries}`;
@@ -1681,6 +1690,7 @@ module.exports = {
   scoreArticles,
   clusterArticles,
   writeSynthesisArticle,
+  writeFeedReaction,
   generateClaudeDailySynthesis,
   generateArticleImages,
   saveArticles,
