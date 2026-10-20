@@ -100,13 +100,13 @@ const fakeSupabase = {
         return Promise.resolve({ data: at ? { published_at: at } : null, error: null });
       },
       insert() { return Promise.resolve({ error: null }); },
-      upsert(row) {
+      upsert(row, opts) {
         if (table === 'app_state' && db.failUpserts.has(row.key)) {
           const failed = Promise.resolve({ error: { message: 'write failed' } });
           failed.select = () => ({ single: () => Promise.resolve({ data: null, error: { message: 'write failed' } }) });
           return failed;
         }
-        db.upserts.push({ table, row });
+        db.upserts.push({ table, row, opts });
         if (table === 'app_state') {
           if (row.key === 'commentary_daily_count') db.dailyCount = row.value.count;
           else db.appState[row.key] = row.value;
@@ -751,12 +751,13 @@ test('a story saved again keeps its first published_at', async () => {
   assert.notStrictEqual(rows.find(r => r.slug === fresh.slug).published_at, '2026-10-19T02:00:00.000Z');
 });
 
-test('a story whose saved-before lookup fails is not saved this run', async () => {
+test('a story whose saved-before lookup fails is saved insert-only, never moving a date', async () => {
   resetDb();
   db.failLookups.add('gold-holds-2026-10-19');
   const article = { slug: 'gold-holds-2026-10-19', title: 'Gold holds', troy_commentary: longArticle, sources: [] };
   const fresh = { slug: 'silver-slips-2026-10-19', title: 'Silver slips', troy_commentary: longArticle, sources: [] };
-  const saved = await ssp.saveArticles([article, fresh]);
-  assert.strictEqual(saved, 1);
-  assert.deepStrictEqual(savedFeedRows().map(r => r.slug), ['silver-slips-2026-10-19']);
+  await ssp.saveArticles([article, fresh]);
+  const ups = db.upserts.filter(u => u.table === 'stack_signal_articles');
+  assert.strictEqual(ups.find(u => u.row.slug === article.slug).opts.ignoreDuplicates, true);
+  assert.strictEqual(ups.find(u => u.row.slug === fresh.slug).opts.ignoreDuplicates, false);
 });
