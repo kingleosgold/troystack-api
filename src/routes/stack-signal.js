@@ -24,6 +24,9 @@ router.get('/', async (req, res) => {
       .from('stack_signal_articles')
       .select('id, slug, title, troy_one_liner, troy_commentary, sources, category, image_url, relevance_score, is_stack_signal, published_at, gold_price_at_publish, silver_price_at_publish, view_count, like_count, comment_count')
       .order('published_at', { ascending: false })
+      // Hundreds of articles share a published_at with another, so id breaks
+      // the tie and a row can't skip or repeat across offset pages.
+      .order('id', { ascending: false })
       .range(offset, offset + limit - 1);
 
     if (category) {
