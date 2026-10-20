@@ -5,14 +5,20 @@
 // act for it with no sign-in, so anyone holding an account's id could reach
 // that account's data there. Closing that takes three steps.
 //
-// Step one, this file. A call that carries a valid Supabase session token
-// must name that session's own user, or it's refused with 403. A call with no
-// token, or with a token that doesn't check out, goes through as before, and
-// one log line counts it, so the logs show when the apps have caught up.
+// Step one. A call that carries a valid Supabase session token must name that
+// session's own user, or it's refused with 403.
 // Step two. The iPhone app and troystack.ai send their session token on
 // these calls.
-// Step three. Once the count says they do, a user id with no valid token is
-// refused. Alerts a signed-out phone keeps by device_id stay as they are.
+// Step three, with enforce on. Monday 10/19 had app traffic on /v1/push,
+// /v1/troy and /v1/snapshots and no call there without a session, so on
+// those a user id with no token, or with one that doesn't check out, is
+// refused with 401. A check that fails is a 503, since the sign-in service
+// failed and not the caller. Each refusal is still one log line. Alerts a
+// signed-out phone keeps by device_id name no user, so they stay as they are.
+// The /articles routes and /v1/troy/transcribe, whose user id sits in a
+// multipart body the app-level check can't read, saw no such proof that day,
+// so they keep counting and letting calls through until a day with traffic
+// shows no line there.
 
 const JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 
@@ -72,7 +78,15 @@ function routeLabel(req, { pathUserId = false } = {}) {
   return `${req.method} ${req.baseUrl || ''}${segments.join('/')}`;
 }
 
-function createUserTokenCheck({ supabase, pathUserId = false, log = console.log } = {}) {
+// Supabase answers a bad or expired token with a 4xx. A network failure, a
+// 5xx or a rate limit comes back as an error too, and that isn't the caller's
+// fault, so it's a 503 and the app tries again rather than signing out.
+function tokenRefused(error) {
+  const status = Number(error?.status);
+  return status >= 400 && status < 500 && status !== 429;
+}
+
+function createUserTokenCheck({ supabase, pathUserId = false, enforce = false, log = console.log } = {}) {
   return async function userTokenCheck(req, res, next) {
     const claimed = claimedUserIds(req, { pathUserId });
     if (claimed.length === 0) return next();
@@ -81,21 +95,28 @@ function createUserTokenCheck({ supabase, pathUserId = false, log = console.log 
     const token = sessionToken(req);
     if (!token) {
       log(`[UserToken] no session ${label}`);
-      return next();
+      if (!enforce) return next();
+      return res.status(401).json({ error: 'Sign in to reach this account.' });
     }
 
-    // One line per call, whether the token was refused or the check threw.
+    // One line per call, whether the token was refused or the check failed.
     let user = null;
     let failure = '';
     try {
       const { data, error } = await supabase.auth.getUser(token);
-      if (!error && data?.user?.id) user = data.user;
+      if (error) {
+        if (!tokenRefused(error)) failure = `, check failed: ${error.message}`;
+      } else if (data?.user?.id) {
+        user = data.user;
+      }
     } catch (err) {
       failure = `, check failed: ${err.message}`;
     }
     if (!user) {
       log(`[UserToken] session not verified ${label}${failure}`);
-      return next();
+      if (!enforce) return next();
+      if (failure) return res.status(503).json({ error: "Couldn't check your sign-in. Try again in a moment." });
+      return res.status(401).json({ error: 'Your sign-in has expired. Sign in again.' });
     }
 
     const own = String(user.id).toLowerCase();

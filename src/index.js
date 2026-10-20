@@ -176,7 +176,7 @@ app.use('/v1/scan-receipt', authenticatedLimiter, scanReceiptRouter);
 // Push notifications — public (mobile app sends tokens)
 // A session token, when one comes, has to name the user the call does
 // (see middleware/user-token.js).
-const userTokenCheck = createUserTokenCheck({ supabase: supabaseClient });
+const userTokenCheck = createUserTokenCheck({ supabase: supabaseClient, enforce: true });
 app.use('/v1/push', publicLimiter, userTokenCheck, pushRouter);
 
 // RevenueCat webhook — iOS subscription events (needs JSON body, so goes after express.json)
@@ -196,7 +196,7 @@ app.use('/v1', publicLimiter, stripeRouter);
 app.use('/v1', publicLimiter, widgetRouter);
 
 // Portfolio snapshots — public (mobile app saves/reads)
-app.use('/v1/snapshots', publicLimiter, createUserTokenCheck({ supabase: supabaseClient, pathUserId: true }), snapshotsRouter);
+app.use('/v1/snapshots', publicLimiter, createUserTokenCheck({ supabase: supabaseClient, pathUserId: true, enforce: true }), snapshotsRouter);
 
 // Scan usage tracking — public (mobile app checks limits)
 app.use('/v1', publicLimiter, scanUsageRouter);

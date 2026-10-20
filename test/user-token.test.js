@@ -17,7 +17,7 @@ function fakeSupabase() {
     auth: {
       getUser: async (token) => (token === GOOD
         ? { data: { user: { id: USER } }, error: null }
-        : { data: { user: null }, error: { message: 'invalid JWT' } }),
+        : { data: { user: null }, error: { message: 'invalid JWT', status: 403 } }),
     },
   };
 }
@@ -36,7 +36,7 @@ function call(check, { method = 'GET', baseUrl = '/v1/push', path = '/price-aler
 
 function setup(opts = {}) {
   const logs = [];
-  const check = createUserTokenCheck({ supabase: fakeSupabase(), log: (line) => logs.push(line), ...opts });
+  const check = createUserTokenCheck({ supabase: fakeSupabase(), enforce: true, log: (line) => logs.push(line), ...opts });
   return { check, logs };
 }
 
@@ -48,26 +48,29 @@ test('a call naming no user passes without a log', async () => {
   assert.deepEqual(logs, []);
 });
 
-test('a user id with no token still passes, and is counted without the id', async () => {
+test('a user id with no token is refused with 401, and counted without the id', async () => {
   const { check, logs } = setup();
-  const { passed } = await call(check, { query: { user_id: USER } });
-  assert.equal(passed, true);
+  const { passed, res } = await call(check, { query: { user_id: USER } });
+  assert.equal(passed, false);
+  assert.equal(res.statusCode, 401);
   assert.equal(logs.length, 1);
   assert.match(logs[0], /no session GET \/v1\/push\/price-alerts/);
   assert.ok(!logs[0].includes(USER));
 });
 
-test('a token that fails the check passes in step one and is counted', async () => {
+test('a token Supabase refuses is a 401 and is counted', async () => {
   const { check, logs } = setup();
-  const { passed } = await call(check, { body: { userId: USER }, method: 'POST', token: BAD });
-  assert.equal(passed, true);
-  assert.match(logs[0], /session not verified/);
+  const { passed, res } = await call(check, { body: { userId: USER }, method: 'POST', token: BAD });
+  assert.equal(passed, false);
+  assert.equal(res.statusCode, 401);
+  assert.equal(logs[0], '[UserToken] session not verified POST /v1/push/price-alerts');
 });
 
 test('an API key in the header is not taken for a session', async () => {
   const { check, logs } = setup();
-  const { passed } = await call(check, { query: { userId: USER }, token: 'ts_live_0123456789abcdef' });
-  assert.equal(passed, true);
+  const { passed, res } = await call(check, { query: { userId: USER }, token: 'ts_live_0123456789abcdef' });
+  assert.equal(passed, false);
+  assert.equal(res.statusCode, 401);
   assert.match(logs[0], /no session/);
 });
 
@@ -115,7 +118,7 @@ test('a user id that is not a string still counts as a claim', async () => {
   const signed = await call(check, { body: { userId: { id: OTHER } }, method: 'POST', token: GOOD });
   assert.equal(signed.res.statusCode, 403);
   const unsigned = await call(check, { body: { userId: [OTHER] }, method: 'POST' });
-  assert.equal(unsigned.passed, true);
+  assert.equal(unsigned.res.statusCode, 401);
   assert.match(logs[logs.length - 1], /no session/);
 });
 
@@ -139,14 +142,47 @@ test('a percent-escaped snapshot id stays out of the log', async () => {
   assert.equal(logs[0], '[UserToken] no session GET /v1/snapshots/:id');
 });
 
-test('a session check that throws is one log line, and the call passes', async () => {
+test('a session check that throws is a 503 and one log line', async () => {
   const logs = [];
   const supabase = { auth: { getUser: async () => { throw new Error('fetch failed'); } } };
-  const check = createUserTokenCheck({ supabase, log: (line) => logs.push(line) });
-  const { passed } = await call(check, { query: { userId: USER }, token: GOOD });
-  assert.equal(passed, true);
+  const check = createUserTokenCheck({ supabase, enforce: true, log: (line) => logs.push(line) });
+  const { passed, res } = await call(check, { query: { userId: USER }, token: GOOD });
+  assert.equal(passed, false);
+  assert.equal(res.statusCode, 503);
   assert.equal(logs.length, 1);
   assert.match(logs[0], /session not verified GET \/v1\/push\/price-alerts, check failed: fetch failed/);
+});
+
+for (const [name, error] of [
+  ['a network failure', { name: 'AuthRetryableFetchError', message: 'fetch failed', status: 0 }],
+  ['a Supabase 5xx', { name: 'AuthRetryableFetchError', message: 'Bad Gateway', status: 502 }],
+  ['a rate limit', { name: 'AuthApiError', message: 'Too many requests', status: 429 }],
+  ['an error with no status', { name: 'AuthUnknownError', message: 'Unexpected token' }],
+]) {
+  test(`${name} returned by the session check is a 503, not a sign-out`, async () => {
+    const logs = [];
+    const supabase = { auth: { getUser: async () => ({ data: { user: null }, error }) } };
+    const check = createUserTokenCheck({ supabase, enforce: true, log: (line) => logs.push(line) });
+    const { passed, res } = await call(check, { body: { userId: USER }, method: 'POST', token: GOOD });
+    assert.equal(passed, false);
+    assert.equal(res.statusCode, 503);
+    assert.match(logs[0], new RegExp(`check failed: ${error.message}$`));
+  });
+}
+
+test('a token Supabase answers with no user and no error is a 401', async () => {
+  const supabase = { auth: { getUser: async () => ({ data: { user: null }, error: null }) } };
+  const check = createUserTokenCheck({ supabase, enforce: true, log: () => {} });
+  const { passed, res } = await call(check, { query: { userId: USER }, token: GOOD });
+  assert.equal(passed, false);
+  assert.equal(res.statusCode, 401);
+});
+
+test('a signed-out phone keeping alerts by device id still passes', async () => {
+  const { check, logs } = setup();
+  const { passed } = await call(check, { method: 'POST', baseUrl: '/v1/push', path: '/price-alerts', body: { device_id: 'abc', userId: '' } });
+  assert.equal(passed, true);
+  assert.deepEqual(logs, []);
 });
 
 test('route labels hide every id', () => {
@@ -154,4 +190,30 @@ test('route labels hide every id', () => {
   assert.equal(label, 'GET /v1/troy/conversations/:id');
   const escaped = routeLabel({ method: 'GET', baseUrl: '/v1/troy', path: `/conversations/${OTHER.replace(/2/g, '%32')}` });
   assert.equal(escaped, 'GET /v1/troy/conversations/:id');
+});
+
+test('without enforce, a user id with no token or a refused token still passes and is counted', async () => {
+  const { check, logs } = setup({ enforce: false });
+  const none = await call(check, { query: { user_id: USER } });
+  assert.equal(none.passed, true);
+  const bad = await call(check, { body: { userId: USER }, method: 'POST', token: BAD });
+  assert.equal(bad.passed, true);
+  const other = await call(check, { query: { userId: OTHER }, token: GOOD });
+  assert.equal(other.res.statusCode, 403);
+  assert.equal(logs.length, 3);
+  assert.match(logs[0], /no session/);
+  assert.match(logs[1], /session not verified/);
+  assert.match(logs[2], /refused another account/);
+});
+
+test('index.js refuses no-session calls on push, troy and snapshots, and not yet on articles', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+  assert.ok(src.includes('const userTokenCheck = createUserTokenCheck({ supabase: supabaseClient, enforce: true });'));
+  assert.ok(src.includes("app.use('/v1/push', publicLimiter, userTokenCheck, pushRouter);"));
+  assert.ok(src.includes("app.use('/v1/troy', publicLimiter, userTokenCheck, troyChatRouter);"));
+  assert.ok(src.includes('createUserTokenCheck({ supabase: supabaseClient, pathUserId: true, enforce: true })'));
+  const social = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'social.js'), 'utf8');
+  assert.ok(social.includes("router.use('/articles', createUserTokenCheck({ supabase }));"));
 });
