@@ -177,6 +177,11 @@ app.use('/v1/scan-receipt', authenticatedLimiter, scanReceiptRouter);
 // A session token, when one comes, has to name the user the call does
 // (see middleware/user-token.js).
 const userTokenCheck = createUserTokenCheck({ supabase: supabaseClient, enforce: true });
+// /speak isn't proven to send a session yet, so it's counted but not refused.
+const troyTokenCheck = createUserTokenCheck({
+  supabase: supabaseClient,
+  enforce: (req) => !/^\/speak(\/|$)/i.test(req.path || ''),
+});
 app.use('/v1/push', publicLimiter, userTokenCheck, pushRouter);
 
 // RevenueCat webhook — iOS subscription events (needs JSON body, so goes after express.json)
@@ -244,7 +249,7 @@ app.use('/v1/troy', publicLimiter, createTroyAskRouter({
 }));
 
 // Troy Chat — persistent conversations (mobile app sends userId)
-app.use('/v1/troy', publicLimiter, userTokenCheck, troyChatRouter);
+app.use('/v1/troy', publicLimiter, troyTokenCheck, troyChatRouter);
 
 // Stack Signal — curated precious metals news with Troy's commentary
 app.use('/v1/stack-signal', publicLimiter, stackSignalRouter);

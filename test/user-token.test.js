@@ -212,8 +212,28 @@ test('index.js refuses no-session calls on push, troy and snapshots, and not yet
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
   assert.ok(src.includes('const userTokenCheck = createUserTokenCheck({ supabase: supabaseClient, enforce: true });'));
   assert.ok(src.includes("app.use('/v1/push', publicLimiter, userTokenCheck, pushRouter);"));
-  assert.ok(src.includes("app.use('/v1/troy', publicLimiter, userTokenCheck, troyChatRouter);"));
+  assert.ok(src.includes("app.use('/v1/troy', publicLimiter, troyTokenCheck, troyChatRouter);"));
   assert.ok(src.includes('createUserTokenCheck({ supabase: supabaseClient, pathUserId: true, enforce: true })'));
   const social = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'social.js'), 'utf8');
   assert.ok(social.includes("router.use('/articles', createUserTokenCheck({ supabase }));"));
+});
+
+test('/v1/troy refuses conversations with no session but only counts /speak', async () => {
+  const logs = [];
+  const check = createUserTokenCheck({
+    supabase: fakeSupabase(),
+    log: (line) => logs.push(line),
+    enforce: (req) => !/^\/speak(\/|$)/i.test(req.path || ''),
+  });
+  const convo = await call(check, { baseUrl: '/v1/troy', path: '/conversations', query: { userId: USER } });
+  assert.equal(convo.res.statusCode, 401);
+  const speakGet = await call(check, { baseUrl: '/v1/troy', path: '/speak', query: { userId: USER } });
+  assert.equal(speakGet.passed, true);
+  const speakPost = await call(check, { method: 'POST', baseUrl: '/v1/troy', path: '/speak', body: { userId: USER, text: 'hi' }, token: BAD });
+  assert.equal(speakPost.passed, true);
+  const otherSpeak = await call(check, { baseUrl: '/v1/troy', path: '/speak', query: { userId: OTHER }, token: GOOD });
+  assert.equal(otherSpeak.res.statusCode, 403);
+  const speaker = await call(check, { baseUrl: '/v1/troy', path: '/speakers', query: { userId: USER } });
+  assert.equal(speaker.res.statusCode, 401);
+  assert.equal(logs.length, 5);
 });

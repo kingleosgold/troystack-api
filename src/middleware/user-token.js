@@ -10,15 +10,18 @@
 // Step two. The iPhone app and troystack.ai send their session token on
 // these calls.
 // Step three, with enforce on. Monday 10/19 had app traffic on /v1/push,
-// /v1/troy and /v1/snapshots and no call there without a session, so on
-// those a user id with no token, or with one that doesn't check out, is
-// refused with 401. A check that fails is a 503, since the sign-in service
-// failed and not the caller. Each refusal is still one log line. Alerts a
-// signed-out phone keeps by device_id name no user, so they stay as they are.
-// The /articles routes and /v1/troy/transcribe, whose user id sits in a
-// multipart body the app-level check can't read, saw no such proof that day,
-// so they keep counting and letting calls through until a day with traffic
-// shows no line there.
+// /v1/troy/conversations and /v1/snapshots and not one [UserToken] line all
+// day, neither no session nor session not verified. So on those a user id
+// with no token, or with one Supabase refuses, gets a 401. A check that fails
+// on Supabase's side is a 503, since the caller did nothing wrong. Each
+// refusal is still one log line. Alerts a signed-out phone keeps by device_id
+// name no user, so they stay as they are.
+// Some routes saw no such proof that day, so they keep counting and letting
+// calls through until a day with traffic shows no line there. They're the
+// /articles routes, /v1/troy/speak, which troystack.ai's Listen button and
+// the iPhone's audio player call, and /v1/troy/transcribe, whose user id
+// sits in a multipart body the app-level check can't read. enforce takes a
+// function of the request for a mount that mixes the two.
 
 const JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 
@@ -86,6 +89,10 @@ function tokenRefused(error) {
   return status >= 400 && status < 500 && status !== 429;
 }
 
+function enforcing(enforce, req) {
+  return typeof enforce === 'function' ? Boolean(enforce(req)) : Boolean(enforce);
+}
+
 function createUserTokenCheck({ supabase, pathUserId = false, enforce = false, log = console.log } = {}) {
   return async function userTokenCheck(req, res, next) {
     const claimed = claimedUserIds(req, { pathUserId });
@@ -95,7 +102,7 @@ function createUserTokenCheck({ supabase, pathUserId = false, enforce = false, l
     const token = sessionToken(req);
     if (!token) {
       log(`[UserToken] no session ${label}`);
-      if (!enforce) return next();
+      if (!enforcing(enforce, req)) return next();
       return res.status(401).json({ error: 'Sign in to reach this account.' });
     }
 
@@ -114,7 +121,7 @@ function createUserTokenCheck({ supabase, pathUserId = false, enforce = false, l
     }
     if (!user) {
       log(`[UserToken] session not verified ${label}${failure}`);
-      if (!enforce) return next();
+      if (!enforcing(enforce, req)) return next();
       if (failure) return res.status(503).json({ error: "Couldn't check your sign-in. Try again in a moment." });
       return res.status(401).json({ error: 'Your sign-in has expired. Sign in again.' });
     }
