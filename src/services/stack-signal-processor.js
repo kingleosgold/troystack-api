@@ -755,6 +755,14 @@ async function generateTweetText(title, commentary) {
  * Generate one-liner and metadata for a synthesis article.
  * Uses Gemini Flash for the one-liner (cheap).
  */
+// The one-liner's fallback. The theme comes from a prompt without the take
+// rules, or straight from a headline, so it's checked too. With no safe line
+// the piece goes out with none, which every reader of troy_one_liner handles.
+function safeTheme(cluster) {
+  const theme = stripSourceTag(cluster.theme, cluster.articles);
+  return findTakeBreaks(theme).length ? null : theme;
+}
+
 async function generateArticleMetadata(cluster, articleText) {
   const systemPrompt = `You are a precious metals news editor. Write a single punchy headline one-liner (max 100 characters) for this article. The author is Troy, a metals analyst with a stacker worldview. No emojis, no exclamation points.
 
@@ -774,16 +782,10 @@ ${TAKE_RULES}`;
     oneLiner = raw.trim().replace(/^["']|["']$/g, '');
     // A one-liner that makes a trade call falls back to the theme, as a
     // failed call does.
-    if (logTakeBreaks('Metadata', oneLiner).length) {
-      // The theme comes from a prompt without the take rules, or straight
-      // from a headline, so it's checked too. With no safe line the piece
-      // goes out with none, which every reader of troy_one_liner handles.
-      const theme = stripSourceTag(cluster.theme, cluster.articles);
-      oneLiner = findTakeBreaks(theme).length ? null : theme;
-    }
+    if (logTakeBreaks('Metadata', oneLiner).length) oneLiner = safeTheme(cluster);
   } catch (err) {
     console.log(`[Metadata] One-liner generation failed: ${err.message}`);
-    oneLiner = stripSourceTag(cluster.theme, cluster.articles);
+    oneLiner = safeTheme(cluster);
   }
 
   return {
@@ -1708,6 +1710,7 @@ async function runPipelineOnce() {
 }
 
 module.exports = {
+  safeTheme,
   slotsOpenAt,
   scoreArticles,
   clusterArticles,

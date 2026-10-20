@@ -123,6 +123,7 @@ test('an order to buy, sell, add or wait counts in any wording', () => {
     'Wait for a lower price.',
     'You should add here.',
     'Consider buying while it lasts.',
+    'Gold fell. Consider adding ounces.',
     "Now's the time to load up.",
     'Gold rose. **Buy** gold.',
     'Gold rose: buy gold.',
@@ -149,7 +150,15 @@ test('reporting what others buy or sell is not a call', () => {
     'Sell orders piled up on COMEX.',
     'Buy orders surged at the open.',
     'Sell in May and go away, the old saw says.',
+    'Dealers consider buying more inventory ahead of festival season.',
+    'Now is the time to watch the Fed.',
   ]) {
     assert.deepStrictEqual(findTakeBreaks(t), [], t);
   }
+});
+
+test('the one-liner fallback is the theme only when the theme passes the rules', () => {
+  const { safeTheme } = require('../src/services/stack-signal-processor');
+  assert.strictEqual(safeTheme({ theme: 'Gold slides as the dollar firms', articles: [] }), 'Gold slides as the dollar firms');
+  assert.strictEqual(safeTheme({ theme: 'Buy the dip in gold', articles: [] }), null);
 });
