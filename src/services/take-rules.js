@@ -29,8 +29,99 @@ const BANNED_TRADE_CALLS = [
 const TAKE_RULES = `TAKE RULES (these override any voice rule above):
 - Vary your opening. Start with the news itself, a number or what it means for people who hold metal. Never open by saying the headline, the media or other people have it wrong. Never open with or closely paraphrase: ${BANNED_OPENINGS.map(p => `"${p}"`).join(', ')}.
 - No trade calls. Never tell the reader to buy, sell, add or wait, and never frame a move as a buying or selling opportunity. Never write: ${BANNED_TRADE_CALLS.map(p => `"${p}"`).join(', ')}.
-- Explain what a move means instead. For example: "For long-term stackers, the dip is a rates trade, not a change in why they hold metal."
+- Explain what a move means instead, in your own words each time. For example: "For long-term stackers, the dip is a rates trade, not a change in why they hold metal." Or: "A firmer dollar took $40 off gold today. Nothing about central bank buying changed." Don't reuse either line.
 - Never recommend selling.
 - Don't write "not financial advice" inside the piece. The site already carries that line, so never contradict it with a trade call.`;
 
-module.exports = { TAKE_RULES, BANNED_OPENINGS, BANNED_TRADE_CALLS };
+// The listed phrases are examples. A call can be any order to buy, sell, add
+// or wait, so these catch the directive forms too. A sentence that starts on
+// the verb counts only when what follows is metal, the stack or a moment
+// ("Buy gold before the next leg", "Wait for a pullback"), since Troy also
+// writes "Add to that the dollar" and reports "Sell orders piled up". "Keep",
+// "start" and "consider" only count at the start too, so "central banks keep
+// buying" and "dealers consider buying" stay reporting.
+const METAL = '(?:gold|silver|platinum|palladium|metals?|bullion|ounces|oz|bars|coins|rounds|eagles|maples|krugerrands|physical|the dip|dips|weakness|strength|here|now|today|this|it|them)';
+const AMOUNT = '(?:(?:some|more|a little|a few|a bit|any|extra|your|the|physical|real|american|canadian|british) )*';
+const INTO = '(?:(?:into|on|during) (?:this kind of |this |the |any )?)?';
+// An order to trade, with what it trades after it.
+const CALL = `(?:buy(?:ing)?|sell(?:ing)?|add(?:ing)?(?: to)?|accumulat(?:e|ing)|grab|dump|unload|load(?:ing)? up(?: on)?|stock(?:ing)? up(?: on)?|stack(?:ing)?|get into|pick up) ${INTO}${AMOUNT}${METAL}\\b`;
+const WAIT = 'wait (?:for|until|on) (?:a |the |another )?(?:dip|pullback|lower|better|cheaper|drop|correction)\\b';
+// A bare order, "You should sell." or "Consider buying while it lasts.",
+// counts when the clause ends or turns to when.
+const BARE = '(?:buy(?:ing)?|sell(?:ing)?|wait(?:ing)?)(?: more)?(?=\\s*(?:[.,;!?]|$)| (?:before|now|while|here|today|into|on the)\\b)';
+const DIRECTIVE_START = new RegExp(
+  `^(?:(?:keep|start|consider) )?${CALL}|^${WAIT}|^(?:keep|start) (?:buying|stacking|adding|accumulating)\\b|^consider ${BARE}`,
+);
+// Said to the reader, never "if you", "when you" or "told clients you", and
+// never "you sell your gold" as a description.
+// Who else trades, so their buying stays reporting.
+const OTHERS = 'central banks|banks|miners|producers|funds|institutions|investors|traders|buyers|sellers|dealers|mints|hedge funds|etfs';
+const DIRECTIVE_ANYWHERE = [
+  /(?<!\b(?:you|we|they|i|he|she|who|that|if|when|will|can|need to|have to|want to|plan to|people|investors|stackers|dealers|shops) )\b(?:buy|sell|add to|add more to|load up on|stock up on|dump|unload) your (?:stack|position|gold|silver|metal|metals|holdings|bars|coins)\b/,
+  new RegExp(`(?<!\\b(?:if|when|whether|that|says|said|say|told \\w+|tell \\w+) )\\byou (?:should|ought to|need to|must|may want to|might want to|could|may|might)(?: (?:also|still|really|now|then))? (?:(?:consider|start|be) )?(?:${CALL}|${WAIT})`),
+  new RegExp(`(?<!\\b(?:if|when|whether|that|says|said|say|told \\w+|tell \\w+) )\\byou (?:should|ought to|need to|must|may want to|might want to)(?: (?:also|still|really|now|then))? (?:consider )?${BARE}`),
+  // Framing a move as the moment to trade, which the rules ban too. Others
+  // taking a chance ("Producers took the chance to sell gold forward") or a
+  // window "for central banks" is reporting.
+  new RegExp(`(?<!\\b(?:${OTHERS}|they|who)\\b[^.!?]{0,40})\\b(?:buying|selling|stacking) (?:opportunit(?:y|ies)|window)\\b(?! for (?:${OTHERS})\\b)`),
+  /\b(?:you(?:'ll| will| may| might| could|'ve| have)? (?:get|see|have|find) (?:the |a |an |another |your )?(?:better |good |great |lower |cheaper )?entry point|(?:better|good|great|lower|cheaper) entry point)\b/,
+  new RegExp(`(?<!\\b(?:took|take|takes|taking|seized|had|missed|gave|given|need|needs|needed|using|used) (?:\\S+ ){0,6})\\b(?:opportunit(?:y|ies)|chance|window|time|moment) to (?:start |be )?(?:buy|sell|add|stack|accumulate|load up|stock up|get into)(?:ing)?\\b(?! (?:back|out|forward|capacity|shares|stock)\\b)`),
+  new RegExp(`(?<!\\b(?:${OTHERS}|they|who)\\b[^.!?]{0,40})\\b(?:treat(?:s|ed|ing)?|see(?:s|ing)?|saw|view(?:s|ed|ing)?|consider(?:s|ed|ing)?|us(?:e|es|ed|ing)) (?:the |this |that |any |every |today's |these |such )?(?:dips?|pullbacks?|drops?|sell-?offs?|corrections?|weakness|rally|rallies|move) (?:as )?(?:an? |another )?(?:buying )?(?:opportunit(?:y|ies)|chance)\\b`),
+  new RegExp(`\\b(?:dips?|pullbacks?|drops?|sell-?offs?|corrections?|weakness) (?:like this |like these )?(?:is|are|was|looks like|becomes) (?:(?:an?|another|just another|exactly the kind of) )?(?:great |good |golden |rare |real |perfect |buying )*(?:opportunit(?:y|ies)|chance)\\b(?! for (?:${OTHERS})\\b)`),
+  /\bstackers (?:should )?(?:see|view|treat) (?:it as |this as |the dip as )?(?:an? )?opportunity\b/,
+  new RegExp(`\\b(?:stackers|long-term holders|holders|stacker) (?:should|ought to|need to|must|may want to|might want to)(?: (?:also|still|really|now|then))? (?:(?:consider|start|be) )?(?:${CALL}|${BARE}|${WAIT}|add (?:on|to) (?:weakness|dips|the dip|this dip|their)\\b)`),
+  /\b(?:take advantage of|use|seize) (?:the |this |that |any |today's )?(?:dip|pullback|drop|weakness|sell-?off|correction) to (?:buy|add|stack|accumulate|load up|stock up)\b/,
+  /\badd to (?:their|its) (?:stack|position|positions|holdings)\b(?=[^.!?]{0,30}\b(?:dip|weakness|pullback|here|now)\b)/,
+  /\b(?:now'?s|now is) the (?:time|moment) to (?:start |be )?(?:buy|sell|add|load up|stock up|accumulate|stack|get into|pick up|act)(?:ing)?\b/,
+];
+
+function directiveCalls(text) {
+  const found = [];
+  // Markdown and quote marks around a word don't hide it.
+  const plain = text.replace(/[*_`"\u201c\u201d]/g, '');
+  for (const sentence of plain.split(/[.!?;:\u2014\u2013](?=\s|[a-z])|\n+/)) {
+    const start = sentence.replace(/^[^a-z0-9]+/, '');
+    const m = DIRECTIVE_START.exec(start);
+    if (m) found.push(m[0]);
+  }
+  const flat = plain.replace(/\s+/g, ' ');
+  for (const re of DIRECTIVE_ANYWHERE) {
+    const m = re.exec(flat);
+    if (m) found.push(m[0]);
+  }
+  return found;
+}
+
+// How far into a piece an opening can run. The banned openings only count
+// when they start the piece, so a later "the real story" in a quote is fine.
+const OPENING_CHARS = 160;
+
+// Returns the banned phrases a written piece still uses, so the processor can
+// set a feed reaction aside as a failed draft and log the rest. The prompt
+// asks for this already. This checks what the model actually wrote.
+function findTakeBreaks(text) {
+  if (!text) return [];
+  const lower = String(text).toLowerCase().replace(/[\u2018\u2019]/g, "'");
+  const plain = lower.replace(/\s+/g, ' ');
+  const opening = plain.replace(/^[^a-z0-9]+/, '').slice(0, OPENING_CHARS);
+  return [...new Set([
+    ...BANNED_OPENINGS.filter(p => opening.includes(p)),
+    ...BANNED_TRADE_CALLS.filter(p => usesCall(plain, p)),
+    ...directiveCalls(lower.replace(/[ \t]+/g, ' ')),
+  ])];
+}
+
+// Strict on purpose. The prompt bans these phrases outright, so a draft that
+// uses one, even to deny it, is set aside rather than risk passing a call
+// like "never a bad time to buy". A phrase must end on a word break, so
+// "buyback" isn't "buy".
+function usesCall(plain, phrase) {
+  let at = plain.indexOf(phrase);
+  while (at >= 0) {
+    if (!/[a-z0-9]/.test(plain[at + phrase.length] || '')) return true;
+    at = plain.indexOf(phrase, at + 1);
+  }
+  return false;
+}
+
+module.exports = { TAKE_RULES, BANNED_OPENINGS, BANNED_TRADE_CALLS, findTakeBreaks };

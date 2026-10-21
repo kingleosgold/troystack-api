@@ -6,7 +6,7 @@ const { stripSourceTag } = require('./headline');
 const { getCachedPrices } = require('./price-fetcher');
 const { enqueueTweet } = require('./auto-tweet');
 const { getTopIntelligence } = require('./intelligence-scraper');
-const { TAKE_RULES } = require('./take-rules');
+const { TAKE_RULES, findTakeBreaks } = require('./take-rules');
 // Master switch for X (Twitter) distribution. When false, the pipeline does NOT
 // enqueue tweets into tweet_queue — gating the machinery at the entry point so no
 // backlog accumulates while the auto-tweet posting cron is disabled. The plumbing
@@ -36,6 +36,15 @@ function generateSlug(title) {
 // title. The house style has no em dashes.
 function signalTitle(prefix, today) {
   return `${prefix}: ${today}`;
+}
+
+// Logs a written piece that still uses a banned opening or trade call. Only
+// the feed reaction is set aside for it, since its slot can take another
+// draft. The daily Signal and the long synthesis have no second try.
+function logTakeBreaks(where, text) {
+  const breaks = findTakeBreaks(text);
+  if (breaks.length) console.warn(`[${where}] Broke the take rules: ${breaks.join(', ')}`);
+  return breaks;
 }
 
 // A price as a reader expects it, $4,180.80, or N/A when there isn't one.
@@ -746,6 +755,14 @@ async function generateTweetText(title, commentary) {
  * Generate one-liner and metadata for a synthesis article.
  * Uses Gemini Flash for the one-liner (cheap).
  */
+// The one-liner's fallback. The theme comes from a prompt without the take
+// rules, or straight from a headline, so it's checked too. With no safe line
+// the piece goes out with none, which every reader of troy_one_liner handles.
+function safeTheme(cluster) {
+  const theme = stripSourceTag(cluster.theme, cluster.articles);
+  return findTakeBreaks(theme).length ? null : theme;
+}
+
 async function generateArticleMetadata(cluster, articleText) {
   const systemPrompt = `You are a precious metals news editor. Write a single punchy headline one-liner (max 100 characters) for this article. The author is Troy, a metals analyst with a stacker worldview. No emojis, no exclamation points.
 
@@ -763,9 +780,12 @@ ${TAKE_RULES}`;
       thinking: false,
     });
     oneLiner = raw.trim().replace(/^["']|["']$/g, '');
+    // A one-liner that makes a trade call falls back to the theme, as a
+    // failed call does.
+    if (logTakeBreaks('Metadata', oneLiner).length) oneLiner = safeTheme(cluster);
   } catch (err) {
     console.log(`[Metadata] One-liner generation failed: ${err.message}`);
-    oneLiner = stripSourceTag(cluster.theme, cluster.articles);
+    oneLiner = safeTheme(cluster);
   }
 
   return {
@@ -1145,6 +1165,7 @@ ${TAKE_RULES}`;
     // invalid JSON and loses the day's brief.
     const raw = await callClaude(systemPrompt, userMessage, { maxTokens: 8000 });
     const parsed = parseJsonObject(raw);
+    logTakeBreaks('Stack Signal', `${parsed.one_liner || ''}\n${parsed.commentary || ''}`);
 
     // Generate hero image for the daily signal (subject to daily DALL-E cap)
     let imageUrl = null;
@@ -1362,6 +1383,7 @@ async function generateClaudeDailySynthesis() {
     console.log(`[Claude Synthesis] Output too short: ${articleText?.length || 0} chars`);
     return null;
   }
+  logTakeBreaks('Claude Synthesis', articleText);
 
   // Generate one-liner via existing helper
   let oneLiner;
@@ -1601,10 +1623,12 @@ async function runPipelineOnce() {
       } catch (err) {
         callError = err?.message || String(err);
       }
-      if (!articleText || articleText.length < MIN_ARTICLE_CHARS) {
+      const breaks = findTakeBreaks(articleText);
+      if (!articleText || articleText.length < MIN_ARTICLE_CHARS || breaks.length) {
         const why = callError ? `the draft call failed (${callError})`
-          : articleText ? `${articleText.length} chars, under ${MIN_ARTICLE_CHARS}`
-          : 'no output from the model';
+          : !articleText ? 'no output from the model'
+          : articleText.length < MIN_ARTICLE_CHARS ? `${articleText.length} chars, under ${MIN_ARTICLE_CHARS}`
+          : `it broke the take rules (${breaks.join(', ')})`;
         console.log(`[Synthesis] Skipped "${cluster.theme.slice(0, 50)}": ${why}. The slot stays open and its articles sit out an hour`);
         await rememberPassedLinks(cluster.articles.map(a => a.link), now, RETRY_TTL_MS);
         continue;
@@ -1700,6 +1724,7 @@ async function runPipelineOnce() {
 }
 
 module.exports = {
+  safeTheme,
   slotsOpenAt,
   scoreArticles,
   clusterArticles,

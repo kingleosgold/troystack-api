@@ -12,6 +12,7 @@ process.env.SUPABASE_URL ||= 'http://localhost:54321';
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-dummy-service-role-key';
 
 const prompts = [];
+let geminiReply = 'Gold held while the dollar slipped';
 
 function stub(rel, exportsObj) {
   const file = require.resolve(path.join(__dirname, '..', rel));
@@ -23,7 +24,7 @@ function stub(rel, exportsObj) {
 }
 
 stub('src/services/ai-router', {
-  callGemini: async (model, system) => { prompts.push(system); return 'Gold held while the dollar slipped'; },
+  callGemini: async (model, system) => { prompts.push(system); return geminiReply; },
   callClaude: async (system) => { prompts.push(system); return 'Gold held while the dollar slipped.'; },
   generateImage: async () => { throw new Error('no images in tests'); },
   MODELS: { flash: 'flash', editorial: 'editorial' },
@@ -72,4 +73,163 @@ test('the writers no longer tell Troy to call dips buys or say what everyone is 
   assert.ok(!/Dips are buying opportunities/i.test(src));
   assert.ok(!src.includes('what everyone else is missing'));
   assert.ok(!src.includes('was this a good month to stack'));
+});
+
+test('findTakeBreaks catches a banned opening only at the start and a trade call anywhere', () => {
+  const { findTakeBreaks } = require('../src/services/take-rules');
+  assert.deepStrictEqual(findTakeBreaks('Gold held while the dollar slipped.'), []);
+  assert.deepStrictEqual(findTakeBreaks(''), []);
+  assert.deepStrictEqual(findTakeBreaks(null), []);
+  assert.deepStrictEqual(findTakeBreaks('"The Real Story here is rates.'), ['the real story']);
+  const late = 'Gold slid 1% after CPI. '.repeat(10) + 'Some call the real story rates.';
+  assert.deepStrictEqual(findTakeBreaks(late), []);
+  assert.deepStrictEqual(findTakeBreaks('Spot fell. Honestly, it sounds like a sale.'), ['sounds like a sale']);
+  assert.deepStrictEqual(findTakeBreaks('Don’t get distracted by the CPI print.'), ["don't get distracted"]);
+  for (const text of [
+    'Gold fell 2%. Nothing here says it is time to sell.',
+    "Gold fell 2%. This isn't a crash, it's a buying opportunity.",
+    'Gold fell 2%. There is never a bad time to buy gold.',
+    "Gold fell 2%. Don't miss a buying opportunity like this.",
+    'Gold fell 2%. Prices are not falling; buy the dip.',
+  ]) assert.ok(findTakeBreaks(text).length, text);
+  assert.deepStrictEqual(findTakeBreaks('Gold fell 2%. Miners say it is time to buyback stock.'), []);
+  assert.deepStrictEqual(findTakeBreaks('Gold fell 2%. Time to buy, said the desk.'), ['time to buy']);
+});
+
+test('a feed reaction that makes a trade call is set aside like a failed draft', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'stack-signal-processor.js'), 'utf8');
+  assert.match(src, /const breaks = findTakeBreaks\(articleText\);/);
+  assert.match(src, /articleText\.length < MIN_ARTICLE_CHARS \|\| breaks\.length\)/);
+  assert.match(src, /logTakeBreaks\('Claude Synthesis', articleText\)/);
+  assert.match(src, /logTakeBreaks\('Stack Signal'/);
+});
+
+test('a one-liner that makes a trade call falls back to the theme', async () => {
+  geminiReply = 'Buy the dip while it lasts';
+  try {
+    const meta = await ssp.generateArticleMetadata(cluster, 'Gold slipped after the print.');
+    assert.strictEqual(meta.troy_one_liner, cluster.theme);
+  } finally {
+    geminiReply = 'Gold held while the dollar slipped';
+  }
+});
+
+test('an order to buy, sell, add or wait counts in any wording', () => {
+  const { findTakeBreaks } = require('../src/services/take-rules');
+  for (const t of [
+    'Buy gold before the next leg higher.',
+    'Add to your stack.',
+    'Gold slid. Sell your silver now.',
+    'Wait for a lower price.',
+    'You should add here.',
+    'You may want to consider buying silver.',
+    "Now's the time to start buying.",
+    'Now is the time to be buying.',
+    "Now's the time to get into silver.",
+    'You should wait for a pullback.',
+    'Consider buying silver while it lasts.',
+    'Consider buying while it lasts.',
+    'This pullback is an opportunity to buy gold.',
+    'The rally is a selling opportunity.',
+    'This is an opportunity to add silver.',
+    'This dip is exactly the kind of buying opportunity you should be looking for.',
+    'Stackers should treat the dip as opportunity.',
+    'Treat dips as opportunities.',
+    "Treat today's dip as an opportunity.",
+    'View this dip as an opportunity.',
+    'This pullback is an opportunity.',
+    'The dip is a chance to buy.',
+    'A golden opportunity to buy.',
+    'An opportunity to buy at a discount.',
+    'Dips like this are opportunities to stack.',
+    'This is the moment to add gold.',
+    'Metals dip: Stackers see opportunity, not defeat.',
+    'This is an opportunity\nto buy gold.',
+    'You may get a better entry point before the Fed decision lands.',
+    'Stackers should be buying here.',
+    'Stackers should add on weakness.',
+    'Long-term holders should add to their positions on this dip.',
+    'Take advantage of the dip to add silver.',
+    'Use this weakness to add silver.',
+    'This pullback is a great opportunity.',
+    'This dip is a golden opportunity for stackers.',
+    'Dips are opportunities.',
+    'Pullbacks like this are opportunities for stackers.',
+    'This is a good time to be buying.',
+    "You've got a window to buy before the Fed.",
+    'Try using this dip as an opportunity to add silver.',
+    'Gold slid. This is another opportunity to add to your stack.',
+    'A dip like this is a chance to add to your holdings.',
+    'You should sell.',
+    'You should buy more.',
+    'You might want to sell before the Fed meets.',
+    'You should buy American Eagles.',
+    'Now is the time to act.',
+    "Don't forget to add to your stack.",
+    'Gold fell. Consider adding ounces.',
+    "Now's the time to load up.",
+    'Gold rose. **Buy** gold.',
+    'Gold rose: buy gold.',
+    'Accumulate into this kind of weakness.',
+    'Keep buying on your schedule.',
+  ]) {
+    assert.ok(findTakeBreaks(t).length > 0, t);
+  }
+});
+
+test('reporting what others buy or sell is not a call', () => {
+  const { findTakeBreaks } = require('../src/services/take-rules');
+  for (const t of [
+    'Central banks buy gold every quarter.',
+    'The U.S. sell-off deepened as yields rose.',
+    'Buyback programs grew at the majors.',
+    'Gold traded at $2,650.50. Silver followed.',
+    'Central banks keep buying gold.',
+    'Funds start selling as yields climb.',
+    'Add to that the relentless demand from India.',
+    'Add in the central bank buying backdrop.',
+    'Wait times at the Mint stretched to six weeks.',
+    'Wait, there is more.',
+    'Sell orders piled up on COMEX.',
+    'Buy orders surged at the open.',
+    'Sell in May and go away, the old saw says.',
+    'Dealers consider buying more inventory ahead of festival season.',
+    'Now is the time to watch the Fed.',
+    'When you sell your gold, the IRS treats it as a collectible.',
+    "If you need to sell your coins, dealer spreads matter.",
+    'Analysts told clients you should buy gold on any dip.',
+    'You must add VAT to the price in the UK.',
+    'You need to wait three days for the wire.',
+    'Whether you should buy depends on your horizon.',
+    'You could buy a house with what that bar costs.',
+    'Consider buying power: wages lag.',
+    'Consider selling pressure from ETFs.',
+    'Dealers will buy your gold at spot.',
+    'You can sell your gold back to any dealer.',
+    'Miners had a chance to sell forward at higher prices.',
+    'The opportunity cost of holding gold rises with rates.',
+    'Funds are eyeing an exit window before the Fed meeting.',
+    'The quarter was a buying window for central banks.',
+    'The rally was a selling opportunity for miners.',
+    'Producers took the chance to sell gold forward at $2,400.',
+    'Chinese retail took the opportunity to buy gold bars.',
+    'Central banks keep using every dip as an opportunity to buy gold.',
+    'Central banks see the dip as an opportunity.',
+    'Hedge funds treated the dip as an opportunity to cover shorts.',
+    "Gold's main selling point is that it has no counterparty risk.",
+    'Lower premiums are the entry point for new buyers.',
+    'Hedge funds see the rally as a selling opportunity.',
+    'The U.S. Mint said it will take time to add capacity.',
+    'Miners have a window to buy back shares.',
+    'Retail demand gave dealers the chance to sell out of eagles.',
+    'Producers took the $2,400 print as a window to sell forward.',
+  ]) {
+    assert.deepStrictEqual(findTakeBreaks(t), [], t);
+  }
+});
+
+test('the one-liner fallback is the theme only when the theme passes the rules', () => {
+  const { safeTheme } = require('../src/services/stack-signal-processor');
+  assert.strictEqual(safeTheme({ theme: 'Gold slides as the dollar firms', articles: [] }), 'Gold slides as the dollar firms');
+  assert.strictEqual(safeTheme({ theme: 'Buy the dip in gold', articles: [] }), null);
 });
