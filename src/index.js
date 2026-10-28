@@ -382,6 +382,10 @@ app.listen(PORT, () => {
   console.log('🔒 CORS: Locked to troystack.ai + stacktrackergold.com domains');
   console.log('⚡ Rate Limits: Public 100/min, Auth 30/min, Dev tier-based');
 
+  // Troy's price history reads all of price_log, longer than a question
+  // waits, so it starts now and the first question after a deploy has it.
+  sharedMarketBlock().catch((err) => console.log(`[Troy Context] Warm-up failed: ${err.message}`));
+
   // ── Intelligence cron: daily at 6:30 AM EST (11:30 UTC) ──
   if (process.env.GEMINI_API_KEY) {
     cron.schedule('30 11 * * *', async () => {

@@ -20,6 +20,12 @@ const WAIT_MS = 1500;
 // A read still running after this long is taken as hung and a fresh one starts.
 const STALL_MS = 10 * 1000;
 const METALS = ['gold', 'silver', 'platinum', 'palladium'];
+// Records and long-range history move slowly and take a full price_log scan,
+// so they're kept for half an hour. Live spot is set against the record with
+// every question, so a new high still shows up the minute it happens.
+const HISTORY_TTL_MS = 30 * 60 * 1000;
+
+const { buildHistoryBlock } = require('./troy-history');
 
 // The Signal is written by a pipeline that sometimes uses long dashes, and
 // Troy tends to echo the style he's shown, so they become commas here.
@@ -82,7 +88,7 @@ function nowLine(at) {
  *                    live?: { gold?: boolean, silver?: boolean, platinum?: boolean, palladium?: boolean } } | null,
  *           signal?: object | null, headlines?: object[], now?: number }} parts
  */
-function buildMarketBlock({ spot, signal, headlines, now } = {}) {
+function buildMarketBlock({ spot, signal, headlines, history, now } = {}) {
   const sections = [];
 
   const prices = spot?.prices || {};
@@ -132,6 +138,18 @@ function buildMarketBlock({ spot, signal, headlines, now } = {}) {
     });
   if (lines.length) sections.push(`NEWEST HEADLINES IN THE STACK SIGNAL:\n${lines.join('\n')}`);
 
+  // Live spot is set against the records only when it was read live, the
+  // same test the moves use.
+  if (history && Number.isFinite(now)) {
+    const live = {};
+    if (spot && trusted) {
+      for (const m of METALS) if (spot.live?.[m] !== false && Number(prices[m]) > 0) live[m] = Number(prices[m]);
+    }
+    const today = new Date(now).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const block = buildHistoryBlock({ data: history, live, today });
+    if (block) sections.push(block);
+  }
+
   if (!sections.length) return '';
   const head = Number.isFinite(now) ? `${nowLine(now)}\n\n` : '';
   const asOf = !hasSignal
@@ -147,7 +165,7 @@ function buildMarketBlock({ spot, signal, headlines, now } = {}) {
  * from a read kept for five minutes.
  * @param {{ fetchSpot: () => Promise<object>, db: object, now?: () => number, waitMs?: number }} deps
  */
-function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = WAIT_MS, stallMs = STALL_MS }) {
+function createMarketContext({ fetchSpot, db, readHistory = null, now = () => Date.now(), waitMs = WAIT_MS, stallMs = STALL_MS }) {
   // The read's answer, or the fallback once `waitMs` have passed. The read
   // carries on either way and updates what's kept when it lands.
   function waitAtMost(promise, fallback) {
@@ -188,7 +206,7 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = W
   // A read that hangs is given up on after stallMs, so the next question
   // starts a fresh one, and an answer that lands after a newer read's is
   // ignored.
-  function keptRead(read, label, empty) {
+  function keptRead(read, label, empty, ttl = TTL_MS) {
     let value = empty;
     let at = null;
     let ok = false;
@@ -197,7 +215,7 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = W
     let started = 0;
     let landed = 0;
     return function get() {
-      if (at !== null && now() - at < (ok ? TTL_MS : EMPTY_TTL_MS)) return Promise.resolve(value);
+      if (at !== null && now() - at < (ok ? ttl : EMPTY_TTL_MS)) return Promise.resolve(value);
       if (inFlight && now() - startedAt >= stallMs) {
         console.log(`[Troy Context] ${label} read still running after ${stallMs} ms, starting another`);
         inFlight = null;
@@ -238,6 +256,7 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = W
 
   const signalPart = keptRead(latestSignal, 'Signal', null);
   const headlinesPart = keptRead(newestHeadlines, 'Headlines', []);
+  const historyPart = readHistory ? keptRead(readHistory, 'History', null, HISTORY_TTL_MS) : () => Promise.resolve(null);
   let spotInFlight = null;
   let spotStartedAt = 0;
 
@@ -265,8 +284,8 @@ function createMarketContext({ fetchSpot, db, now = () => Date.now(), waitMs = W
   // so the moves come from the same snapshot as the prices beside them.
   return async function getMarketBlock(spotSnapshot) {
     const spotRead = spotSnapshot && spotSnapshot.prices ? Promise.resolve(spotSnapshot) : currentSpot();
-    const [spot, signal, headlines] = await Promise.all([spotRead, signalPart(), headlinesPart()]);
-    return buildMarketBlock({ spot, signal, headlines, now: now() });
+    const [spot, signal, headlines, history] = await Promise.all([spotRead, signalPart(), headlinesPart(), historyPart()]);
+    return buildMarketBlock({ spot, signal, headlines, history, now: now() });
   };
 }
 
@@ -277,7 +296,13 @@ function sharedMarketBlock(spotSnapshot) {
   if (!shared) {
     const supabase = require('../lib/supabase');
     const { getSpotPrices } = require('./price-fetcher');
-    shared = createMarketContext({ fetchSpot: getSpotPrices, db: supabase });
+    const { readHistory } = require('./troy-history');
+    const { getDailyPriceLog } = require('../routes/prices');
+    shared = createMarketContext({
+      fetchSpot: getSpotPrices,
+      db: supabase,
+      readHistory: () => readHistory({ db: supabase, getDailyPriceLog }),
+    });
   }
   return shared(spotSnapshot);
 }
