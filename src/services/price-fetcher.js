@@ -743,6 +743,7 @@ function getPriceSnapshot() {
     timestamp: spotPriceCache.lastUpdated ? spotPriceCache.lastUpdated.toISOString() : null,
     quotedAt: spotPriceCache.quotedAt,
     live: spotPriceCache.live,
+    spikeRejected: Boolean(spotPriceCache.spikeRejected),
   };
 }
 

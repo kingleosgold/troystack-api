@@ -59,7 +59,7 @@ test('a peak price_log has thinned to one row a day still counts with the next d
     { id: 2, timestamp: '2026-01-28T21:00:00Z', price: 116.9 },
     { id: 3, timestamp: '2026-01-27T21:00:00Z', price: 110.2 },
   ];
-  assert.deepEqual(confirmedHigh(rows, 'silver'), { price: 121.4, date: '2026-01-29', id: 1 });
+  assert.deepEqual(confirmedHigh(rows, 'silver'), { price: 121.4, date: '2026-01-29', id: 1, neighborId: 2 });
 });
 
 test('the old platinum placeholder never becomes a record', () => {
@@ -184,9 +184,9 @@ test('readHighs asks price_log for each metal highest first, and readSeries take
   const highs = await readHighs({ db });
   assert.equal(asked.length, 4);
   assert.ok(asked.every((q) => q.table === 'price_log' && q.order[1] === false && q.limit === 50));
-  assert.deepEqual(highs.silver, { price: 121.4, date: '2026-01-29', id: 100 });
+  assert.deepEqual(highs.silver, { price: 121.4, date: '2026-01-29', id: 100, neighborId: 101 });
   assert.equal(highs.gold, null);
-  assert.deepEqual(await recordRowIds({ db }), [100], 'the decimator keeps the record rows');
+  assert.deepEqual(await recordRowIds({ db }), [100, 101], 'the decimator keeps the record rows and their neighbors');
   const data = await readSeries({ getDailyPriceLog: async () => ({ '2025-06-02': { gold: 3400, silver: 36, platinum: 0, palladium: 0 } }) });
   assert.deepEqual(data.since, { gold: '2025-06-02', silver: '2025-06-02', platinum: null, palladium: null });
   assert.ok(Object.keys(data.monthly).length > 1000, 'the monthly file is read');
@@ -247,7 +247,7 @@ test('a record whose neighbors have left the top rows is checked in its own wind
     },
   };
   const highs = await readHighs({ db });
-  assert.deepEqual(highs.silver, { price: 121.4, date: '2026-01-29', id: 1 });
+  assert.deepEqual(highs.silver, { price: 121.4, date: '2026-01-29', id: 1, neighborId: 2 });
   assert.equal(windows.length, 1);
   assert.equal(windows[0]['neq:id'], 1);
   assert.equal(windows[0]['gte:timestamp'], '2026-01-28T09:00:00.000Z');

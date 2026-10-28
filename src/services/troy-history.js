@@ -120,8 +120,12 @@ function confirmedHigh(rows, metal) {
     .sort((a, b) => b.price - a.price);
   for (const r of usable) {
     // A much lower reading nearby doesn't vouch for a spike.
-    const company = usable.filter((o) => o !== r && Math.abs(o.at - r.at) <= NEIGHBOR_MS && o.price >= r.price * NEAR_SHARE).length;
-    if (company >= NEIGHBORS) return { price: r.price, date: nyDate(r.timestamp), ...(r.id != null && { id: r.id }) };
+    const company = usable.filter((o) => o !== r && Math.abs(o.at - r.at) <= NEIGHBOR_MS && o.price >= r.price * NEAR_SHARE);
+    if (company.length >= NEIGHBORS) {
+      // The neighbor is kept through decimation too, so the record stays confirmed.
+      const neighborId = company[0].id;
+      return { price: r.price, date: nyDate(r.timestamp), ...(r.id != null && { id: r.id }), ...(neighborId != null && { neighborId }) };
+    }
   }
   return null;
 }
@@ -315,7 +319,7 @@ async function readHighs({ db }) {
         .limit(1);
       if (nearErr) throw new Error(`${metal} high check failed: ${nearErr.message}`);
       if (near && near.length) {
-        highs[metal] = { price: Number(r.price), date: nyDate(r.timestamp), ...(r.id != null && { id: r.id }) };
+        highs[metal] = { price: Number(r.price), date: nyDate(r.timestamp), ...(r.id != null && { id: r.id }), ...(near[0].id != null && { neighborId: near[0].id }) };
         break;
       }
     }
@@ -323,10 +327,11 @@ async function readHighs({ db }) {
   return highs;
 }
 
-// The ids of the rows the records come from, for the decimator to keep.
+// The ids of the rows the records come from and the neighbors that confirm
+// them, for the decimator to keep.
 async function recordRowIds({ db }) {
   const highs = await readHighs({ db });
-  return METALS.map((m) => highs[m] && highs[m].id).filter((id) => id != null);
+  return METALS.flatMap((m) => (highs[m] ? [highs[m].id, highs[m].neighborId] : [])).filter((id) => id != null);
 }
 
 module.exports = {
