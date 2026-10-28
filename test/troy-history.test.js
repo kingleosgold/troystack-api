@@ -312,3 +312,15 @@ test('spot more than 10% over the record, or right at it, reads plainly', () => 
   const at = buildHistoryBlock({ data, live: { silver: 121.4 }, today: '2026-10-28' });
   assert.match(at, /the highest spot TroyStack has recorded\. Spot is at it\./);
 });
+
+test('a reading the record check threw out never opens a range either', () => {
+  const daily = dailySeries();
+  daily['2025-10-28'] = { ...daily['2025-10-28'], silver: 140 };
+  const block = buildHistoryBlock({
+    data: { highs: { silver: { price: 121.4, date: '2026-01-29' } }, monthly: MONTHLY, daily, since: SINCE },
+    live: { silver: 60.2 },
+    today: '2026-10-28',
+  });
+  assert.doesNotMatch(block, /\$140/);
+  assert.match(block, /Silver, 1 year: started at \$50\.00 \(Oct 27, 2025\)/);
+});

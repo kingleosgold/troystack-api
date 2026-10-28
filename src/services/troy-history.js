@@ -200,16 +200,18 @@ function yearsBefore(today, years) {
  */
 function rangeLine(metal, range, { series, today, live, ath, since }) {
   const start = yearsBefore(today, range.years);
-  const first = series[0];
+  // A reading over a known record is one the record check threw out, so it
+  // can neither open a range nor top one.
+  const cap = ath && ath.known ? ath.price : Infinity;
+  const valid = series.filter((p) => p.price <= cap);
+  const first = valid[0];
   // The range has to reach back to its start, with a reading close to it.
-  const opening = series.filter((p) => p.date <= start).pop();
+  const opening = valid.filter((p) => p.date <= start).pop();
   const lead = `${name(metal)}, ${range.label}:`;
   if (!first || !opening || (!opening.month && new Date(start) - new Date(opening.date) > 7 * DAY_MS)) {
     return since ? `${lead} not in TroyStack's records, which start ${dayLabel(since)} for ${metal}.` : `${lead} not in TroyStack's records.`;
   }
-  // A reading over a known record is one the record check threw out.
-  const cap = ath && ath.known ? ath.price : Infinity;
-  const inside = series.filter((p) => p.date > start && p.price <= cap);
+  const inside = valid.filter((p) => p.date > start);
   const all = [opening, ...inside];
   let low = all[0];
   let high = all[0];
