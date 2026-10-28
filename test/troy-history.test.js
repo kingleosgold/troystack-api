@@ -218,3 +218,38 @@ test('the shared context reads history once and keeps it', async () => {
   assert.equal(reads, 1);
   assert.match(first, /Silver all-time high: \$121\.40/);
 });
+
+test('a record whose neighbors have left the top rows is checked in its own window', async () => {
+  // A later run just under the record fills the top rows, so the Jan 29 peak
+  // has no neighbor among them, but its own day and a half has one.
+  const top = [
+    { id: 1, timestamp: '2026-01-29T21:00:00Z', silver_price: 121.4 },
+    ...rowsAround('2027-03-01T15:00:00Z', [119, 118.9, 118.8]).map((r, i) => ({ id: 10 + i, timestamp: r.timestamp, silver_price: r.price })),
+  ];
+  const windows = [];
+  const db = {
+    from() {
+      const q = { filters: {} };
+      const chain = {
+        select() { return chain; },
+        gt() { return chain; },
+        gte(col, v) { q.filters[`gte:${col}`] = v; return chain; },
+        lte(col, v) { q.filters[`lte:${col}`] = v; return chain; },
+        neq(col, v) { q.filters[`neq:${col}`] = v; return chain; },
+        order(col) { q.order = col; return chain; },
+        limit() {
+          if (q.order) return Promise.resolve({ data: q.order === 'silver_price' ? top : [], error: null });
+          windows.push(q.filters);
+          return Promise.resolve({ data: [{ id: 2 }], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+  const highs = await readHighs({ db });
+  assert.deepEqual(highs.silver, { price: 121.4, date: '2026-01-29', id: 1 });
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0]['neq:id'], 1);
+  assert.equal(windows[0]['gte:timestamp'], '2026-01-28T09:00:00.000Z');
+  assert.ok(Math.abs(windows[0]['gte:silver_price'] - 109.26) < 0.001);
+});

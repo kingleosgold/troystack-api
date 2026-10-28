@@ -33,6 +33,10 @@ const TOP_ROWS = 50;
 const NEIGHBOR_MS = 1.5 * DAY_MS;
 const NEIGHBORS = 1;
 const PLACEHOLDERS = { platinum: [2700], palladium: [2000] };
+// How many of the highest rows are checked in their own window, and how close
+// a neighbor there has to be.
+const WINDOW_CHECKS = 5;
+const NEAR_SHARE = 0.9;
 
 // The 1980 peaks ran about 30% over their months' averages, so a high
 // TroyStack recorded counts as the all-time high only when it clears every
@@ -249,7 +253,7 @@ function buildHistoryBlock({ data, live = {}, today } = {}) {
     const first = series[0];
     if (first) lines.push(`${name(metal)}, all time: TroyStack's records start ${pointLabel(first)} at ${usd(first.price)}.`);
   }
-  return `PRICE HISTORY AND RECORDS (spot, USD per oz):\n${lines.join('\n')}\nThese are the only all-time highs and long-range figures you have. Quote them with their dates. An all-time high here is the highest spot TroyStack recorded, so call it that if asked, since a market's intraday peak can sit a little above it. A range's figures come from TroyStack's first reading of each day, or a monthly average where it says so, so an intraday high can run above them. Never call a recent or 30 day high the all-time high. When a figure isn't here, say plainly that you don't have it before anything else, and don't estimate it.`;
+  return `PRICE HISTORY AND RECORDS (spot, USD per oz):\n${lines.join('\n')}\nThese are the only all-time highs and long-range figures you have. Quote them with their dates. An all-time high here is the highest spot TroyStack recorded, unless its line says it was set before TroyStack's records, so call it that if asked, since a market's intraday peak can sit a little above it. A range's figures come from TroyStack's first reading of each day, or a monthly average where it says so, so an intraday high can run above them. Never call a recent or 30 day high the all-time high. When a figure isn't here, say plainly that you don't have it before anything else, and don't estimate it.`;
 }
 
 /**
@@ -282,7 +286,31 @@ async function readHighs({ db }) {
       .order(column, { ascending: false })
       .limit(TOP_ROWS);
     if (error) throw new Error(`${metal} high read failed: ${error.message}`);
-    highs[metal] = confirmedHigh((data || []).map((r) => ({ id: r.id, timestamp: r.timestamp, price: r[column] })), metal);
+    const rows = (data || []).map((r) => ({ id: r.id, timestamp: r.timestamp, price: r[column] }));
+    highs[metal] = confirmedHigh(rows, metal);
+    // Months later a run just under the record can fill the top rows, leaving
+    // the record's thinned-out neighbors outside them. The highest rows are
+    // then checked against their own day and a half instead.
+    const skip = PLACEHOLDERS[metal] || [];
+    const candidates = rows.filter((r) => Number(r.price) > 0 && !skip.includes(Number(r.price))).slice(0, WINDOW_CHECKS);
+    for (const r of candidates) {
+      if (highs[metal] && highs[metal].price >= Number(r.price)) break;
+      const at = new Date(r.timestamp).getTime();
+      if (!Number.isFinite(at)) continue;
+      const { data: near, error: nearErr } = await db
+        .from('price_log')
+        .select('id')
+        .gte('timestamp', new Date(at - NEIGHBOR_MS).toISOString())
+        .lte('timestamp', new Date(at + NEIGHBOR_MS).toISOString())
+        .gte(column, Number(r.price) * NEAR_SHARE)
+        .neq('id', r.id)
+        .limit(1);
+      if (nearErr) throw new Error(`${metal} high check failed: ${nearErr.message}`);
+      if (near && near.length) {
+        highs[metal] = { price: Number(r.price), date: nyDate(r.timestamp), ...(r.id != null && { id: r.id }) };
+        break;
+      }
+    }
   }));
   return highs;
 }
