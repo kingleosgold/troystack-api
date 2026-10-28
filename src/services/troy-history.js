@@ -133,16 +133,17 @@ function confirmedHigh(rows, metal) {
 function allTimeHigh({ metal, recorded, since, monthly, live, today }) {
   let high = recorded;
   // Live spot over the record is a new one, the minute it happens. With no
-  // record to beat it's only a reading, not a record.
+  // record to beat it's only a reading, not a record, and where the record
+  // isn't known it's never passed off as one TroyStack recorded.
   if (high && live > high.price && today) high = { price: live, date: today, live: true };
   const prior = PRIOR_RECORDS[metal];
   if (prior) {
     if (high && high.price > prior.price) return { metal, known: true, ...high };
-    return { metal, known: true, price: prior.price, when: prior.when, prior: true, recorded: high, since };
+    return { metal, known: true, price: prior.price, when: prior.when, prior: true, recorded, since };
   }
   if (!high) return { metal, known: false, since };
   // No history before price_log and no published record: unknown.
-  if (metal !== 'gold' && metal !== 'silver') return { metal, known: false, since, recorded: high };
+  if (metal !== 'gold' && metal !== 'silver') return { metal, known: false, since, recorded };
 
   // Gold and silver: the highest monthly average before price_log began.
   const startMonth = since ? since.slice(0, 7) : null;
@@ -153,7 +154,7 @@ function allTimeHigh({ metal, recorded, since, monthly, live, today }) {
     if (!before || v > before.price) before = { price: v, month };
   }
   if (!before || high.price > before.price * MONTHLY_MARGIN) return { metal, known: true, ...high };
-  return { metal, known: false, since, recorded: high, before };
+  return { metal, known: false, since, recorded, before };
 }
 
 // The series a range is read from: monthly averages for the months before
@@ -198,7 +199,9 @@ function rangeLine(metal, range, { series, today, live, ath, since }) {
   if (!first || !opening || (!opening.month && new Date(start) - new Date(opening.date) > 7 * DAY_MS)) {
     return since ? `${lead} not in TroyStack's records, which start ${dayLabel(since)} for ${metal}.` : `${lead} not in TroyStack's records.`;
   }
-  const inside = series.filter((p) => p.date > start);
+  // A reading over a known record is one the record check threw out.
+  const cap = ath && ath.known ? ath.price : Infinity;
+  const inside = series.filter((p) => p.date > start && p.price <= cap);
   const all = [opening, ...inside];
   let low = all[0];
   let high = all[0];

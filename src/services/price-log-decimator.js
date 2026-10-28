@@ -217,20 +217,20 @@ async function runPass(p) {
 
 async function decimatePriceLog() {
   const startedAt = Date.now();
-  // When the record rows can't be read, only pass 1 runs. A new record sits
-  // in the untouched last 24 hours first, so that pass can't delete one, and
-  // the rest wait for the next night.
+  // When the record rows can't be read, no pass runs that night, since any
+  // of them could delete a record. A night adds about 1,440 rows, far under
+  // the safety cap, and the next night catches up.
   const { recordRowIds } = require('./troy-history');
   let keepIds = null;
   try {
     keepIds = new Set(await recordRowIds({ db: supabase }));
   } catch (err) {
-    console.error(`[PriceLogDecimator] Record rows unreadable, running pass 1 only: ${err.message}`);
+    console.error(`[PriceLogDecimator] Record rows unreadable, skipping tonight: ${err.message}`);
   }
   const skipped = { aborted: false, skipped: true, candidates: 0, kept: 0, deleted: 0 };
 
   // Pass 1: 24h .. 30d → 5-minute buckets
-  const pass1 = await runPass({
+  const pass1 = !keepIds ? skipped : await runPass({
     name: 'pass1-5min',
     level: LEVEL_FIVE_MIN,
     gte: isoDaysAgo(30),
@@ -238,7 +238,7 @@ async function decimatePriceLog() {
     excludeLevels: [LEVEL_FIVE_MIN, LEVEL_ONE_HOUR, LEVEL_DAILY],
     bucketKey: fiveMinBucketKey,
     pickKeeper: (rows, bucketStartMs) => pickClosestToBucketStart(rows, bucketStartMs),
-    keepIds: keepIds || new Set(),
+    keepIds,
   });
 
   // Pass 2: 30d .. 365d → 1-hour buckets

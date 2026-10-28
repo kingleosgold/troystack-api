@@ -253,3 +253,21 @@ test('a record whose neighbors have left the top rows is checked in its own wind
   assert.equal(windows[0]['gte:timestamp'], '2026-01-28T09:00:00.000Z');
   assert.ok(Math.abs(windows[0]['gte:silver_price'] - 109.26) < 0.001);
 });
+
+test('live spot over an unknown record is never called one TroyStack recorded', () => {
+  const ath = allTimeHigh({ metal: 'platinum', recorded: { price: 2450, date: '2026-01-20' }, since: '2025-06-02', monthly: MONTHLY, live: 2500, today: '2026-10-28' });
+  assert.equal(ath.known, false);
+  assert.deepEqual(ath.recorded, { price: 2450, date: '2026-01-20' });
+});
+
+test('a reading the record check threw out never tops a range', () => {
+  const daily = dailySeries();
+  daily['2026-03-01'] = { ...daily['2026-03-01'], silver: 140 };
+  const block = buildHistoryBlock({
+    data: { highs: { silver: { price: 121.4, date: '2026-01-29' } }, monthly: MONTHLY, daily, since: SINCE },
+    live: { silver: 60.2 },
+    today: '2026-10-28',
+  });
+  assert.doesNotMatch(block, /\$140/);
+  assert.match(block, /Silver, 1 year: .*high \$121\.40 \(Jan 29, 2026, the all-time high\)/);
+});
