@@ -226,6 +226,15 @@ function rangeLine(metal, range, { series, today, live, ath, since }) {
   return `${lead} started at ${usd(opening.price)} (${pointLabel(opening)})${now}. Low ${usd(low.price)} (${pointLabel(low)}), high ${highText}.`;
 }
 
+// Where spot sits against a record. Spot can be over one it wasn't allowed to
+// replace, like a quote the spike guard held back, so the side is read from
+// the sign.
+function spotVs(record, live) {
+  if (!(live > 0)) return '';
+  const gap = pct(record, live);
+  return ` Spot is ${Math.abs(gap).toFixed(1)}% ${gap > 0 ? 'above' : 'below'} it.`;
+}
+
 function athLine(metal, ath, live) {
   const n = name(metal);
   const since = ath.since ? dayLabel(ath.since) : null;
@@ -237,13 +246,10 @@ function athLine(metal, ath, live) {
   }
   if (ath.prior) {
     const ours = ath.recorded ? ` The highest TroyStack has recorded${sinceText} is ${usd(ath.recorded.price)} on ${dayLabel(ath.recorded.date)}.` : '';
-    const gap = live > 0 ? pct(ath.price, live) : null;
-    const off = gap === null ? '' : ` Spot is ${Math.abs(gap).toFixed(1)}% ${gap > 0 ? 'above' : 'below'} it.`;
-    return `${n} all-time high: ${usd(ath.price)}, set in ${ath.when}, before TroyStack's records.${ours}${off}`;
+    return `${n} all-time high: ${usd(ath.price)}, set in ${ath.when}, before TroyStack's records.${ours}${spotVs(ath.price, live)}`;
   }
   if (ath.live) return `${n} all-time high: ${usd(ath.price)}, current spot, a new record set today.`;
-  const off = live > 0 ? ` Spot is ${Math.abs(pct(ath.price, live)).toFixed(1)}% below it.` : '';
-  return `${n} all-time high: ${usd(ath.price)} on ${dayLabel(ath.date)}, the highest spot TroyStack has recorded.${off}`;
+  return `${n} all-time high: ${usd(ath.price)} on ${dayLabel(ath.date)}, the highest spot TroyStack has recorded.${spotVs(ath.price, live)}`;
 }
 
 /**

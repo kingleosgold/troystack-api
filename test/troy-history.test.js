@@ -302,5 +302,5 @@ test('a quote the spike guard held back never becomes a record', () => {
   const now = Date.parse('2026-10-28T20:00:00Z');
   const block = buildMarketBlock({ spot: { prices: { silver: 125 }, change: {}, source: 'yahoo_finance', spikeRejected: true }, history, now });
   assert.doesNotMatch(block, /new record set today/);
-  assert.match(block, /Silver all-time high: \$121\.40 on Jan 29, 2026/);
+  assert.match(block, /Silver all-time high: \$121\.40 on Jan 29, 2026, the highest spot TroyStack has recorded\. Spot is 3\.0% above it\./);
 });
