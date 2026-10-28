@@ -123,7 +123,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 | POST | /v1/troy/conversations/:id/messages | Public (UUID, quota) | Send message to Troy (3/day free, 30/day Gold) |
 | POST | /v1/troy/speak | Public (UUID, Gold tier) | TTS via ElevenLabs — streams audio/mpeg, 4000 char limit, voice cap |
 | POST | /v1/troy/transcribe | Public (UUID) | STT via OpenAI Whisper — multipart audio upload, voice cap |
-| GET | /v1/podcast/feed.xml | Public | Podcast RSS feed for "The Stack Signal: Daily Gold & Silver Brief" — RSS 2.0 + iTunes tags from `podcast_episodes`, 10-min in-memory cache. Lives in `src/routes/podcast.js` |
+| GET | /v1/podcast/feed.xml | Public | Podcast RSS feed for "The Stack Signal: Daily Gold & Silver Brief" — RSS 2.0 + iTunes tags (item `itunes:title` mirrors `title`) from `podcast_episodes`, 10-min in-memory cache. Show notes lead with the date line and the episode AI disclosure, and the channel description ends with the show-level one (Apple Podcasts guideline 1.11). Lives in `src/routes/podcast.js` |
 
 Troy's fixed persona and knowledge prompt sections live in `src/services/troy-prompt.js` (`TROY_PERSONA`, `TROY_KNOWLEDGE`), shared with the visitor chat below. They were moved there byte for byte.
 
@@ -599,8 +599,8 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 - `slug` (text, PK — matches stack_signal_articles.slug, e.g. `the-stack-signal-2026-07-31`)
 - `audio_url` (text — public troy-podcast bucket URL, RSS enclosure), `audio_bytes` (bigint), `duration_sec` (int — bytes/16000 @128kbps CBR)
 - `status` (text: `pending` | `complete`, default `complete`), `attempt_started_at` (timestamptz — lease start of the owning attempt), `attempt_token` (uuid — identity of the owning attempt; every acquisition writes a fresh one)
-- `title`, `description` (text), `published_at`, `created_at` (timestamptz)
-- Migrations: `migrations/004_podcast_episodes.sql` (applied to production 2026-07-31) + `migrations/005_podcast_episode_status.sql` (**must be applied before podcast v1 deploys**). `scripts/setup-podcast-tables.js` prints both (display-only)
+- `title` (text — the day's news plus a short date, `Gold Holds $4,057, Silver $53.77 as Fed Decision Looms | Oct 28`, from podcast-title.js; episodes before 014 keep a dated title), `description` (text), `published_at`, `created_at` (timestamptz)
+- Migrations: `migrations/004_podcast_episodes.sql` (applied to production 2026-07-31) + `migrations/005_podcast_episode_status.sql` (**must be applied before podcast v1 deploys**). `scripts/setup-podcast-tables.js` prints both (display-only). `migrations/014_podcast_episode_titles.sql` retitles Oct 15 to 28, 2026 and drops the em dash from older dated titles; needs no deploy, rollback in its header
 - Used by: podcast.js (service + route)
 
 **Episode lifecycle state machine** (podcast.js): `pending` = an attempt owns the row, lease = `attempt_started_at` + 10 min (`CLAIM_LEASE_MINUTES`), identity = `attempt_token`; `complete` = finalized, served by the feed. Every ownership change is one atomic statement writing a fresh token — PK INSERT (`NEW` → pending), CAS stale-claim UPDATE (`pending` + expired lease → pending, lease + token refreshed; exactly one concurrent winner), CAS force-demote (`complete` → pending, fresh lease + token, bytes zeroed — overlapping plain calls see an active attempt), token-bound finalize (`pending` + my token → complete + real bytes; a superseded owner matches 0 rows and exits). An advisory pre-upload re-read aborts a superseded attempt before it touches storage; accepted residual: ms-scale TOCTOU between that check and the upload means a superseded upload can land after someone else's finalize — self-corrected by the next `--force`. A crash at any point leaves `pending`, claimable after the lease expires — healed automatically by the next cron fire, the 12:15 heal cron, or a manual run.
@@ -1142,9 +1142,17 @@ When xAI publishes TTS/STT (or we swap to any other vendor), the change is: upda
 ### src/services/podcast.js
 - **Purpose:** Podcast v1 — turn the daily flagship Stack Signal article into a public episode of "The Stack Signal: Daily Gold & Silver Brief"
 - **Exports:** `generateEpisode({date, force})` (explicit pending/complete state machine — see the podcast_episodes schema section for states, transitions, and the 10-min claim lease; all ownership changes are atomic CAS statements, never read-then-act; `force` = atomic demote of a complete episode then regenerate, with the trade that the episode leaves the feed until finalize or the next heal), `sweepRecentEpisodes(days=3)` (missing-or-pending = work, complete skips; runs post-generation at 11:15 and in the dedicated 12:15 heal cron), `buildEpisodeScript(article)`, `buildEpisodeDescription(article)`, `stripMarkdown(text)`, `BUCKET`, `PODCAST_VOICE`, `CLAIM_LEASE_MINUTES`
-- **Dependencies:** supabase, voice-providers/grok (PINNED — never getTTSProvider; voice `leo`, xAI Output-ownership terms), troy-chat.js `sanitizeTTSText`
-- **Last modified:** 2026-07-31
-- **Pipeline:** strip markdown → wrap intro/outro → sanitizeTTSText → grok.tts → upload `episodes/{slug}.mp3` to **troy-podcast** (PUBLIC bucket, 50MB, audio/mpeg + artwork.png, retention FOREVER — permanently excluded from all cleanup crons) → insert `podcast_episodes` row. Triggered by the 11:15 UTC cron hook after the flagship publishes; manual/backfill via `scripts/generate-episode.js [date]`. Artwork: `scripts/generate-podcast-artwork.js` (3000×3000 from the Troy coin SVG, needs `sharp` devDependency). Tests: `test/podcast.test.js`.
+- **Dependencies:** supabase, voice-providers/grok (PINNED — never getTTSProvider; voice `leo`, xAI Output-ownership terms), troy-chat.js `sanitizeTTSText`, podcast-title.js `buildEpisodeTitle`
+- **Last modified:** 2026-10-28
+- **Pipeline:** strip markdown → wrap intro/outro → sanitizeTTSText → grok.tts → upload `episodes/{slug}.mp3` to **troy-podcast** (PUBLIC bucket, 50MB, audio/mpeg + artwork.png, retention FOREVER — permanently excluded from all cleanup crons) → insert `podcast_episodes` row. The title is written after the attempt owns the row and lands at finalize. Triggered by the 11:15 UTC cron hook after the flagship publishes; manual/backfill via `scripts/generate-episode.js [date]`. Artwork: `scripts/generate-podcast-artwork.js` (3000×3000 from the Troy coin SVG, needs `sharp` devDependency). Tests: `test/podcast.test.js`.
+- **Disclosure:** the spoken outro ("generated daily by Troy, TroyStack's AI analyst") is the in-audio AI disclosure Apple Podcasts guideline 1.11 requires. Keep it when the outro changes.
+
+### src/services/podcast-title.js
+- **Purpose:** Episode titles for The Stack Signal, `{Subject} {Verb} {Key Level} {as|on|while} {Driver} | {Mon D}`, at most 70 characters
+- **Exports:** `buildEpisodeTitle(article, {generate})` (never throws; returns `{title, source: 'generated'|'fallback', problems}`), `headlineProblems(headline, source, suffix)`, `fallbackTitle`, `titleSuffix`, `toTitleCase`, `numbersIn`, `sourceText`, `MAX_TITLE_CHARS`
+- **Dependencies:** ai-router `callGemini` (`MODELS.flash`, thinking off, one short call a day), take-rules `findTakeBreaks`
+- **Last modified:** 2026-10-28
+- **Rules:** the model writes only the headline, from the one-liner, the first paragraph and `gold_price_at_publish` / `silver_price_at_publish`; the code adds the America/New_York date. A headline is refused for any number the notes don't state (dollar amounts also match their whole-dollar rounding, spelled numbers match digits), AI, bot or algorithm, a dash, `!` or `?`, an all-caps word outside the acronym list, a trade call, or running past 70 characters with the date. One refusal gets one retry that names the broken rule; a second refusal or any provider error gives `Gold $4,057, Silver $53.77: Daily Brief | Oct 28`, or the dash-free dated title when the prices are missing. Tests: `test/podcast-title.test.js`.
 
 ### src/services/tts-cache.js
 - **Purpose:** Content-addressed MP3 cache for `/v1/troy/speak` — synthesize once, serve stored bytes on identical requests (Phase A)

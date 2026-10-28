@@ -22,6 +22,7 @@ const grok = require('./voice-providers/grok'); // pinned — see header
 // service is a known wart, accepted to keep sanitization policy single-sourced.
 // No require cycle: troy-chat.js does not require podcast.js.
 const { sanitizeTTSText } = require('../routes/troy-chat');
+const { buildEpisodeTitle } = require('./podcast-title');
 
 const BUCKET = 'troy-podcast';
 const BYTES_PER_SEC = 16000; // 128kbps CBR MP3 — duration estimate for itunes:duration
@@ -94,7 +95,7 @@ async function generateEpisode({ date, force = false } = {}) {
 
   const { data: article, error: artErr } = await supabase
     .from('stack_signal_articles')
-    .select('slug, title, troy_commentary, troy_one_liner, published_at')
+    .select('slug, title, troy_commentary, troy_one_liner, published_at, gold_price_at_publish, silver_price_at_publish')
     .eq('slug', slug)
     .maybeSingle();
   if (artErr) throw new Error(`article lookup failed: ${artErr.message}`);
@@ -185,6 +186,13 @@ async function generateEpisode({ date, force = false } = {}) {
     }
   }
 
+  // The episode's title is the day's news plus its date, written only once
+  // this attempt owns the row so overlapping calls never pay for it. It
+  // never throws: a rule break or a provider error gets the plain price line
+  // (services/podcast-title.js). The row keeps the title next to the episode.
+  const { title: episodeTitle, source: titleSource, problems: titleProblems } = await buildEpisodeTitle(article);
+  console.log(`🎙️ [Podcast] ${slug} title (${titleSource}): ${episodeTitle}${titleProblems.length ? ` [model headline rejected: ${titleProblems.join('; ')}]` : ''}`);
+
   const script = buildEpisodeScript(article);
   const cleanText = sanitizeTTSText(script);
   console.log(`🎙️ [Podcast] Synthesizing ${slug}: script ${script.length} chars → sanitized ${cleanText.length} chars${force ? ' (--force)' : ''}`);
@@ -230,7 +238,7 @@ async function generateEpisode({ date, force = false } = {}) {
       audio_url: audioUrl,
       audio_bytes: audioBuffer.length,
       duration_sec: durationSec,
-      title: article.title,
+      title: episodeTitle,
       description: buildEpisodeDescription(article),
       published_at: article.published_at,
     })
