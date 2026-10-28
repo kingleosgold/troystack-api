@@ -148,7 +148,8 @@ function buildMarketBlock({ spot, signal, headlines, history, now } = {}) {
       for (const m of METALS) if (spot.live?.[m] !== false && Number(prices[m]) > 0) live[m] = Number(prices[m]);
     }
     const today = new Date(now).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    const block = buildHistoryBlock({ data: history, live, today });
+    // A closed market's spot is the last session's, so it isn't dated today.
+    const block = buildHistoryBlock({ data: history, live, today, promote: !spot?.marketsClosed });
     if (block) sections.push(block);
   }
 

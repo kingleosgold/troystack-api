@@ -42,6 +42,7 @@ const NEAR_SHARE = 0.9;
 // TroyStack recorded counts as the all-time high only when it clears every
 // earlier monthly average by more than that.
 const MONTHLY_MARGIN = 1.35;
+const LIVE_RECORD_MAX = 1.1;
 
 // Platinum and palladium have no monthly history before price_log. Palladium's
 // published record, March 2022's, stands until TroyStack records a higher
@@ -135,7 +136,9 @@ function allTimeHigh({ metal, recorded, since, monthly, live, today }) {
   // Live spot over the record is a new one, the minute it happens. With no
   // record to beat it's only a reading, not a record, and where the record
   // isn't known it's never passed off as one TroyStack recorded.
-  if (high && live > high.price && today) high = { price: live, date: today, live: true };
+  // A jump of more than 10% is what the price fetcher's spike guard keeps out
+  // of price_log as a likely bad quote, so it isn't a record here either.
+  if (high && live > high.price && live <= high.price * LIVE_RECORD_MAX && today) high = { price: live, date: today, live: true };
   const prior = PRIOR_RECORDS[metal];
   if (prior) {
     if (high && high.price > prior.price) return { metal, known: true, ...high };
@@ -229,7 +232,8 @@ function athLine(metal, ath, live) {
   }
   if (ath.prior) {
     const ours = ath.recorded ? ` The highest TroyStack has recorded${sinceText} is ${usd(ath.recorded.price)} on ${dayLabel(ath.recorded.date)}.` : '';
-    const off = live > 0 ? ` Spot is ${Math.abs(pct(ath.price, live)).toFixed(1)}% below it.` : '';
+    const gap = live > 0 ? pct(ath.price, live) : null;
+    const off = gap === null ? '' : ` Spot is ${Math.abs(gap).toFixed(1)}% ${gap > 0 ? 'above' : 'below'} it.`;
     return `${n} all-time high: ${usd(ath.price)}, set in ${ath.when}, before TroyStack's records.${ours}${off}`;
   }
   if (ath.live) return `${n} all-time high: ${usd(ath.price)}, current spot, a new record set today.`;
@@ -243,13 +247,13 @@ function athLine(metal, ath, live) {
  *           live?: object, today?: string }} p
  *   live holds each metal's current spot only when it was read live.
  */
-function buildHistoryBlock({ data, live = {}, today } = {}) {
+function buildHistoryBlock({ data, live = {}, today, promote = true } = {}) {
   if (!data || !today) return '';
   const lines = [];
   for (const metal of METALS) {
     const since = data.since?.[metal] || null;
     const spot = Number(live[metal]) > 0 ? Number(live[metal]) : null;
-    const ath = allTimeHigh({ metal, recorded: data.highs?.[metal] || null, since, monthly: data.monthly, live: spot, today });
+    const ath = allTimeHigh({ metal, recorded: data.highs?.[metal] || null, since, monthly: data.monthly, live: spot, today: promote ? today : null });
     const series = seriesFor(metal, { monthly: data.monthly, daily: data.daily, since });
     lines.push(athLine(metal, ath, spot));
     for (const range of RANGES) lines.push(rangeLine(metal, range, { series, today, live: spot, ath, since }));

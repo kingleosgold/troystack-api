@@ -271,3 +271,19 @@ test('a reading the record check threw out never tops a range', () => {
   assert.doesNotMatch(block, /\$140/);
   assert.match(block, /Silver, 1 year: .*high \$121\.40 \(Jan 29, 2026, the all-time high\)/);
 });
+
+test('a live jump past the spike guard is not a record, and a closed market sets none', () => {
+  const recorded = { price: 121.4, date: '2026-01-29' };
+  assert.equal(allTimeHigh({ metal: 'silver', recorded, since: '2025-06-02', monthly: MONTHLY, live: 160, today: '2026-10-28' }).price, 121.4);
+  assert.equal(allTimeHigh({ metal: 'silver', recorded, since: '2025-06-02', monthly: MONTHLY, live: 125, today: '2026-10-28' }).live, true);
+  const history = { highs: { silver: recorded }, monthly: MONTHLY, daily: dailySeries(), since: SINCE };
+  const now = Date.parse('2026-10-31T16:00:00Z');
+  const closed = buildMarketBlock({ spot: { prices: { silver: 125 }, change: {}, source: 'yahoo_finance', marketsClosed: true }, history, now });
+  assert.doesNotMatch(closed, /new record set today/);
+  assert.match(closed, /Silver all-time high: \$121\.40 on Jan 29, 2026/);
+});
+
+test("palladium's line says above when spot is over the published record", () => {
+  const block = buildHistoryBlock({ data: { highs: {}, monthly: MONTHLY, daily: {}, since: {} }, live: { palladium: 3500 }, today: '2026-10-28' });
+  assert.match(block, /Palladium all-time high: \$3,440\.00, set in March 2022, before TroyStack's records\. Spot is 1\.7% above it\./);
+});
