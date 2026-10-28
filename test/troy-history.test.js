@@ -287,3 +287,20 @@ test("palladium's line says above when spot is over the published record", () =>
   const block = buildHistoryBlock({ data: { highs: {}, monthly: MONTHLY, daily: {}, since: {} }, live: { palladium: 3500 }, today: '2026-10-28' });
   assert.match(block, /Palladium all-time high: \$3,440\.00, set in March 2022, before TroyStack's records\. Spot is 1\.7% above it\./);
 });
+
+test('a much lower reading nearby does not vouch for a spike', () => {
+  const rows = [
+    { timestamp: '2026-02-01T15:00:00Z', price: 4000 },
+    { timestamp: '2026-02-01T18:00:00Z', price: 2450 },
+    ...rowsAround('2026-01-20T15:00:00Z', [2460, 2455]),
+  ];
+  assert.deepEqual(confirmedHigh(rows, 'palladium'), { price: 2460, date: '2026-01-20' });
+});
+
+test('a quote the spike guard held back never becomes a record', () => {
+  const history = { highs: { silver: { price: 121.4, date: '2026-01-29' } }, monthly: MONTHLY, daily: dailySeries(), since: SINCE };
+  const now = Date.parse('2026-10-28T20:00:00Z');
+  const block = buildMarketBlock({ spot: { prices: { silver: 125 }, change: {}, source: 'yahoo_finance', spikeRejected: true }, history, now });
+  assert.doesNotMatch(block, /new record set today/);
+  assert.match(block, /Silver all-time high: \$121\.40 on Jan 29, 2026/);
+});

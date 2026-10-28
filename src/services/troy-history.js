@@ -119,7 +119,8 @@ function confirmedHigh(rows, metal) {
     .filter((r) => r.price > 0 && Number.isFinite(r.at) && !skip.includes(r.price))
     .sort((a, b) => b.price - a.price);
   for (const r of usable) {
-    const company = usable.filter((o) => o !== r && Math.abs(o.at - r.at) <= NEIGHBOR_MS).length;
+    // A much lower reading nearby doesn't vouch for a spike.
+    const company = usable.filter((o) => o !== r && Math.abs(o.at - r.at) <= NEIGHBOR_MS && o.price >= r.price * NEAR_SHARE).length;
     if (company >= NEIGHBORS) return { price: r.price, date: nyDate(r.timestamp), ...(r.id != null && { id: r.id }) };
   }
   return null;

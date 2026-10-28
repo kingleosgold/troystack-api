@@ -523,7 +523,10 @@ async function fetchLiveSpotPricesNow(generation) {
       const goldPctChange = prevPrices.gold > 0 ? Math.abs((fetched.gold - prevPrices.gold) / prevPrices.gold) : 0;
       const silverPctChange = prevPrices.silver > 0 ? Math.abs((fetched.silver - prevPrices.silver) / prevPrices.silver) : 0;
 
-      if (goldPctChange > 0.10 || silverPctChange > 0.10) {
+      // The reading is still served, so Troy is told it was held back and
+      // never takes it for a new record (services/troy-history.js).
+      spotPriceCache.spikeRejected = goldPctChange > 0.10 || silverPctChange > 0.10;
+      if (spotPriceCache.spikeRejected) {
         console.log(`   ⚠️ Spike guard: Gold ${(goldPctChange * 100).toFixed(1)}%, Silver ${(silverPctChange * 100).toFixed(1)}% — skipping price_log`);
       } else {
         logPriceToSupabase(spotPriceCache.prices, fetched.source).catch(err => {
@@ -680,6 +683,7 @@ async function getSpotPrices() {
       cacheAgeMinutes: Math.round((cacheAge / 60000) * 10) / 10,
       change: spotPriceCache.change,
       live: spotPriceCache.live,
+      spikeRejected: Boolean(spotPriceCache.spikeRejected),
       marketsClosed,
     };
   }
@@ -695,6 +699,7 @@ async function getSpotPrices() {
     cacheAgeMinutes: 0,
     change: spotPriceCache.change,
     live: spotPriceCache.live,
+    spikeRejected: Boolean(spotPriceCache.spikeRejected),
     marketsClosed: spotPriceCache.marketsClosed,
   };
 }
