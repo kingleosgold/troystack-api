@@ -236,6 +236,7 @@ test('a record whose neighbors have left the top rows is checked in its own wind
         gte(col, v) { q.filters[`gte:${col}`] = v; return chain; },
         lte(col, v) { q.filters[`lte:${col}`] = v; return chain; },
         neq(col, v) { q.filters[`neq:${col}`] = v; return chain; },
+        not(col, op, v) { q.filters[`not:${col}:${op}`] = v; return chain; },
         order(col) { q.order = col; return chain; },
         limit() {
           if (q.order) return Promise.resolve({ data: q.order === 'silver_price' ? top : [], error: null });
@@ -336,4 +337,32 @@ test("a spike over the record Troy has stays out of every range, even an unknown
   });
   assert.doesNotMatch(block, /\$5,000/);
   assert.match(block, /Platinum, all time: TroyStack's records start Jun 3, 2025 at \$1,500\.00\./);
+});
+
+test('a placeholder never vouches for a platinum record in its window', async () => {
+  const windows = [];
+  const top = [{ id: 1, timestamp: '2025-07-01T15:00:00Z', platinum_price: 2450 }];
+  const db = {
+    from() {
+      const q = { filters: {} };
+      const chain = {
+        select() { return chain; },
+        gt() { return chain; },
+        gte(col, v) { q.filters[`gte:${col}`] = v; return chain; },
+        lte() { return chain; },
+        neq() { return chain; },
+        not(col, op, v) { q.filters[`not:${col}:${op}`] = v; return chain; },
+        order(col) { q.order = col; return chain; },
+        limit() {
+          if (q.order) return Promise.resolve({ data: q.order === 'platinum_price' ? top : [], error: null });
+          windows.push(q.filters);
+          return Promise.resolve({ data: [], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+  const highs = await readHighs({ db });
+  assert.equal(highs.platinum, null);
+  assert.equal(windows[0]['not:platinum_price:in'], '(2700)');
 });

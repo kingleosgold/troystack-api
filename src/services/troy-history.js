@@ -320,14 +320,16 @@ async function readHighs({ db }) {
       if (highs[metal] && highs[metal].price >= Number(r.price)) break;
       const at = new Date(r.timestamp).getTime();
       if (!Number.isFinite(at)) continue;
-      const { data: near, error: nearErr } = await db
+      let nearQuery = db
         .from('price_log')
         .select('id')
         .gte('timestamp', new Date(at - NEIGHBOR_MS).toISOString())
         .lte('timestamp', new Date(at + NEIGHBOR_MS).toISOString())
         .gte(column, Number(r.price) * NEAR_SHARE)
-        .neq('id', r.id)
-        .limit(1);
+        .neq('id', r.id);
+      // A placeholder never vouches for a reading, here or in the top rows.
+      if (skip.length) nearQuery = nearQuery.not(column, 'in', `(${skip.join(',')})`);
+      const { data: near, error: nearErr } = await nearQuery.limit(1);
       if (nearErr) throw new Error(`${metal} high check failed: ${nearErr.message}`);
       if (near && near.length) {
         highs[metal] = { price: Number(r.price), date: nyDate(r.timestamp), ...(r.id != null && { id: r.id }), ...(near[0].id != null && { neighborId: near[0].id }) };
