@@ -200,18 +200,14 @@ function yearsBefore(today, years) {
  */
 function rangeLine(metal, range, { series, today, live, ath, since }) {
   const start = yearsBefore(today, range.years);
-  // A reading over a known record is one the record check threw out, so it
-  // can neither open a range nor top one.
-  const cap = ath && ath.known ? ath.price : Infinity;
-  const valid = series.filter((p) => p.price <= cap);
-  const first = valid[0];
+  const first = series[0];
   // The range has to reach back to its start, with a reading close to it.
-  const opening = valid.filter((p) => p.date <= start).pop();
+  const opening = series.filter((p) => p.date <= start).pop();
   const lead = `${name(metal)}, ${range.label}:`;
   if (!first || !opening || (!opening.month && new Date(start) - new Date(opening.date) > 7 * DAY_MS)) {
     return since ? `${lead} not in TroyStack's records, which start ${dayLabel(since)} for ${metal}.` : `${lead} not in TroyStack's records.`;
   }
-  const inside = valid.filter((p) => p.date > start);
+  const inside = series.filter((p) => p.date > start);
   const all = [opening, ...inside];
   let low = all[0];
   let high = all[0];
@@ -269,7 +265,12 @@ function buildHistoryBlock({ data, live = {}, today, promote = true } = {}) {
     const since = data.since?.[metal] || null;
     const spot = Number(live[metal]) > 0 ? Number(live[metal]) : null;
     const ath = allTimeHigh({ metal, recorded: data.highs?.[metal] || null, since, monthly: data.monthly, live: spot, today: promote ? today : null });
-    const series = seriesFor(metal, { monthly: data.monthly, daily: data.daily, since });
+    // A daily reading over the record Troy has, known or only recorded, is
+    // one the record check threw out, so it can't open, top or start a range.
+    // Monthly averages predate the daily records and can sit above them.
+    const top = ath.known && !ath.prior ? ath.price : (ath.recorded ? ath.recorded.price : Infinity);
+    const series = seriesFor(metal, { monthly: data.monthly, daily: data.daily, since })
+      .filter((p) => p.month || p.price <= top);
     lines.push(athLine(metal, ath, spot));
     for (const range of RANGES) lines.push(rangeLine(metal, range, { series, today, live: spot, ath, since }));
     const first = series[0];

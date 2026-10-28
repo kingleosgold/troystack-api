@@ -324,3 +324,16 @@ test('a reading the record check threw out never opens a range either', () => {
   assert.doesNotMatch(block, /\$140/);
   assert.match(block, /Silver, 1 year: started at \$50\.00 \(Oct 27, 2025\)/);
 });
+
+test("a spike over the record Troy has stays out of every range, even an unknown record's", () => {
+  const daily = dailySeries();
+  daily['2025-06-02'] = { ...daily['2025-06-02'], platinum: 5000 };
+  daily['2026-03-01'] = { ...daily['2026-03-01'], platinum: 5000 };
+  const block = buildHistoryBlock({
+    data: { highs: { platinum: { price: 2450, date: '2026-01-20' } }, monthly: MONTHLY, daily, since: SINCE },
+    live: {},
+    today: '2026-10-28',
+  });
+  assert.doesNotMatch(block, /\$5,000/);
+  assert.match(block, /Platinum, all time: TroyStack's records start Jun 3, 2025 at \$1,500\.00\./);
+});
