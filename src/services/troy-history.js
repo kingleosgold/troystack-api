@@ -232,7 +232,9 @@ function rangeLine(metal, range, { series, today, live, ath, since }) {
 function spotVs(record, live) {
   if (!(live > 0)) return '';
   const gap = pct(record, live);
-  return ` Spot is ${Math.abs(gap).toFixed(1)}% ${gap > 0 ? 'above' : 'below'} it.`;
+  if (Math.abs(gap) < 0.05) return ' Spot is at it.';
+  if (gap < 0) return ` Spot is ${Math.abs(gap).toFixed(1)}% below it.`;
+  return ` Spot is ${gap.toFixed(1)}% above it, but that quote isn't confirmed, so it isn't counted as a record. Don't call it a new all-time high.`;
 }
 
 function athLine(metal, ath, live) {

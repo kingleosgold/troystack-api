@@ -523,7 +523,7 @@ async function fetchLiveSpotPricesNow(generation) {
       const goldPctChange = prevPrices.gold > 0 ? Math.abs((fetched.gold - prevPrices.gold) / prevPrices.gold) : 0;
       const silverPctChange = prevPrices.silver > 0 ? Math.abs((fetched.silver - prevPrices.silver) / prevPrices.silver) : 0;
 
-      // The reading is still served, so Troy is told it was held back and
+      // The reading is still served, so Troy is told it isn't confirmed and
       // never takes it for a new record (services/troy-history.js).
       spotPriceCache.spikeRejected = goldPctChange > 0.10 || silverPctChange > 0.10;
       if (spotPriceCache.spikeRejected) {

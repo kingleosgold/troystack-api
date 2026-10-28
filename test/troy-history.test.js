@@ -285,7 +285,7 @@ test('a live jump past the spike guard is not a record, and a closed market sets
 
 test("palladium's line says above when spot is over the published record", () => {
   const block = buildHistoryBlock({ data: { highs: {}, monthly: MONTHLY, daily: {}, since: {} }, live: { palladium: 3500 }, today: '2026-10-28' });
-  assert.match(block, /Palladium all-time high: \$3,440\.00, set in March 2022, before TroyStack's records\. Spot is 1\.7% above it\./);
+  assert.match(block, /Palladium all-time high: \$3,440\.00, set in March 2022, before TroyStack's records\. Spot is 1\.7% above it, but that quote isn't confirmed, so it isn't counted as a record\./);
 });
 
 test('a much lower reading nearby does not vouch for a spike', () => {
@@ -302,5 +302,13 @@ test('a quote the spike guard held back never becomes a record', () => {
   const now = Date.parse('2026-10-28T20:00:00Z');
   const block = buildMarketBlock({ spot: { prices: { silver: 125 }, change: {}, source: 'yahoo_finance', spikeRejected: true }, history, now });
   assert.doesNotMatch(block, /new record set today/);
-  assert.match(block, /Silver all-time high: \$121\.40 on Jan 29, 2026, the highest spot TroyStack has recorded\. Spot is 3\.0% above it\./);
+  assert.match(block, /Silver all-time high: \$121\.40 on Jan 29, 2026, the highest spot TroyStack has recorded\. Spot is 3\.0% above it, but that quote isn't confirmed, so it isn't counted as a record\. Don't call it a new all-time high\./);
+});
+
+test('spot more than 10% over the record, or right at it, reads plainly', () => {
+  const data = { highs: { silver: { price: 121.4, date: '2026-01-29' } }, monthly: MONTHLY, daily: dailySeries(), since: SINCE };
+  const over = buildHistoryBlock({ data, live: { silver: 140 }, today: '2026-10-28' });
+  assert.match(over, /Silver all-time high: \$121\.40 on Jan 29, 2026, the highest spot TroyStack has recorded\. Spot is 15\.3% above it, but that quote isn't confirmed/);
+  const at = buildHistoryBlock({ data, live: { silver: 121.4 }, today: '2026-10-28' });
+  assert.match(at, /the highest spot TroyStack has recorded\. Spot is at it\./);
 });
