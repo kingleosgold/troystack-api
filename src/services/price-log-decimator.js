@@ -17,6 +17,8 @@
  *     deleted — so the "survivor exists" invariant holds at every moment
  *     even though supabase-js can't wrap this in a true transaction.
  *   - Progress is logged every 1000 deletions.
+ *   - The row each metal's all-time high comes from is never deleted, so
+ *     thinning can't lower the record Troy quotes (services/troy-history.js).
  */
 
 const supabase = require('../lib/supabase');
@@ -108,7 +110,7 @@ function pickClosestToMarketClose(rows) {
  * @param {(rows:any[], bucketKey:string|number)=>any} p.pickKeeper
  */
 async function runPass(p) {
-  const { name, level, gte, lt, excludeLevels, bucketKey, pickKeeper } = p;
+  const { name, level, gte, lt, excludeLevels, bucketKey, pickKeeper, keepIds = new Set() } = p;
 
   // ---- candidate count (and safety abort) ----
   let countQ = supabase
@@ -187,7 +189,7 @@ async function runPass(p) {
     if (upErr) throw new Error(`[${name}] update failed for id=${keeper.id}: ${upErr.message}`);
     kept += 1;
     for (const r of bucketRows) {
-      if (r.id !== keeper.id) pendingDeleteIds.push(r.id);
+      if (r.id !== keeper.id && !keepIds.has(r.id)) pendingDeleteIds.push(r.id);
     }
     await flushDeletes(false);
   }
@@ -215,6 +217,9 @@ async function runPass(p) {
 
 async function decimatePriceLog() {
   const startedAt = Date.now();
+  // A pass that can't tell which rows hold the records deletes nothing.
+  const { recordRowIds } = require('./troy-history');
+  const keepIds = new Set(await recordRowIds({ db: supabase }));
 
   // Pass 1: 24h .. 30d → 5-minute buckets
   const pass1 = await runPass({
@@ -225,6 +230,7 @@ async function decimatePriceLog() {
     excludeLevels: [LEVEL_FIVE_MIN, LEVEL_ONE_HOUR, LEVEL_DAILY],
     bucketKey: fiveMinBucketKey,
     pickKeeper: (rows, bucketStartMs) => pickClosestToBucketStart(rows, bucketStartMs),
+    keepIds,
   });
 
   // Pass 2: 30d .. 365d → 1-hour buckets
@@ -236,6 +242,7 @@ async function decimatePriceLog() {
     excludeLevels: [LEVEL_ONE_HOUR, LEVEL_DAILY],
     bucketKey: hourBucketKey,
     pickKeeper: (rows, bucketStartMs) => pickClosestToBucketStart(rows, bucketStartMs),
+    keepIds,
   });
 
   // Pass 3: older than 365d → one row per ET calendar day, closest to 16:00 ET
@@ -247,6 +254,7 @@ async function decimatePriceLog() {
     excludeLevels: [LEVEL_DAILY],
     bucketKey: etDayKey,
     pickKeeper: (rows) => pickClosestToMarketClose(rows),
+    keepIds,
   });
 
   const { count: remaining } = await supabase

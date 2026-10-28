@@ -12,10 +12,12 @@
 //   The ranges use the first reading of each day and the record uses the
 //   highest reading in the table.
 //
-// The record is kept current two ways: price_log logs live spot every minute,
-// so a reread finds a new high, and every question sets live spot against the
-// record, so Troy knows the minute one is broken. Anything the data can't
-// back is left out and Troy is told he doesn't have it.
+// The record is kept current two ways: price_log logs live spot every minute
+// and the record is reread each minute, and every question sets live spot
+// against it, so Troy knows the minute one is broken. The decimator never
+// deletes a record row (services/price-log-decimator.js), so thinning
+// price_log can't lower a record. Anything the data can't back is left out
+// and Troy is told he doesn't have it.
 
 const fs = require('fs');
 const path = require('path');
@@ -25,12 +27,11 @@ const DAY_MS = 86400000;
 
 // A record has to show up in more than one reading. One bad row, like the
 // old $2,700 platinum placeholder scripts/patch-ptpd-outliers.js cleaned up,
-// would otherwise become an all-time high. Price_log keeps hourly rows for a
-// year and one row a day after that, so a real peak always has neighbors
-// within a day and a half.
+// would otherwise become an all-time high. Price_log keeps at least one row a
+// day, so a real peak always has a neighbor within a day and a half.
 const TOP_ROWS = 50;
 const NEIGHBOR_MS = 1.5 * DAY_MS;
-const NEIGHBORS = 2;
+const NEIGHBORS = 1;
 const PLACEHOLDERS = { platinum: [2700], palladium: [2000] };
 
 // The 1980 peaks ran about 30% over their months' averages, so a high
@@ -38,11 +39,12 @@ const PLACEHOLDERS = { platinum: [2700], palladium: [2000] };
 // earlier monthly average by more than that.
 const MONTHLY_MARGIN = 1.35;
 
-// Platinum and palladium have no monthly history before price_log, so their
-// earlier records are the published ones: platinum's March 2008 high and
-// palladium's March 2022 high.
+// Platinum and palladium have no monthly history before price_log. Palladium's
+// published record, March 2022's, stands until TroyStack records a higher
+// one. Platinum's was broken around the turn of 2026, possibly while its
+// price_log readings were frozen (API #15), so no figure is known to be its
+// record and Troy gets only the highest TroyStack has recorded.
 const PRIOR_RECORDS = {
-  platinum: { price: 2290, when: 'March 2008' },
   palladium: { price: 3440, when: 'March 2022' },
 };
 
@@ -108,12 +110,12 @@ function signed(p) {
 function confirmedHigh(rows, metal) {
   const skip = PLACEHOLDERS[metal] || [];
   const usable = (rows || [])
-    .map((r) => ({ timestamp: r.timestamp, price: Number(r.price), at: new Date(r.timestamp).getTime() }))
+    .map((r) => ({ id: r.id, timestamp: r.timestamp, price: Number(r.price), at: new Date(r.timestamp).getTime() }))
     .filter((r) => r.price > 0 && Number.isFinite(r.at) && !skip.includes(r.price))
     .sort((a, b) => b.price - a.price);
   for (const r of usable) {
     const company = usable.filter((o) => o !== r && Math.abs(o.at - r.at) <= NEIGHBOR_MS).length;
-    if (company >= NEIGHBORS) return { price: r.price, date: nyDate(r.timestamp) };
+    if (company >= NEIGHBORS) return { price: r.price, date: nyDate(r.timestamp), ...(r.id != null && { id: r.id }) };
   }
   return null;
 }
@@ -126,15 +128,17 @@ function confirmedHigh(rows, metal) {
  */
 function allTimeHigh({ metal, recorded, since, monthly, live, today }) {
   let high = recorded;
-  // Live spot over the record is a new one, the minute it happens.
-  if (live > 0 && today && (!high || live > high.price)) high = { price: live, date: today, live: true };
+  // Live spot over the record is a new one, the minute it happens. With no
+  // record to beat it's only a reading, not a record.
+  if (high && live > high.price && today) high = { price: live, date: today, live: true };
   const prior = PRIOR_RECORDS[metal];
-  if (!high && !prior) return { metal, known: false, since };
-
   if (prior) {
     if (high && high.price > prior.price) return { metal, known: true, ...high };
     return { metal, known: true, price: prior.price, when: prior.when, prior: true, recorded: high, since };
   }
+  if (!high) return { metal, known: false, since };
+  // No history before price_log and no published record: unknown.
+  if (metal !== 'gold' && metal !== 'silver') return { metal, known: false, since, recorded: high };
 
   // Gold and silver: the highest monthly average before price_log began.
   const startMonth = since ? since.slice(0, 7) : null;
@@ -160,9 +164,10 @@ function seriesFor(metal, { monthly, daily, since }) {
       if (v > 0 && (!startMonth || month < startMonth)) points.push({ date: `${month}-15`, price: v, month });
     }
   }
+  const skip = PLACEHOLDERS[metal] || [];
   for (const [date, d] of Object.entries(daily || {})) {
     const v = Number(d && d[metal]);
-    if (v > 0) points.push({ date, price: v });
+    if (v > 0 && !skip.includes(v)) points.push({ date, price: v });
   }
   return points.sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -209,19 +214,20 @@ function rangeLine(metal, range, { series, today, live, ath, since }) {
 function athLine(metal, ath, live) {
   const n = name(metal);
   const since = ath.since ? dayLabel(ath.since) : null;
+  const sinceText = since ? ` since ${since}` : '';
   if (!ath.known) {
     if (!ath.recorded) return `${n} all-time high: you don't have it.${since ? ` TroyStack's ${metal} records start ${since}.` : ''}`;
     const before = ath.before ? ` Before then you only have monthly averages, which peaked at ${usd(ath.before.price)} in ${monthLabel(ath.before.month)}, and a month's intraday high runs above its average.` : '';
-    return `${n} all-time high: you don't have it. The highest ${metal} TroyStack has recorded since ${since} is ${usd(ath.recorded.price)} on ${dayLabel(ath.recorded.date)}.${before}`;
+    return `${n} all-time high: you don't have it. The highest ${metal} spot TroyStack has recorded${sinceText} is ${usd(ath.recorded.price)} on ${dayLabel(ath.recorded.date)}.${before}`;
   }
   if (ath.prior) {
-    const ours = ath.recorded ? ` The highest TroyStack has recorded since its ${metal} records began ${since} is ${usd(ath.recorded.price)} on ${dayLabel(ath.recorded.date)}.` : '';
+    const ours = ath.recorded ? ` The highest TroyStack has recorded${sinceText} is ${usd(ath.recorded.price)} on ${dayLabel(ath.recorded.date)}.` : '';
     const off = live > 0 ? ` Spot is ${Math.abs(pct(ath.price, live)).toFixed(1)}% below it.` : '';
     return `${n} all-time high: ${usd(ath.price)}, set in ${ath.when}, before TroyStack's records.${ours}${off}`;
   }
-  if (ath.live) return `${n} all-time high: ${usd(ath.price)}, set today by current spot. ${n} is at a new record right now.`;
+  if (ath.live) return `${n} all-time high: ${usd(ath.price)}, current spot, a new record set today.`;
   const off = live > 0 ? ` Spot is ${Math.abs(pct(ath.price, live)).toFixed(1)}% below it.` : '';
-  return `${n} all-time high: ${usd(ath.price)} on ${dayLabel(ath.date)}.${off}`;
+  return `${n} all-time high: ${usd(ath.price)} on ${dayLabel(ath.date)}, the highest spot TroyStack has recorded.${off}`;
 }
 
 /**
@@ -243,39 +249,55 @@ function buildHistoryBlock({ data, live = {}, today } = {}) {
     const first = series[0];
     if (first) lines.push(`${name(metal)}, all time: TroyStack's records start ${pointLabel(first)} at ${usd(first.price)}.`);
   }
-  return `PRICE HISTORY AND RECORDS (spot, USD per oz):\n${lines.join('\n')}\nThese are the only all-time highs and long-range figures you have. Quote them with their dates. A range's figures come from TroyStack's first reading of each day, or a monthly average where it says so, so an intraday high can run above them. Never call a recent or 30 day high the all-time high. When a figure isn't here, say plainly that you don't have it before anything else, and don't estimate it.`;
+  return `PRICE HISTORY AND RECORDS (spot, USD per oz):\n${lines.join('\n')}\nThese are the only all-time highs and long-range figures you have. Quote them with their dates. An all-time high here is the highest spot TroyStack recorded, so call it that if asked, since a market's intraday peak can sit a little above it. A range's figures come from TroyStack's first reading of each day, or a monthly average where it says so, so an intraday high can run above them. Never call a recent or 30 day high the all-time high. When a figure isn't here, say plainly that you don't have it before anything else, and don't estimate it.`;
 }
 
 /**
- * Reads what the block needs. The daily series is the one the history route
- * already keeps cached.
- * @param {{ db: object, getDailyPriceLog: () => Promise<object> }} deps
+ * The daily series and where each metal's records start. The series is the
+ * one the history route already keeps cached.
+ * @param {{ getDailyPriceLog: () => Promise<object> }} deps
  */
-async function readHistory({ db, getDailyPriceLog }) {
+async function readSeries({ getDailyPriceLog }) {
   const daily = (await getDailyPriceLog()) || {};
   const since = {};
   for (const metal of METALS) {
     const days = Object.keys(daily).filter((d) => Number(daily[d] && daily[d][metal]) > 0).sort();
     since[metal] = days[0] || null;
   }
+  return { daily, since, monthly: monthlyHistory() };
+}
+
+/**
+ * Each metal's record row: four small reads, cheap enough to repeat each minute.
+ * @param {{ db: object }} deps
+ */
+async function readHighs({ db }) {
   const highs = {};
   await Promise.all(METALS.map(async (metal) => {
     const column = `${metal}_price`;
     const { data, error } = await db
       .from('price_log')
-      .select(`timestamp, ${column}`)
+      .select(`id, timestamp, ${column}`)
       .gt(column, 0)
       .order(column, { ascending: false })
       .limit(TOP_ROWS);
     if (error) throw new Error(`${metal} high read failed: ${error.message}`);
-    highs[metal] = confirmedHigh((data || []).map((r) => ({ timestamp: r.timestamp, price: r[column] })), metal);
+    highs[metal] = confirmedHigh((data || []).map((r) => ({ id: r.id, timestamp: r.timestamp, price: r[column] })), metal);
   }));
-  return { highs, daily, since, monthly: monthlyHistory() };
+  return highs;
+}
+
+// The ids of the rows the records come from, for the decimator to keep.
+async function recordRowIds({ db }) {
+  const highs = await readHighs({ db });
+  return METALS.map((m) => highs[m] && highs[m].id).filter((id) => id != null);
 }
 
 module.exports = {
   buildHistoryBlock,
-  readHistory,
+  readSeries,
+  readHighs,
+  recordRowIds,
   confirmedHigh,
   allTimeHigh,
   seriesFor,

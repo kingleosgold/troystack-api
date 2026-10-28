@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  buildHistoryBlock, readHistory, confirmedHigh, allTimeHigh, seriesFor, PRIOR_RECORDS,
+  buildHistoryBlock, readSeries, readHighs, recordRowIds, confirmedHigh, allTimeHigh, seriesFor, PRIOR_RECORDS,
 } = require('../src/services/troy-history');
 const { buildMarketBlock, createMarketContext } = require('../src/services/troy-context');
 
@@ -51,6 +51,17 @@ test('the record needs company, so one bad reading is skipped', () => {
   assert.equal(confirmedHigh([{ timestamp: '2026-01-29T15:00:00Z', price: 121.4 }], 'silver'), null);
 });
 
+test('a peak price_log has thinned to one row a day still counts with the next day beside it', () => {
+  // The day after silver's peak crashed, so only the day before is near it.
+  const rows = [
+    { id: 7, timestamp: '2027-02-01T21:00:00Z', price: 140 },
+    { id: 1, timestamp: '2026-01-29T21:00:00Z', price: 121.4 },
+    { id: 2, timestamp: '2026-01-28T21:00:00Z', price: 116.9 },
+    { id: 3, timestamp: '2026-01-27T21:00:00Z', price: 110.2 },
+  ];
+  assert.deepEqual(confirmedHigh(rows, 'silver'), { price: 121.4, date: '2026-01-29', id: 1 });
+});
+
 test('the old platinum placeholder never becomes a record', () => {
   const rows = [...rowsAround('2025-07-01T15:00:00Z', [2700, 2700, 2700]), ...rowsAround('2026-01-20T15:00:00Z', [2450, 2440, 2430])];
   assert.deepEqual(confirmedHigh(rows, 'platinum'), { price: 2450, date: '2026-01-20' });
@@ -66,13 +77,37 @@ test('a recorded high beats the old monthly averages by a clear margin to count'
   assert.equal(close.before.month, '2011-04');
 });
 
-test('platinum and palladium are set against their published records', () => {
+test("palladium is set against its published record and platinum's record is unknown", () => {
   const pd = allTimeHigh({ metal: 'palladium', recorded: { price: 1900, date: '2026-01-20' }, since: '2025-06-02', monthly: MONTHLY });
   assert.equal(pd.prior, true);
   assert.equal(pd.price, PRIOR_RECORDS.palladium.price);
+  const higher = allTimeHigh({ metal: 'palladium', recorded: { price: 3500, date: '2026-01-20' }, since: '2025-06-02', monthly: MONTHLY });
+  assert.deepEqual([higher.known, higher.price], [true, 3500]);
   const pt = allTimeHigh({ metal: 'platinum', recorded: { price: 2450, date: '2026-01-20' }, since: '2025-06-02', monthly: MONTHLY });
-  assert.equal(pt.prior, undefined);
-  assert.equal(pt.price, 2450);
+  assert.equal(pt.known, false);
+  assert.equal(pt.recorded.price, 2450);
+  assert.equal(PRIOR_RECORDS.platinum, undefined);
+});
+
+test('with nothing recorded, live spot is only a reading, never a new record', () => {
+  const ath = allTimeHigh({ metal: 'gold', recorded: null, since: null, monthly: MONTHLY, live: 9000, today: '2026-10-28' });
+  assert.equal(ath.known, false);
+  const block = buildHistoryBlock({ data: { highs: {}, monthly: MONTHLY, daily: {}, since: {} }, live: { gold: 9000, platinum: 1500 }, today: '2026-10-28' });
+  assert.match(block, /Gold all-time high: you don't have it\.\n/);
+  assert.match(block, /Platinum all-time high: you don't have it\.\n/);
+  assert.doesNotMatch(block, /null|undefined|NaN/);
+  assert.doesNotMatch(block, /new record/);
+});
+
+test('platinum with a record but no start date reads cleanly', () => {
+  const block = buildHistoryBlock({ data: { highs: { platinum: { price: 2450, date: '2026-01-20' } }, monthly: MONTHLY, daily: {}, since: {} }, live: {}, today: '2026-10-28' });
+  assert.match(block, /Platinum all-time high: you don't have it\. The highest platinum spot TroyStack has recorded is \$2,450\.00 on Jan 20, 2026\./);
+  assert.doesNotMatch(block, /null|undefined/);
+});
+
+test('the old placeholders stay out of the ranges too', () => {
+  const series = seriesFor('platinum', { monthly: MONTHLY, daily: { '2025-06-02': { platinum: 2700 }, '2025-06-03': { platinum: 1500 } }, since: '2025-06-02' });
+  assert.deepEqual(series.map((p) => p.price), [1500]);
 });
 
 test('live spot over the record is a new record today', () => {
@@ -83,7 +118,7 @@ test('live spot over the record is a new record today', () => {
     live: { gold: 4650.5 },
     today: '2026-10-28',
   });
-  assert.match(block, /Gold all-time high: \$4,650\.50, set today by current spot/);
+  assert.match(block, /Gold all-time high: \$4,650\.50, current spot, a new record set today\./);
 });
 
 test("Jon's question: silver's record, its date and how far spot is below it", () => {
@@ -97,7 +132,8 @@ test("Jon's question: silver's record, its date and how far spot is below it", (
     live: { silver: 60.2, gold: 4400 },
     today: '2026-10-28',
   });
-  assert.match(block, /Silver all-time high: \$121\.40 on Jan 29, 2026\. Spot is 50\.4% below it\./);
+  assert.match(block, /Silver all-time high: \$121\.40 on Jan 29, 2026, the highest spot TroyStack has recorded\. Spot is 50\.4% below it\./);
+  assert.match(block, /a market's intraday peak can sit a little above it/);
   assert.match(block, /Silver, 1 year: started at \$50\.00 \(Oct 28, 2025\), up 20\.4% to now\. Low \$50\.00 \(Oct 28, 2025\), high \$121\.40 \(Jan 29, 2026, the all-time high\)\./);
   assert.match(block, /Silver, 5 years: started at \$23\.40 \(Oct 2021 monthly average\)/);
   assert.match(block, /Silver, all time: TroyStack's records start Jan 1915 monthly average at \$0\.51\./);
@@ -123,7 +159,7 @@ test('monthly averages fill only the months before the daily records', () => {
   assert.equal(seriesFor('platinum', { monthly: MONTHLY, daily: {}, since: null }).length, 0);
 });
 
-test('readHistory asks price_log for each metal highest first and takes the daily series as given', async () => {
+test('readHighs asks price_log for each metal highest first, and readSeries takes the daily series as given', async () => {
   const asked = [];
   const db = {
     from(table) {
@@ -137,7 +173,7 @@ test('readHistory asks price_log for each metal highest first and takes the dail
           asked.push(q);
           const col = q.order[0];
           const rows = col === 'silver_price'
-            ? rowsAround('2026-01-29T15:00:00Z', [121.4, 119.8, 118.2]).map((r) => ({ timestamp: r.timestamp, silver_price: r.price }))
+            ? rowsAround('2026-01-29T15:00:00Z', [121.4, 119.8, 118.2]).map((r, i) => ({ id: 100 + i, timestamp: r.timestamp, silver_price: r.price }))
             : [];
           return Promise.resolve({ data: rows, error: null });
         },
@@ -145,11 +181,13 @@ test('readHistory asks price_log for each metal highest first and takes the dail
       return chain;
     },
   };
-  const data = await readHistory({ db, getDailyPriceLog: async () => ({ '2025-06-02': { gold: 3400, silver: 36, platinum: 0, palladium: 0 } }) });
+  const highs = await readHighs({ db });
   assert.equal(asked.length, 4);
   assert.ok(asked.every((q) => q.table === 'price_log' && q.order[1] === false && q.limit === 50));
-  assert.deepEqual(data.highs.silver, { price: 121.4, date: '2026-01-29' });
-  assert.equal(data.highs.gold, null);
+  assert.deepEqual(highs.silver, { price: 121.4, date: '2026-01-29', id: 100 });
+  assert.equal(highs.gold, null);
+  assert.deepEqual(await recordRowIds({ db }), [100], 'the decimator keeps the record rows');
+  const data = await readSeries({ getDailyPriceLog: async () => ({ '2025-06-02': { gold: 3400, silver: 36, platinum: 0, palladium: 0 } }) });
   assert.deepEqual(data.since, { gold: '2025-06-02', silver: '2025-06-02', platinum: null, palladium: null });
   assert.ok(Object.keys(data.monthly).length > 1000, 'the monthly file is read');
 });
@@ -161,7 +199,7 @@ test('the market block carries the history and sets only live spot against the r
   assert.match(live, /PRICE HISTORY AND RECORDS/);
   assert.match(live, /Spot is 50\.4% below it/);
   const stale = buildMarketBlock({ spot: { prices: { silver: 200 }, change: {}, source: 'cached-fallback' }, history, now });
-  assert.match(stale, /Silver all-time high: \$121\.40 on Jan 29, 2026\.\n/);
+  assert.match(stale, /Silver all-time high: \$121\.40 on Jan 29, 2026, the highest spot TroyStack has recorded\.\n/);
   assert.doesNotMatch(stale, /set today/);
 });
 
@@ -171,7 +209,8 @@ test('the shared context reads history once and keeps it', async () => {
   const ctx = createMarketContext({
     fetchSpot: async () => ({ prices: { silver: 60.2 }, change: {}, source: 'yahoo_finance' }),
     db,
-    readHistory: async () => { reads++; return { highs: { silver: { price: 121.4, date: '2026-01-29' } }, monthly: MONTHLY, daily: dailySeries(), since: SINCE }; },
+    readHistory: async () => { reads++; return { monthly: MONTHLY, daily: dailySeries(), since: SINCE }; },
+    readRecords: async () => ({ silver: { price: 121.4, date: '2026-01-29' } }),
     now: () => Date.parse('2026-10-28T20:00:00Z'),
   });
   const first = await ctx();
