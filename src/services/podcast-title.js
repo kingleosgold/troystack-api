@@ -57,7 +57,8 @@ const NUMBER_WORDS = {
   eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12, thirteenth: 13,
   fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17,
   eighteenth: 18, nineteenth: 19, twentieth: 20,
-  half: 0.5, quarter: 0.25,
+  half: 0.5, quarter: 0.25, dozen: 12,
+  thousand: 1e3, million: 1e6, billion: 1e9, trillion: 1e12,
 };
 
 // A number followed by one of these is that many times bigger, so "$2
@@ -89,11 +90,13 @@ function toTitleCase(headline) {
 }
 
 // Every number a piece of text states, as { kind, value }. In the day's
-// notes a dollar amount also counts at its whole-dollar rounding, since gold
-// titles drop the cents ($4,057.10 is $4,057). That rounded entry is marked,
-// so only a dollar amount can match it and "54 Tonnes" never rides on
-// $53.91. In any text a spelled number counts as its digit (a "three-year
-// high" supports "3-Year High"), and million or billion scales the number.
+// notes a gold-sized dollar amount ($1,000 and up) also counts at its
+// whole-dollar rounding, since gold titles drop the cents ($4,057.10 is
+// $4,057). Silver stays to the cent, so "Tops $54" never rides on $53.77.
+// The rounded entry is marked, so only a dollar amount can match it and "54
+// Tonnes" never rides on a price either. In any text a spelled number counts
+// as its digit (a "three-year high" supports "3-Year High"), and million or
+// billion scales the number before it.
 function numbersIn(text, { rounding = true } = {}) {
   const out = [];
   const src = String(text || '');
@@ -103,7 +106,7 @@ function numbersIn(text, { rounding = true } = {}) {
     const value = m[4] ? base * SCALE_WORDS[m[4].trim().toLowerCase()] : base;
     const kind = m[1] ? 'usd' : m[3] ? 'pct' : 'num';
     out.push({ kind, value });
-    if (rounding && kind === 'usd' && !m[4]) out.push({ kind, value: Math.round(value), rounded: true });
+    if (rounding && kind === 'usd' && !m[4] && value >= 1000) out.push({ kind, value: Math.round(value), rounded: true });
   }
   for (const m of src.toLowerCase().matchAll(/\b([a-z]+)\b/g)) {
     if (NUMBER_WORDS[m[1]] !== undefined) out.push({ kind: 'num', value: NUMBER_WORDS[m[1]] });
@@ -141,27 +144,35 @@ function headlineProblems(headline, source, suffix) {
   for (const re of BANNED_WORDS) if (re.test(h)) problems.push(`banned word ${re.source}`);
   for (const word of h.split(/[\s/]+/)) {
     const letters = word.replace(/[^A-Za-z0-9]/g, '');
+    // An acronym the day's notes use themselves (QT, VIX, SPDR) is fine too.
     if (letters.length >= 2 && /[A-Z]/.test(letters) && letters === letters.toUpperCase()
-      && !/^\d+$/.test(letters) && !ACRONYMS.has(letters.replace(/S$/, '')) && !ACRONYMS.has(letters)) {
+      && !/^\d+$/.test(letters) && !ACRONYMS.has(letters.replace(/S$/, '')) && !ACRONYMS.has(letters)
+      && !new RegExp(`\\b${letters}\\b`).test(String(source || ''))) {
       problems.push(`all caps ${word}`);
     }
   }
   // findTakeBreaks reads sentence starts, and a headline joins its clauses
   // with commas, so each clause after a comma or a spaced hyphen is checked
   // as a sentence of its own. A clause opening on an -ing word describes
-  // ("Adding to Today's Gains") and is left out of that pass. findTakeBreaks
-  // also needs metal or a moment after the verb, which a headline drops, so
-  // a clause that opens on the bare order ("Buy Before the Fed"), "a buy" in
-  // any form ("Still a Strong Buy") and "opportunity" are refused on top.
-  // Sell-off, sell orders and buy-side stay reporting.
+  // ("Adding to Today's Gains") and is left out of that pass, unless the word
+  // is buying, selling, stacking, loading, stocking or accumulating.
+  // findTakeBreaks also needs metal or a moment after the verb, which a
+  // headline drops, so these are refused on top: a clause that opens on the
+  // bare order ("Buy Before the Fed"), the reader told what to do ("Stackers
+  // Should Buy"), "a buy" with up to two words between ("a Long-Term Buy"),
+  // and a move called an opportunity, a chance for stackers or an entry
+  // point. Sell-off, sell orders, buy-side, wait-and-see, opportunity cost
+  // and a bank that makes a record buy stay reporting.
   const clauses = h.split(/,\s+|\s+-+\s+|[:;]\s+/);
-  const orderClauses = clauses.filter((c, i) => i === 0 || !/^\w+ing\b/i.test(c));
+  const orderClauses = clauses.filter((c, i) => i === 0
+    || !/^(?!(?:buy|sell|stack|load|stock|accumulat)ing\b)\w+ing\b/i.test(c));
   const breaks = [
     ...findTakeBreaks(h),
     ...findTakeBreaks(orderClauses.join('. ')),
-    ...(orderClauses.some((c) => /^(?:buy|sell|stack|add|load up|stock up|accumulate|wait)\b(?![-\s](?:orders?|off|side)\b)/i.test(c)) ? ['an order to trade'] : []),
-    ...(/\ban? (?:\w+ )?(?:buy|sell)\b(?!-)/i.test(h) ? ['a buy or sell call'] : []),
-    ...(/\bopportunit(?:y|ies)\b/i.test(h) ? ['a move called an opportunity'] : []),
+    ...(orderClauses.some((c) => /^(?:buy|sell|stack|add|load up|stock up|accumulate|wait)\b(?![-\s](?:orders?|off|side)\b|-and-see\b)/i.test(c)) ? ['an order to trade'] : []),
+    ...(/\b(?:you|stackers|holders|investors) (?:should|must|can|need to|ought to)(?: still)? (?:buy|sell|add|stack|wait|accumulate|load up|stock up)\b/i.test(h) ? ['an order to trade'] : []),
+    ...(/(?<!\b(?:makes?|made|making) )\ban? (?:[\w-]+ ){0,2}(?:buy|sell)\b(?!-|\s+orders?\b)/i.test(h) ? ['a buy or sell call'] : []),
+    ...(/\bopportunit(?:y|ies)\b(?!\s+costs?\b)|\ban? (?:\w+ )?chance for (?:stackers|buyers|holders|investors)\b|\bentry points?\b/i.test(h) ? ['a move called an opportunity'] : []),
   ];
   if (breaks.length) problems.push(`trade call ${[...new Set(breaks)].join(', ')}`);
   const supported = numbersIn(source);

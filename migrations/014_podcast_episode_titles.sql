@@ -11,7 +11,10 @@
 --
 -- Runs on the troystack project through the TroyStack connector, on its own
 -- or after the merge. It needs no deploy, and the feed shows the new titles
--- within its 10-minute cache. Re-run safe.
+-- within its 10-minute cache. Re-run safe. Until this PR deploys, the code on
+-- main writes the article's dated title at finalize, so a --force run on one
+-- of these episodes in that window puts its old title back. Hold --force
+-- until the deploy, or rerun this file after one.
 --
 -- No backup table, since every old title is the episode's date and the
 -- rollback rebuilds it from the slug. The rollback gives the colon form, the

@@ -229,7 +229,7 @@ test('teens, scale words and rounded dollars are matched strictly', () => {
   const millions = 'Gold funds added $2 million while gold sat at $4,057.10.';
   assert.ok(headlineProblems('Gold Funds Add $2 Billion as Gold Holds $4,057', millions, SUFFIX).some((p) => p.includes('not in the day')));
   assert.deepStrictEqual(headlineProblems('Gold Funds Add $2 Million as Gold Holds $4,057', millions, SUFFIX), []);
-  // $53.77 rounds to $54 for a price, but a plain 54 isn't a price.
+  // A plain 54 never rides on the $53.77 price, and silver stays to the cent.
   assert.ok(headlineProblems('Central Banks Add 54 Tonnes as Gold Holds $4,057', SOURCE, SUFFIX).some((p) => p.includes('number 54')));
 });
 
@@ -240,4 +240,41 @@ test('chatbot, algorithmic and GenAI are banned, place names ending in ai are no
   for (const headline of ['Shanghai Premiums Lift Gold to $4,057', 'Dubai and Mumbai Demand Keeps Gold at $4,057']) {
     assert.deepStrictEqual(headlineProblems(headline, SOURCE, SUFFIX), [], headline);
   }
+});
+
+test('buying or selling after a comma, should-orders and two-word buys are refused', () => {
+  for (const headline of [
+    'Gold Slides to $4,057, Buying the Dip Before the Fed',
+    'Gold Holds $4,057, Buying Silver Before the Fed',
+    'Stackers Should Buy as Gold Dips to $4,057',
+    'Gold Dips to $4,057, Stackers Should Add',
+    'Silver Is a Long-Term Buy at $53.77',
+    'Silver Is a Very Strong Buy at $53.77',
+    'Gold Dips to $4,057, a Chance for Stackers',
+    "Gold's Dip to $4,057 Offers Stackers an Entry Point",
+  ]) {
+    const problems = headlineProblems(headline, SOURCE, SUFFIX);
+    assert.ok(problems.some((p) => p.startsWith('trade call')), `${headline} -> ${problems.join('; ')}`);
+  }
+});
+
+test('opportunity cost, sell orders, wait-and-see and a record buy stay reporting', () => {
+  for (const headline of [
+    'Gold Slips as Real Yields Raise Opportunity Cost',
+    'Gold Holds $4,057 as a Sell Order Hits COMEX',
+    'PBOC Makes a Record Buy as Gold Holds $4,057',
+    'Wait-and-See Fed Keeps Gold Near $4,057',
+    'Central Banks Could Buy More as Gold Holds $4,057',
+  ]) {
+    assert.deepStrictEqual(headlineProblems(headline, SOURCE, SUFFIX), [], headline);
+  }
+});
+
+test('an acronym the notes use passes, silver stays to the cent, and number words need the notes', () => {
+  const notes = 'Gold held $4,057.10 as QT continued and the VIX jumped.';
+  assert.deepStrictEqual(headlineProblems('QT and a VIX Jump Keep Gold at $4,057', notes, SUFFIX), []);
+  assert.ok(headlineProblems('QT and a VIX Jump Keep Gold at $4,057', SOURCE, SUFFIX).some((p) => p.startsWith('all caps')), 'not in these notes');
+  assert.ok(headlineProblems('Silver Tops $54 as Fed Decision Looms', SOURCE, SUFFIX).some((p) => p.includes('$54')));
+  assert.ok(headlineProblems('Central Banks Buy a Million Ounces as Gold Holds $4,057', SOURCE, SUFFIX).some((p) => p.includes('1000000')));
+  assert.ok(headlineProblems('A Dozen Banks Add Gold as It Holds $4,057', SOURCE, SUFFIX).some((p) => p.includes('number 12')));
 });
