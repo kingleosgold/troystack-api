@@ -20,14 +20,15 @@ const { findTakeBreaks } = require('./take-rules');
 
 const MAX_TITLE_CHARS = 70;
 
-// Whole-word, case-insensitive. "Bot" and "algorithm" read as machine-made
-// copy in a news title; AI is the brand rule.
+// Case-insensitive. "Bot" and "algorithm" read as machine-made copy in a news
+// title; AI is the brand rule, GenAI and OpenAI included. The AI pattern only
+// fires on AI as its own word or after gen/open, so Shanghai, Dubai, Mumbai
+// and Thai pass.
 const BANNED_WORDS = [
-  /\bai\b/i,
-  /\bai-generated\b/i,
+  /(?:\b|gen|open)ai\b/i,
   /artificial intelligence/i,
-  /\bbots?\b/i,
-  /\balgorithms?\b/i,
+  /\b\w*bots?\b/i,
+  /\balgorithm\w*/i,
 ];
 
 // Acronyms a metals headline uses. Any other all-caps word is shouting.
@@ -35,7 +36,7 @@ const ACRONYMS = new Set([
   'COMEX', 'CME', 'LME', 'SGE', 'WGC', 'CPI', 'PPI', 'PCE', 'PMI', 'FOMC', 'GDP',
   'ETF', 'ETFS', 'US', 'USA', 'USD', 'UK', 'EU', 'ECB', 'BOE', 'BOJ', 'PBOC', 'RBI',
   'SNB', 'LBMA', 'SLV', 'GLD', 'OPEC', 'IMF', 'BRICS', 'NFP', 'DXY', 'YTD',
-  'Q1', 'Q2', 'Q3', 'Q4',
+  'Q1', 'Q2', 'Q3', 'Q4', 'SP', 'CFTC', 'SEC', 'QE', 'G7', 'G20', 'TIPS',
 ]);
 
 // Lowercase inside a title unless they start it.
@@ -48,12 +49,20 @@ const SMALL_WORDS = new Set([
 // Hike" in a headline needs the same fact in the notes.
 const NUMBER_WORDS = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
-  nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, thirty: 30,
-  forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
-  hundred: 100, first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6,
-  seventh: 7, eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12,
+  nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14,
+  fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+  twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70,
+  eighty: 80, ninety: 90, hundred: 100,
+  first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7,
+  eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12, thirteenth: 13,
+  fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17,
+  eighteenth: 18, nineteenth: 19, twentieth: 20,
   half: 0.5, quarter: 0.25,
 };
+
+// A number followed by one of these is that many times bigger, so "$2
+// Billion" never matches notes that say "$2 million".
+const SCALE_WORDS = { thousand: 1e3, million: 1e6, billion: 1e9, trillion: 1e12 };
 
 // ' | Oct 28' for the episode's America/New_York date.
 function titleSuffix(publishedAt) {
@@ -81,17 +90,20 @@ function toTitleCase(headline) {
 
 // Every number a piece of text states, as { kind, value }. In the day's
 // notes a dollar amount also counts at its whole-dollar rounding, since gold
-// titles drop the cents ($4,057.10 is $4,057), and in any text a spelled
-// number counts as its digit (a "three-year high" supports "3-Year High").
+// titles drop the cents ($4,057.10 is $4,057). That rounded entry is marked,
+// so only a dollar amount can match it and "54 Tonnes" never rides on
+// $53.91. In any text a spelled number counts as its digit (a "three-year
+// high" supports "3-Year High"), and million or billion scales the number.
 function numbersIn(text, { rounding = true } = {}) {
   const out = [];
   const src = String(text || '');
-  for (const m of src.matchAll(/(\$?)(\d[\d,]*(?:\.\d+)?)(\s*(?:%|percent\b))?/gi)) {
-    const value = Number(m[2].replace(/,/g, ''));
-    if (!Number.isFinite(value)) continue;
+  for (const m of src.matchAll(/(\$?)(\d[\d,]*(?:\.\d+)?)(\s*(?:%|percent\b))?(\s*(?:thousand|million|billion|trillion)\b)?/gi)) {
+    const base = Number(m[2].replace(/,/g, ''));
+    if (!Number.isFinite(base)) continue;
+    const value = m[4] ? base * SCALE_WORDS[m[4].trim().toLowerCase()] : base;
     const kind = m[1] ? 'usd' : m[3] ? 'pct' : 'num';
     out.push({ kind, value });
-    if (rounding && kind === 'usd') out.push({ kind, value: Math.round(value) });
+    if (rounding && kind === 'usd' && !m[4]) out.push({ kind, value: Math.round(value), rounded: true });
   }
   for (const m of src.toLowerCase().matchAll(/\b([a-z]+)\b/g)) {
     if (NUMBER_WORDS[m[1]] !== undefined) out.push({ kind: 'num', value: NUMBER_WORDS[m[1]] });
@@ -124,7 +136,8 @@ function headlineProblems(headline, source, suffix) {
   if (/[{}[\]"\\]/.test(h)) problems.push('stray characters');
   if (h.split(/\s+/).length < 3) problems.push('too short');
   if (h.includes('|')) problems.push('bar');
-  if (/^[a-z]/.test(h)) problems.push('lowercase start');
+  // Only an all-lowercase first word, so a headline can open on iShares.
+  if (/^[a-z][^\sA-Z]*(?:\s|$)/.test(h)) problems.push('lowercase start');
   for (const re of BANNED_WORDS) if (re.test(h)) problems.push(`banned word ${re.source}`);
   for (const word of h.split(/[\s/]+/)) {
     const letters = word.replace(/[^A-Za-z0-9]/g, '');
@@ -135,17 +148,26 @@ function headlineProblems(headline, source, suffix) {
   }
   // findTakeBreaks reads sentence starts, and a headline joins its clauses
   // with commas, so each clause after a comma or a spaced hyphen is checked
-  // as a sentence of its own. "Looks like a buy" has no verb to catch.
+  // as a sentence of its own. A clause opening on an -ing word describes
+  // ("Adding to Today's Gains") and is left out of that pass. findTakeBreaks
+  // also needs metal or a moment after the verb, which a headline drops, so
+  // a clause that opens on the bare order ("Buy Before the Fed"), "a buy" in
+  // any form ("Still a Strong Buy") and "opportunity" are refused on top.
+  // Sell-off, sell orders and buy-side stay reporting.
+  const clauses = h.split(/,\s+|\s+-+\s+|[:;]\s+/);
+  const orderClauses = clauses.filter((c, i) => i === 0 || !/^\w+ing\b/i.test(c));
   const breaks = [
     ...findTakeBreaks(h),
-    ...findTakeBreaks(h.replace(/,\s+|\s+-+\s+/g, '. ')),
-    ...(/\b(?:is|looks like) an? (?:buy|sell)\b/i.test(h) ? ['a buy or sell call'] : []),
+    ...findTakeBreaks(orderClauses.join('. ')),
+    ...(orderClauses.some((c) => /^(?:buy|sell|stack|add|load up|stock up|accumulate|wait)\b(?![-\s](?:orders?|off|side)\b)/i.test(c)) ? ['an order to trade'] : []),
+    ...(/\ban? (?:\w+ )?(?:buy|sell)\b(?!-)/i.test(h) ? ['a buy or sell call'] : []),
+    ...(/\bopportunit(?:y|ies)\b/i.test(h) ? ['a move called an opportunity'] : []),
   ];
   if (breaks.length) problems.push(`trade call ${[...new Set(breaks)].join(', ')}`);
   const supported = numbersIn(source);
   for (const n of numbersIn(h, { rounding: false })) {
     const ok = supported.some((s) => s.kind === n.kind && s.value === n.value)
-      || (n.kind === 'num' && supported.some((s) => s.value === n.value));
+      || (n.kind === 'num' && supported.some((s) => !s.rounded && s.value === n.value));
     if (!ok) problems.push(`number ${n.kind === 'usd' ? '$' : ''}${n.value}${n.kind === 'pct' ? '%' : ''} not in the day's data`);
   }
   return [...new Set(problems)];

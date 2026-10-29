@@ -182,3 +182,62 @@ test('title case covers hyphens and slashes and leaves capitals alone', () => {
   assert.strictEqual(toTitleCase('inflation hits 3-year high'), 'Inflation Hits 3-Year High');
   assert.strictEqual(toTitleCase('iShares silver trust adds ounces'), 'iShares Silver Trust Adds Ounces');
 });
+
+test('an order to trade with no metal named, "a buy" and "opportunity" are refused', () => {
+  for (const headline of [
+    'Buy Before the Fed as Gold Holds $4,057',
+    'Gold Holds $4,057, Buy Before the Fed',
+    'Gold Holds $4,057: Sell Into the Fed',
+    'Stack Before the Fed as Gold Holds $4,057',
+    'Load Up Before the Fed as Gold Holds $4,057',
+    'Silver Is Still a Buy at $53.77',
+    'Silver Remains a Buy at $53.77',
+    'Silver Is a Strong Buy at $53.77',
+    'Gold Dips to $4,057, an Opportunity for Stackers',
+  ]) {
+    const problems = headlineProblems(headline, SOURCE, SUFFIX);
+    assert.ok(problems.some((p) => p.startsWith('trade call')), `${headline} -> ${problems.join('; ')}`);
+  }
+});
+
+test('reporting on buying and selling still passes', () => {
+  const notes = `${SOURCE}\nGold rose to $4,057.10, adding to today's gains, while central banks kept adding gold.`;
+  for (const headline of [
+    'Sell Orders Pile Up as Gold Holds $4,057',
+    'Central Banks Keep Buying as Gold Holds $4,057',
+    'Buying Slows as Gold Holds $4,057',
+    "Gold Rises to $4,057, Adding to Today's Gains",
+    'Central Banks Keep Buying, Adding Gold at $4,057',
+    "Gold's Drop to $4,057 Is a Sell-Off in Paper",
+    'Buy-Side Demand Holds Gold at $4,057',
+  ]) {
+    assert.deepStrictEqual(headlineProblems(headline, notes, SUFFIX), [], headline);
+  }
+});
+
+test('a headline may open on a word like iShares, and market acronyms pass', () => {
+  assert.deepStrictEqual(headlineProblems('iShares Silver Holdings Climb as Gold Holds $4,057', SOURCE, SUFFIX), []);
+  const notes = 'Gold sat at $4,057.10 as the S&P 500 slid and CFTC data showed funds trimming.';
+  assert.deepStrictEqual(headlineProblems('Gold Holds $4,057 as S&P 500 Slides', notes, SUFFIX), []);
+  assert.deepStrictEqual(headlineProblems('CFTC Data Shows Funds Trim Gold at $4,057', notes, SUFFIX), []);
+});
+
+test('teens, scale words and rounded dollars are matched strictly', () => {
+  const teen = 'Gold hit a thirteen-year high at $4,057.10.';
+  assert.deepStrictEqual(headlineProblems('Gold Hits 13-Year High at $4,057', teen, SUFFIX), []);
+  assert.ok(headlineProblems('Gold Posts Thirteenth Record Close at $4,057', SOURCE, SUFFIX).some((p) => p.includes('number 13')));
+  const millions = 'Gold funds added $2 million while gold sat at $4,057.10.';
+  assert.ok(headlineProblems('Gold Funds Add $2 Billion as Gold Holds $4,057', millions, SUFFIX).some((p) => p.includes('not in the day')));
+  assert.deepStrictEqual(headlineProblems('Gold Funds Add $2 Million as Gold Holds $4,057', millions, SUFFIX), []);
+  // $53.77 rounds to $54 for a price, but a plain 54 isn't a price.
+  assert.ok(headlineProblems('Central Banks Add 54 Tonnes as Gold Holds $4,057', SOURCE, SUFFIX).some((p) => p.includes('number 54')));
+});
+
+test('chatbot, algorithmic and GenAI are banned, place names ending in ai are not', () => {
+  for (const headline of ['Chatbot Buzz Lifts Gold to $4,057', 'Algorithmic Selling Hits Gold at $4,057', 'GenAI Demand Lifts Silver to $53.77']) {
+    assert.ok(headlineProblems(headline, SOURCE, SUFFIX).some((p) => p.startsWith('banned word')), headline);
+  }
+  for (const headline of ['Shanghai Premiums Lift Gold to $4,057', 'Dubai and Mumbai Demand Keeps Gold at $4,057']) {
+    assert.deepStrictEqual(headlineProblems(headline, SOURCE, SUFFIX), [], headline);
+  }
+});

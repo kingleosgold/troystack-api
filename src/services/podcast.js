@@ -110,7 +110,9 @@ async function generateEpisode({ date, force = false } = {}) {
   const audioUrl = pub.publicUrl;
 
   let owned = false;
-  // Set only by a force demote: the title the published episode already has.
+  // The title the episode already has, read by a force demote or a stale
+  // claim. A row this function inserts starts with an empty title, so a
+  // crashed first attempt leaves nothing to keep.
   let keptTitle = null;
   // Ownership is bound to this token: every acquisition below writes it, the
   // pre-upload gate re-checks it, and finalize only lands where it matches.
@@ -125,7 +127,10 @@ async function generateEpisode({ date, force = false } = {}) {
     status: 'pending',
     attempt_started_at: new Date().toISOString(),
     attempt_token: myToken,
-    title: article.title,
+    // Empty until finalize writes the episode's title. Pending rows never
+    // reach the feed, and the empty title tells a later stale claim that
+    // there's no title to keep.
+    title: '',
     description: buildEpisodeDescription(article),
     published_at: article.published_at,
   });
@@ -172,10 +177,12 @@ async function generateEpisode({ date, force = false } = {}) {
         .eq('slug', slug)
         .eq('status', 'pending')
         .lt('attempt_started_at', cutoff)
-        .select('slug');
+        .select('slug, title');
       if (claimErr) throw new Error(`stale claim failed: ${claimErr.message}`);
       if (claimed && claimed.length === 1) {
         owned = true;
+        // A crashed --force leaves the published title on its pending row.
+        keptTitle = claimed[0].title || null;
         console.log(`🎙️ [Podcast] ${slug}: claimed expired pending attempt`);
       } else {
         // Complete, or actively pending. Follow-up read is for LOGGING
@@ -197,10 +204,10 @@ async function generateEpisode({ date, force = false } = {}) {
   // (services/podcast-title.js). The row keeps the title next to the episode.
   // A --force only redoes the audio of an episode that's already out, so it
   // keeps the title that episode carries, whether 014 checked it by hand or
-  // it's an older dated one.
+  // it's an older dated one. So does the heal of a --force that crashed.
   let episodeTitle = keptTitle;
   if (episodeTitle) {
-    console.log(`🎙️ [Podcast] ${slug} title kept on --force: ${episodeTitle}`);
+    console.log(`🎙️ [Podcast] ${slug} title kept from the existing episode: ${episodeTitle}`);
   } else {
     const built = await buildEpisodeTitle(article);
     episodeTitle = built.title;
