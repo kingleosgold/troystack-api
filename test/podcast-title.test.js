@@ -278,3 +278,43 @@ test('an acronym the notes use passes, silver stays to the cent, and number word
   assert.ok(headlineProblems('Central Banks Buy a Million Ounces as Gold Holds $4,057', SOURCE, SUFFIX).some((p) => p.includes('1000000')));
   assert.ok(headlineProblems('A Dozen Banks Add Gold as It Holds $4,057', SOURCE, SUFFIX).some((p) => p.includes('number 12')));
 });
+
+test('a good or smart buy, A.I., bold markdown and near-variants of calls are refused', () => {
+  const aiNotes = `${SOURCE}\nAI data-center demand keeps pulling on silver.`;
+  const cases = [
+    ['Silver Makes a Good Buy at $53.77', 'trade call', SOURCE],
+    ['Gold Makes a Smart Buy Before the Fed', 'trade call', SOURCE],
+    ['A.I. Demand Pulls Silver to $53.77', 'banned word', aiNotes],
+    ['A.I.-Driven Demand Lifts Silver to $53.77', 'banned word', SOURCE],
+    ['Gold Holds **$4,057** as Fed Decision Looms', 'stray characters', SOURCE],
+    ['Stackers Should Consider Buying as Gold Holds $4,057', 'trade call', SOURCE],
+    ['Stackers Should Keep Buying as Gold Holds $4,057', 'trade call', SOURCE],
+    ['Stackers Should Be Buying as Gold Holds $4,057', 'trade call', SOURCE],
+    ['Stackers May Want to Add as Gold Holds $4,057', 'trade call', SOURCE],
+    ['Gold Dips to $4,057, Another Chance for Stackers', 'trade call', SOURCE],
+    ['Gold Dips to $4,057, a Window for Stackers', 'trade call', SOURCE],
+    ['Gold Dips to $4,057, a Gift for Stackers', 'trade call', SOURCE],
+    ['Silver Is a Bargain at $53.77', 'trade call', SOURCE],
+    ['Silver at $53.77 Is a Steal', 'trade call', SOURCE],
+  ];
+  for (const [headline, expected, notes] of cases) {
+    const problems = headlineProblems(headline, notes, SUFFIX);
+    assert.ok(problems.some((p) => p.startsWith(expected)), `${headline} -> ${problems.join('; ')}`);
+  }
+});
+
+test('purchase news, the Sell America trade and bargain hunters stay reporting', () => {
+  const notes = `${SOURCE}\nPoland plans to buy 150 tonnes of gold.`;
+  for (const headline of [
+    'Poland Unveils a Plan to Buy 150 Tonnes of Gold',
+    'Fed Fear Sparks a Rush to Sell Paper Gold',
+    'Mints Report a Rush to Buy Silver Coins',
+    'Poland Posts a Record Gold Buy as Gold Holds $4,057',
+    'Sell America Trade Lifts Gold to $4,057',
+    'Bargain Hunters Lift Gold to $4,057',
+    'Fed Window for Cuts Keeps Gold at $4,057',
+    'Investors Can Expect a Volatile Fed Day as Gold Holds $4,057',
+  ]) {
+    assert.deepStrictEqual(headlineProblems(headline, notes, SUFFIX), [], headline);
+  }
+});

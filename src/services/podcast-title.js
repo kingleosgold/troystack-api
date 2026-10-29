@@ -25,7 +25,7 @@ const MAX_TITLE_CHARS = 70;
 // fires on AI as its own word or after gen/open, so Shanghai, Dubai, Mumbai
 // and Thai pass.
 const BANNED_WORDS = [
-  /(?:\b|gen|open)ai\b/i,
+  /(?:\b|gen|open)a\.?i\b/i,
   /artificial intelligence/i,
   /\b\w*bots?\b/i,
   /\balgorithm\w*/i,
@@ -136,7 +136,8 @@ function headlineProblems(headline, source, suffix) {
   if (/[—–]|\s-+\s/.test(h)) problems.push('dash');
   if (/[!?]/.test(h)) problems.push('punctuation');
   // Left over from a broken model reply, like {"headline": "Gold Holds
-  if (/[{}[\]"\\]/.test(h)) problems.push('stray characters');
+  // or markdown bold copied from the notes, like **$4,057**
+  if (/[{}[\]"\\*]/.test(h)) problems.push('stray characters');
   if (h.split(/\s+/).length < 3) problems.push('too short');
   if (h.includes('|')) problems.push('bar');
   // Only an all-lowercase first word, so a headline can open on iShares.
@@ -160,19 +161,20 @@ function headlineProblems(headline, source, suffix) {
   // headline drops, so these are refused on top: a clause that opens on the
   // bare order ("Buy Before the Fed"), the reader told what to do ("Stackers
   // Should Buy"), "a buy" with up to two words between ("a Long-Term Buy"),
-  // and a move called an opportunity, a chance for stackers or an entry
-  // point. Sell-off, sell orders, buy-side, wait-and-see, opportunity cost
-  // and a bank that makes a record buy stay reporting.
+  // and a move called an opportunity, a chance, window or gift for stackers,
+  // an entry point, a bargain or a steal. Sell-off, sell orders, buy-side,
+  // the Sell America trade, wait-and-see, opportunity cost, a record buy and
+  // a plan or rush to buy stay reporting.
   const clauses = h.split(/,\s+|\s+-+\s+|[:;]\s+/);
   const orderClauses = clauses.filter((c, i) => i === 0
     || !/^(?!(?:buy|sell|stack|load|stock|accumulat)ing\b)\w+ing\b/i.test(c));
   const breaks = [
     ...findTakeBreaks(h),
     ...findTakeBreaks(orderClauses.join('. ')),
-    ...(orderClauses.some((c) => /^(?:buy|sell|stack|add|load up|stock up|accumulate|wait)\b(?![-\s](?:orders?|off|side)\b|-and-see\b)/i.test(c)) ? ['an order to trade'] : []),
-    ...(/\b(?:you|stackers|holders|investors) (?:should|must|can|need to|ought to)(?: still)? (?:buy|sell|add|stack|wait|accumulate|load up|stock up)\b/i.test(h) ? ['an order to trade'] : []),
-    ...(/(?<!\b(?:makes?|made|making) )\ban? (?:[\w-]+ ){0,2}(?:buy|sell)\b(?!-|\s+orders?\b)/i.test(h) ? ['a buy or sell call'] : []),
-    ...(/\bopportunit(?:y|ies)\b(?!\s+costs?\b)|\ban? (?:\w+ )?chance for (?:stackers|buyers|holders|investors)\b|\bentry points?\b/i.test(h) ? ['a move called an opportunity'] : []),
+    ...(orderClauses.some((c) => /^(?:buy|sell|stack|add|load up|stock up|accumulate|wait)\b(?![-\s](?:orders?|off|side|america)\b|-and-see\b)/i.test(c)) ? ['an order to trade'] : []),
+    ...(/\b(?:you|stackers|holders|investors) (?:should|must|can|need to|ought to|may want to|might want to)(?: (?:still|also|consider|keep|start|be))* (?:buy|sell|add|stack|wait|accumulate|load up|stock up)(?:ing)?\b/i.test(h) ? ['an order to trade'] : []),
+    ...(/\ban? (?!record\b|(?:plan|rush|deal|bid|move|push|race|scramble)s? to\b)(?:[\w-]+ ){0,2}(?:buy|sell)\b(?!-|\s+orders?\b)/i.test(h) ? ['a buy or sell call'] : []),
+    ...(/\bopportunit(?:y|ies)\b(?!\s+costs?\b)|\b(?:chance|window|gift)s? for (?:stackers|buyers|holders|investors)\b|\bentry points?\b|\ba (?:bargain|steal)\b/i.test(h) ? ['a move called an opportunity'] : []),
   ];
   if (breaks.length) problems.push(`trade call ${[...new Set(breaks)].join(', ')}`);
   const supported = numbersIn(source);
