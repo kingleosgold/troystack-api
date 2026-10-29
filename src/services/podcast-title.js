@@ -32,9 +32,10 @@ const BANNED_WORDS = [
 
 // Acronyms a metals headline uses. Any other all-caps word is shouting.
 const ACRONYMS = new Set([
-  'COMEX', 'CPI', 'PPI', 'PCE', 'FOMC', 'GDP', 'ETF', 'ETFS', 'US', 'USA', 'UK',
-  'EU', 'ECB', 'BOJ', 'PBOC', 'LBMA', 'SLV', 'GLD', 'OPEC', 'IMF', 'BRICS', 'NFP',
-  'DXY', 'YTD', 'Q1', 'Q2', 'Q3', 'Q4',
+  'COMEX', 'CME', 'LME', 'SGE', 'WGC', 'CPI', 'PPI', 'PCE', 'PMI', 'FOMC', 'GDP',
+  'ETF', 'ETFS', 'US', 'USA', 'USD', 'UK', 'EU', 'ECB', 'BOE', 'BOJ', 'PBOC', 'RBI',
+  'SNB', 'LBMA', 'SLV', 'GLD', 'OPEC', 'IMF', 'BRICS', 'NFP', 'DXY', 'YTD',
+  'Q1', 'Q2', 'Q3', 'Q4',
 ]);
 
 // Lowercase inside a title unless they start it.
@@ -43,9 +44,15 @@ const SMALL_WORDS = new Set([
   'or', 'per', 'the', 'to', 'vs', 'via',
 ]);
 
+// Spelled numbers and ordinals, so "Third Straight Day" or "Half-Point
+// Hike" in a headline needs the same fact in the notes.
 const NUMBER_WORDS = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
   nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, thirty: 30,
+  forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+  hundred: 100, first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6,
+  seventh: 7, eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12,
+  half: 0.5, quarter: 0.25,
 };
 
 // ' | Oct 28' for the episode's America/New_York date.
@@ -56,17 +63,18 @@ function titleSuffix(publishedAt) {
   return ` | ${label}`;
 }
 
-// Capitalizes the first letter of each word that isn't a small word, and
-// never lowercases anything, so COMEX, Fed's and $4,057 come through as
-// written.
+// Capitalizes an all-lowercase word, each part of it after a hyphen or a
+// slash too (rate-hike is Rate-Hike, gold/silver is Gold/Silver), unless it's
+// a small word inside the title. A word with any capital already is left as
+// written, so COMEX, iShares, Fed's and $4,057 come through unchanged.
 function toTitleCase(headline) {
   return headline
     .split(' ')
     .map((word, i) => {
-      if (!word) return word;
-      const bare = word.toLowerCase().replace(/[^a-z]/g, '');
-      if (i > 0 && SMALL_WORDS.has(bare) && word === word.toLowerCase()) return word;
-      return word.replace(/^([^A-Za-z0-9$]*)([a-z])/, (_, lead, ch) => lead + ch.toUpperCase());
+      if (!word || /[A-Z]/.test(word)) return word;
+      const bare = word.replace(/[^a-z]/g, '');
+      if (i > 0 && SMALL_WORDS.has(bare)) return word;
+      return word.replace(/(^|[-/])([^a-z0-9$]*)([a-z])/g, (_, sep, lead, ch) => sep + lead + ch.toUpperCase());
     })
     .join(' ');
 }
@@ -78,7 +86,7 @@ function toTitleCase(headline) {
 function numbersIn(text, { rounding = true } = {}) {
   const out = [];
   const src = String(text || '');
-  for (const m of src.matchAll(/(\$?)(\d[\d,]*(?:\.\d+)?)(%?)/g)) {
+  for (const m of src.matchAll(/(\$?)(\d[\d,]*(?:\.\d+)?)(\s*(?:%|percent\b))?/gi)) {
     const value = Number(m[2].replace(/,/g, ''));
     if (!Number.isFinite(value)) continue;
     const kind = m[1] ? 'usd' : m[3] ? 'pct' : 'num';
@@ -109,8 +117,12 @@ function headlineProblems(headline, source, suffix) {
   const h = String(headline || '').trim();
   if (!h) return ['empty'];
   if (h.length + suffix.length > MAX_TITLE_CHARS) problems.push(`over ${MAX_TITLE_CHARS} characters with the date`);
-  if (/[—–]/.test(h)) problems.push('dash');
+  // A spaced hyphen stands in for a dash. Hyphens inside words (Rate-Hike) stay.
+  if (/[—–]|\s-+\s/.test(h)) problems.push('dash');
   if (/[!?]/.test(h)) problems.push('punctuation');
+  // Left over from a broken model reply, like {"headline": "Gold Holds
+  if (/[{}[\]"\\]/.test(h)) problems.push('stray characters');
+  if (h.split(/\s+/).length < 3) problems.push('too short');
   if (h.includes('|')) problems.push('bar');
   if (/^[a-z]/.test(h)) problems.push('lowercase start');
   for (const re of BANNED_WORDS) if (re.test(h)) problems.push(`banned word ${re.source}`);
@@ -121,8 +133,15 @@ function headlineProblems(headline, source, suffix) {
       problems.push(`all caps ${word}`);
     }
   }
-  const breaks = findTakeBreaks(h);
-  if (breaks.length) problems.push(`trade call ${breaks.join(', ')}`);
+  // findTakeBreaks reads sentence starts, and a headline joins its clauses
+  // with commas, so each clause after a comma or a spaced hyphen is checked
+  // as a sentence of its own. "Looks like a buy" has no verb to catch.
+  const breaks = [
+    ...findTakeBreaks(h),
+    ...findTakeBreaks(h.replace(/,\s+|\s+-+\s+/g, '. ')),
+    ...(/\b(?:is|looks like) an? (?:buy|sell)\b/i.test(h) ? ['a buy or sell call'] : []),
+  ];
+  if (breaks.length) problems.push(`trade call ${[...new Set(breaks)].join(', ')}`);
   const supported = numbersIn(source);
   for (const n of numbersIn(h, { rounding: false })) {
     const ok = supported.some((s) => s.kind === n.kind && s.value === n.value)
@@ -173,13 +192,18 @@ async function geminiHeadline(article, { retryNote } = {}) {
     thinking: false,
     timeout: 20000,
   });
+  return parseHeadlineReply(raw);
+}
+
+// The headline from the model's JSON reply. A reply cut off mid-JSON, or
+// null, gives an empty headline and the retry, never the raw text.
+function parseHeadlineReply(raw) {
   const text = String(raw || '').trim();
-  try {
-    return String(JSON.parse(text).headline || '');
-  } catch {
-    const m = text.match(/"headline"\s*:\s*"([^"]*)"/);
-    return m ? m[1] : text;
-  }
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { parsed = undefined; }
+  if (parsed && typeof parsed.headline === 'string') return parsed.headline;
+  const m = text.match(/"headline"\s*:\s*"([^"]*)"/);
+  return m ? m[1] : '';
 }
 
 // The title for one episode. Never throws: a provider error or two rule
@@ -207,6 +231,7 @@ async function buildEpisodeTitle(article, { generate = geminiHeadline } = {}) {
 module.exports = {
   buildEpisodeTitle,
   headlineProblems,
+  parseHeadlineReply,
   fallbackTitle,
   titleSuffix,
   toTitleCase,

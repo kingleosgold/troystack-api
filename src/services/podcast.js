@@ -110,6 +110,8 @@ async function generateEpisode({ date, force = false } = {}) {
   const audioUrl = pub.publicUrl;
 
   let owned = false;
+  // Set only by a force demote: the title the published episode already has.
+  let keptTitle = null;
   // Ownership is bound to this token: every acquisition below writes it, the
   // pre-upload gate re-checks it, and finalize only lands where it matches.
   const myToken = crypto.randomUUID();
@@ -146,9 +148,12 @@ async function generateEpisode({ date, force = false } = {}) {
         .update({ status: 'pending', attempt_started_at: new Date().toISOString(), attempt_token: myToken, audio_bytes: 0, duration_sec: 0 })
         .eq('slug', slug)
         .eq('status', 'complete')
-        .select('slug');
+        .select('slug, title');
       if (demoteErr) throw new Error(`force demote failed: ${demoteErr.message}`);
-      if (demoted && demoted.length === 1) owned = true;
+      if (demoted && demoted.length === 1) {
+        owned = true;
+        keptTitle = demoted[0].title || null;
+      }
       // 0 rows: the row is pending (not complete) — fall through to the
       // stale claim like any plain call.
     }
@@ -190,8 +195,17 @@ async function generateEpisode({ date, force = false } = {}) {
   // this attempt owns the row so overlapping calls never pay for it. It
   // never throws: a rule break or a provider error gets the plain price line
   // (services/podcast-title.js). The row keeps the title next to the episode.
-  const { title: episodeTitle, source: titleSource, problems: titleProblems } = await buildEpisodeTitle(article);
-  console.log(`🎙️ [Podcast] ${slug} title (${titleSource}): ${episodeTitle}${titleProblems.length ? ` [model headline rejected: ${titleProblems.join('; ')}]` : ''}`);
+  // A --force only redoes the audio of an episode that's already out, so it
+  // keeps the title that episode carries, whether 014 checked it by hand or
+  // it's an older dated one.
+  let episodeTitle = keptTitle;
+  if (episodeTitle) {
+    console.log(`🎙️ [Podcast] ${slug} title kept on --force: ${episodeTitle}`);
+  } else {
+    const built = await buildEpisodeTitle(article);
+    episodeTitle = built.title;
+    console.log(`🎙️ [Podcast] ${slug} title (${built.source}): ${episodeTitle}${built.problems.length ? ` [model headline rejected: ${built.problems.join('; ')}]` : ''}`);
+  }
 
   const script = buildEpisodeScript(article);
   const cleanText = sanitizeTTSText(script);

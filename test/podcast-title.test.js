@@ -10,6 +10,7 @@ const assert = require('node:assert');
 const {
   buildEpisodeTitle,
   headlineProblems,
+  parseHeadlineReply,
   fallbackTitle,
   titleSuffix,
   toTitleCase,
@@ -123,4 +124,61 @@ test('a provider error gives the fallback without a second call', async () => {
 test('without stored prices the fallback is the dated title, dash-free', () => {
   const noPrices = { ...ARTICLE, gold_price_at_publish: null, silver_price_at_publish: null, title: 'The Stack Signal — January 31, 1999' };
   assert.strictEqual(fallbackTitle(noPrices, SUFFIX), 'The Stack Signal: January 31, 1999');
+});
+
+test('a trade call after a comma or a spaced hyphen is refused', () => {
+  for (const headline of [
+    'Gold Holds $4,057, Buy Silver Before the Fed',
+    'Silver $53.77, Stack More Now',
+    'Gold Holds $4,057 as Fed Looms, Sell Now',
+    'Gold Holds $4,057, Keep Stacking Silver',
+    'Silver Looks Like a Buy at $53.77',
+  ]) {
+    const problems = headlineProblems(headline, SOURCE, SUFFIX);
+    assert.ok(problems.some((p) => p.startsWith('trade call')), `${headline} -> ${problems.join('; ')}`);
+  }
+  for (const headline of ['Central Banks Keep Buying as Gold Holds $4,057', 'Sell Orders Pile Up as Gold Holds $4,057']) {
+    assert.deepStrictEqual(headlineProblems(headline, SOURCE, SUFFIX), [], `${headline} is reporting, not a call`);
+  }
+});
+
+test('spelled numbers and ordinals need the same fact in the notes', () => {
+  const fourth = headlineProblems('Gold Posts Fourth Weekly Gain at $4,057', SOURCE, SUFFIX);
+  assert.ok(fourth.some((p) => p.includes('number 4')), fourth.join('; '));
+  const half = headlineProblems('Fed Weighs Half-Point Hike as Gold Holds $4,057', SOURCE, SUFFIX);
+  assert.ok(half.some((p) => p.includes('number 0.5')), half.join('; '));
+  const notes = 'Gold fell for a fourth straight day to $4,057.10 after a half-point hike.';
+  assert.deepStrictEqual(headlineProblems('Gold Falls a Fourth Day After Half-Point Hike', notes, SUFFIX), []);
+});
+
+test('a percent written out in the notes supports the % in a headline', () => {
+  const notes = 'Inflation came in at 3.7 percent and gold ended at $4,057.10.';
+  assert.deepStrictEqual(headlineProblems('Gold Whipsaws on 3.7% Inflation Print at $4,057', notes, SUFFIX), []);
+});
+
+test('a spaced hyphen, leftover JSON and a one-word reply are refused', () => {
+  assert.ok(headlineProblems('Gold Holds $4,057 - Fed Decision Looms', SOURCE, SUFFIX).includes('dash'));
+  assert.deepStrictEqual(headlineProblems('Gold Holds $4,057 as Rate-Hike Fears Ease', SOURCE, SUFFIX), [], 'a hyphen inside a word is fine');
+  assert.ok(headlineProblems('{"Headline": "Gold Holds $4,057 as Fed', SOURCE, SUFFIX).includes('stray characters'));
+  assert.ok(headlineProblems('Null', SOURCE, SUFFIX).includes('too short'));
+});
+
+test('a broken or null model reply parses to an empty headline', () => {
+  assert.strictEqual(parseHeadlineReply('{"headline": "Gold Holds $4,057 as Fed Decision Looms"}'), 'Gold Holds $4,057 as Fed Decision Looms');
+  assert.strictEqual(parseHeadlineReply('{"headline": "Gold Holds $4,057 as Fed'), '');
+  assert.strictEqual(parseHeadlineReply('null'), '');
+  assert.strictEqual(parseHeadlineReply(''), '');
+  assert.strictEqual(parseHeadlineReply('Sure, here you go {"headline": "Gold Holds $4,057"} hope that helps'), 'Gold Holds $4,057');
+});
+
+test('market acronyms pass the all-caps check', () => {
+  for (const headline of ['CME and LME Stocks Fall as Gold Holds $4,057', 'SGE Premiums and WGC Data Keep Gold at $4,057', 'Weak PMI and a Soft USD Lift Gold to $4,057']) {
+    assert.deepStrictEqual(headlineProblems(headline, SOURCE, SUFFIX), [], headline);
+  }
+});
+
+test('title case covers hyphens and slashes and leaves capitals alone', () => {
+  assert.strictEqual(toTitleCase('rate-hike fears lift the gold/silver ratio'), 'Rate-Hike Fears Lift the Gold/Silver Ratio');
+  assert.strictEqual(toTitleCase('inflation hits 3-year high'), 'Inflation Hits 3-Year High');
+  assert.strictEqual(toTitleCase('iShares silver trust adds ounces'), 'iShares Silver Trust Adds Ounces');
 });

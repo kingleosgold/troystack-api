@@ -14,6 +14,10 @@ require('dotenv').config(); // real env first when present (shell or .env)
 const hasEnv = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
 process.env.SUPABASE_URL ||= 'http://localhost:54321';
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-dummy-service-role-key';
+// Episode titles call Gemini once an attempt owns its row. Without a key the
+// title falls back to the price line, so the integration tests below never
+// pay for a model call, even with a dev .env that has one.
+delete process.env.GEMINI_API_KEY;
 
 const { stripMarkdown, buildEpisodeScript, buildEpisodeDescription, PODCAST_VOICE } = require('../src/services/podcast');
 const { buildFeedXml } = require('../src/routes/podcast');
