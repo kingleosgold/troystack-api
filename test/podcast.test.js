@@ -14,6 +14,10 @@ require('dotenv').config(); // real env first when present (shell or .env)
 const hasEnv = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
 process.env.SUPABASE_URL ||= 'http://localhost:54321';
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= 'test-dummy-service-role-key';
+// Episode titles call Gemini once an attempt owns its row. Without a key the
+// title falls back to the price line, so the integration tests below never
+// pay for a model call, even with a dev .env that has one.
+delete process.env.GEMINI_API_KEY;
 
 const { stripMarkdown, buildEpisodeScript, buildEpisodeDescription, PODCAST_VOICE } = require('../src/services/podcast');
 const { buildFeedXml } = require('../src/routes/podcast');
@@ -70,7 +74,11 @@ test('feed.xml is well-formed with required channel + episode tags', () => {
   assert.strictEqual(ch.title, 'The Stack Signal: Daily Gold & Silver Brief');
   assert.strictEqual(ch['itunes:author'], 'TroyStack');
   assert.strictEqual(ch['itunes:owner']['itunes:email'], 'support@troystack.com');
-  assert.ok(String(ch.description.__cdata).includes("Hosted by Troy, TroyStack's AI market analyst. Episodes are AI-generated daily from live market data."));
+  const channelDesc = String(ch.description.__cdata);
+  assert.ok(channelDesc.startsWith("Troy's daily read on gold, silver and the forces moving them."));
+  assert.ok(channelDesc.endsWith("Troy's voice and scripts are AI-generated."), 'show-level disclosure (Apple guideline 1.11)');
+  assert.ok(!/[—–]/.test(channelDesc), 'no em or en dashes in the show description');
+  assert.ok(!channelDesc.includes('AI market analyst'));
   assert.strictEqual(ch.language, 'en-us');
   assert.strictEqual(String(ch['itunes:explicit']), 'false');
   assert.strictEqual(ch['itunes:category']['@_text'], 'Business');
@@ -79,6 +87,7 @@ test('feed.xml is well-formed with required channel + episode tags', () => {
 
   const item = ch.item;
   assert.strictEqual(item.title, 'The Stack Signal — January 31, 1999');
+  assert.strictEqual(item['itunes:title'], 'The Stack Signal — January 31, 1999', 'itunes:title mirrors the title');
   assert.strictEqual(item.link, 'https://troystack.com/signal/the-stack-signal-1999-01-31');
   assert.strictEqual(item['itunes:author'], 'TroyStack');
   assert.strictEqual(item.enclosure['@_url'], FIXTURE_EPISODES[0].audio_url);
@@ -100,7 +109,9 @@ test('feed show notes carry the article link and the App Store link', () => {
   assert.strictEqual(XMLValidator.validate(xml), true);
   const parsed = new XMLParser({ ignoreAttributes: false, cdataPropName: '__cdata' }).parse(xml);
   const desc = String(parsed.rss.channel.item.description.__cdata);
-  assert.ok(desc.startsWith(FIXTURE_EPISODES[0].description), 'stored description stays first');
+  const header = "The Stack Signal for January 31, 1999. Troy's voice and script are AI-generated.";
+  assert.ok(desc.startsWith(header), 'date line and episode disclosure lead the notes');
+  assert.ok(desc.startsWith(`${header}\n\n${FIXTURE_EPISODES[0].description}`), 'stored description follows the header');
   assert.ok(desc.includes('Read the full Signal: https://troystack.com/signal/the-stack-signal-1999-01-31'));
   assert.ok(desc.includes('https://apps.apple.com/app/apple-store/id6757343766?pt=96487801&ct=podcast&mt=8'));
   assert.ok(!desc.includes('6738029817'), 'the dead App Store id never appears');
@@ -109,7 +120,7 @@ test('feed show notes carry the article link and the App Store link', () => {
 test('show notes still get the footer when the stored description is empty', () => {
   const { showNotes } = require('../src/routes/podcast');
   const notes = showNotes({ slug: 'the-stack-signal-1999-01-31', description: '' });
-  assert.ok(notes.startsWith('Read the full Signal: '));
+  assert.ok(notes.startsWith("Troy's voice and script are AI-generated.\n\nRead the full Signal: "), 'the disclosure stays even without a date or description');
   assert.ok(notes.includes('ct=podcast'));
 });
 

@@ -22,6 +22,7 @@ const grok = require('./voice-providers/grok'); // pinned — see header
 // service is a known wart, accepted to keep sanitization policy single-sourced.
 // No require cycle: troy-chat.js does not require podcast.js.
 const { sanitizeTTSText } = require('../routes/troy-chat');
+const { buildEpisodeTitle } = require('./podcast-title');
 
 const BUCKET = 'troy-podcast';
 const BYTES_PER_SEC = 16000; // 128kbps CBR MP3 — duration estimate for itunes:duration
@@ -94,7 +95,7 @@ async function generateEpisode({ date, force = false } = {}) {
 
   const { data: article, error: artErr } = await supabase
     .from('stack_signal_articles')
-    .select('slug, title, troy_commentary, troy_one_liner, published_at')
+    .select('slug, title, troy_commentary, troy_one_liner, published_at, gold_price_at_publish, silver_price_at_publish')
     .eq('slug', slug)
     .maybeSingle();
   if (artErr) throw new Error(`article lookup failed: ${artErr.message}`);
@@ -109,6 +110,10 @@ async function generateEpisode({ date, force = false } = {}) {
   const audioUrl = pub.publicUrl;
 
   let owned = false;
+  // The title the episode already has, read by a force demote or a stale
+  // claim. A row this function inserts starts with an empty title, so a
+  // crashed first attempt leaves nothing to keep.
+  let keptTitle = null;
   // Ownership is bound to this token: every acquisition below writes it, the
   // pre-upload gate re-checks it, and finalize only lands where it matches.
   const myToken = crypto.randomUUID();
@@ -122,7 +127,10 @@ async function generateEpisode({ date, force = false } = {}) {
     status: 'pending',
     attempt_started_at: new Date().toISOString(),
     attempt_token: myToken,
-    title: article.title,
+    // Empty until finalize writes the episode's title. Pending rows never
+    // reach the feed, and the empty title tells a later stale claim that
+    // there's no title to keep.
+    title: '',
     description: buildEpisodeDescription(article),
     published_at: article.published_at,
   });
@@ -145,9 +153,12 @@ async function generateEpisode({ date, force = false } = {}) {
         .update({ status: 'pending', attempt_started_at: new Date().toISOString(), attempt_token: myToken, audio_bytes: 0, duration_sec: 0 })
         .eq('slug', slug)
         .eq('status', 'complete')
-        .select('slug');
+        .select('slug, title');
       if (demoteErr) throw new Error(`force demote failed: ${demoteErr.message}`);
-      if (demoted && demoted.length === 1) owned = true;
+      if (demoted && demoted.length === 1) {
+        owned = true;
+        keptTitle = demoted[0].title || null;
+      }
       // 0 rows: the row is pending (not complete) — fall through to the
       // stale claim like any plain call.
     }
@@ -166,10 +177,12 @@ async function generateEpisode({ date, force = false } = {}) {
         .eq('slug', slug)
         .eq('status', 'pending')
         .lt('attempt_started_at', cutoff)
-        .select('slug');
+        .select('slug, title');
       if (claimErr) throw new Error(`stale claim failed: ${claimErr.message}`);
       if (claimed && claimed.length === 1) {
         owned = true;
+        // A crashed --force leaves the published title on its pending row.
+        keptTitle = claimed[0].title || null;
         console.log(`🎙️ [Podcast] ${slug}: claimed expired pending attempt`);
       } else {
         // Complete, or actively pending. Follow-up read is for LOGGING
@@ -183,6 +196,22 @@ async function generateEpisode({ date, force = false } = {}) {
         return { skipped: true, reason: why };
       }
     }
+  }
+
+  // The episode's title is the day's news plus its date, written only once
+  // this attempt owns the row so overlapping calls never pay for it. It
+  // never throws: a rule break or a provider error gets the plain price line
+  // (services/podcast-title.js). The row keeps the title next to the episode.
+  // A --force only redoes the audio of an episode that's already out, so it
+  // keeps the title that episode carries, whether 014 checked it by hand or
+  // it's an older dated one. So does the heal of a --force that crashed.
+  let episodeTitle = keptTitle;
+  if (episodeTitle) {
+    console.log(`🎙️ [Podcast] ${slug} title kept from the existing episode: ${episodeTitle}`);
+  } else {
+    const built = await buildEpisodeTitle(article);
+    episodeTitle = built.title;
+    console.log(`🎙️ [Podcast] ${slug} title (${built.source}): ${episodeTitle}${built.problems.length ? ` [model headline rejected: ${built.problems.join('; ')}]` : ''}`);
   }
 
   const script = buildEpisodeScript(article);
@@ -230,7 +259,7 @@ async function generateEpisode({ date, force = false } = {}) {
       audio_url: audioUrl,
       audio_bytes: audioBuffer.length,
       duration_sec: durationSec,
-      title: article.title,
+      title: episodeTitle,
       description: buildEpisodeDescription(article),
       published_at: article.published_at,
     })
