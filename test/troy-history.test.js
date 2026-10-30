@@ -167,6 +167,7 @@ test('readHighs asks price_log for each metal highest first, and readSeries take
       const chain = {
         select(cols) { q.cols = cols; return chain; },
         gt(col, v) { q.filters.push([col, v]); return chain; },
+        not(col, op, v) { q.filters.push([col, op, v]); return chain; },
         order(col, opts) { q.order = [col, opts.ascending]; return chain; },
         limit(n) {
           q.limit = n;
@@ -365,4 +366,39 @@ test('a placeholder never vouches for a platinum record in its window', async ()
   const highs = await readHighs({ db });
   assert.equal(highs.platinum, null);
   assert.equal(windows[0]['not:platinum_price:in'], '(2700)');
+});
+
+test('placeholders filling the top rows never hide the platinum record', async () => {
+  const placeholders = Array.from({ length: 50 }, (_, i) => ({ id: 900 + i, timestamp: '2025-03-01T15:00:00Z', platinum_price: 2700 }));
+  const real = [
+    { id: 1, timestamp: '2025-07-01T15:00:00Z', platinum_price: 2450 },
+    { id: 2, timestamp: '2025-07-01T16:00:00Z', platinum_price: 2440 },
+  ];
+  const tops = [];
+  const db = {
+    from() {
+      const q = { filters: {} };
+      const chain = {
+        select() { return chain; },
+        gt() { return chain; },
+        gte() { return chain; },
+        lte() { return chain; },
+        neq() { return chain; },
+        not(col, op, v) { q.filters[`not:${col}:${op}`] = v; return chain; },
+        order(col) { q.order = col; return chain; },
+        limit() {
+          if (q.order !== 'platinum_price') return Promise.resolve({ data: [], error: null });
+          tops.push(q.filters);
+          // Without the filter the database hands back placeholders only.
+          const data = q.filters['not:platinum_price:in'] === '(2700)' ? real : placeholders;
+          return Promise.resolve({ data, error: null });
+        },
+      };
+      return chain;
+    },
+  };
+  const highs = await readHighs({ db });
+  assert.equal(tops[0]['not:platinum_price:in'], '(2700)');
+  assert.deepEqual(highs.platinum, { price: 2450, date: '2025-07-01', id: 1, neighborId: 2 });
+  assert.deepEqual(await recordRowIds({ db }), [1, 2], 'the decimator keeps the platinum record and its neighbor');
 });

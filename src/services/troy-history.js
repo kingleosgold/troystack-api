@@ -302,10 +302,14 @@ async function readHighs({ db }) {
   const highs = {};
   await Promise.all(METALS.map(async (metal) => {
     const column = `${metal}_price`;
-    const { data, error } = await db
+    const skip = PLACEHOLDERS[metal] || [];
+    // Placeholders go before the limit, or enough of them would fill the top rows.
+    let topQuery = db
       .from('price_log')
       .select(`id, timestamp, ${column}`)
-      .gt(column, 0)
+      .gt(column, 0);
+    if (skip.length) topQuery = topQuery.not(column, 'in', `(${skip.join(',')})`);
+    const { data, error } = await topQuery
       .order(column, { ascending: false })
       .limit(TOP_ROWS);
     if (error) throw new Error(`${metal} high read failed: ${error.message}`);
@@ -314,7 +318,6 @@ async function readHighs({ db }) {
     // Months later a run just under the record can fill the top rows, leaving
     // the record's thinned-out neighbors outside them. The highest rows are
     // then checked against their own day and a half instead.
-    const skip = PLACEHOLDERS[metal] || [];
     const candidates = rows.filter((r) => Number(r.price) > 0 && !skip.includes(Number(r.price))).slice(0, WINDOW_CHECKS);
     for (const r of candidates) {
       if (highs[metal] && highs[metal].price >= Number(r.price)) break;
