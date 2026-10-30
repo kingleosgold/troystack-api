@@ -302,10 +302,14 @@ async function readHighs({ db }) {
   const highs = {};
   await Promise.all(METALS.map(async (metal) => {
     const column = `${metal}_price`;
-    const { data, error } = await db
+    const skip = PLACEHOLDERS[metal] || [];
+    // Placeholders go before the limit, or enough of them would fill the top rows.
+    let topQuery = db
       .from('price_log')
       .select(`id, timestamp, ${column}`)
-      .gt(column, 0)
+      .gt(column, 0);
+    if (skip.length) topQuery = topQuery.not(column, 'in', `(${skip.join(',')})`);
+    const { data, error } = await topQuery
       .order(column, { ascending: false })
       .limit(TOP_ROWS);
     if (error) throw new Error(`${metal} high read failed: ${error.message}`);
@@ -314,20 +318,21 @@ async function readHighs({ db }) {
     // Months later a run just under the record can fill the top rows, leaving
     // the record's thinned-out neighbors outside them. The highest rows are
     // then checked against their own day and a half instead.
-    const skip = PLACEHOLDERS[metal] || [];
     const candidates = rows.filter((r) => Number(r.price) > 0 && !skip.includes(Number(r.price))).slice(0, WINDOW_CHECKS);
     for (const r of candidates) {
       if (highs[metal] && highs[metal].price >= Number(r.price)) break;
       const at = new Date(r.timestamp).getTime();
       if (!Number.isFinite(at)) continue;
-      const { data: near, error: nearErr } = await db
+      let nearQuery = db
         .from('price_log')
         .select('id')
         .gte('timestamp', new Date(at - NEIGHBOR_MS).toISOString())
         .lte('timestamp', new Date(at + NEIGHBOR_MS).toISOString())
         .gte(column, Number(r.price) * NEAR_SHARE)
-        .neq('id', r.id)
-        .limit(1);
+        .neq('id', r.id);
+      // A placeholder never vouches for a reading, here or in the top rows.
+      if (skip.length) nearQuery = nearQuery.not(column, 'in', `(${skip.join(',')})`);
+      const { data: near, error: nearErr } = await nearQuery.limit(1);
       if (nearErr) throw new Error(`${metal} high check failed: ${nearErr.message}`);
       if (near && near.length) {
         highs[metal] = { price: Number(r.price), date: nyDate(r.timestamp), ...(r.id != null && { id: r.id }), ...(near[0].id != null && { neighborId: near[0].id }) };
