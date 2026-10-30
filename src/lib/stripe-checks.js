@@ -19,6 +19,9 @@
 //   a one-time price on a Gold product.
 
 const SITE_ORIGINS = [
+  'https://troystack.com',
+  'https://www.troystack.com',
+  'https://app.troystack.com',
   'https://troystack.ai',
   'https://www.troystack.ai',
   'https://app.stacktrackergold.com',

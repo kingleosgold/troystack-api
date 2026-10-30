@@ -12,9 +12,13 @@ test('redirects stay on TroyStack sites', () => {
     safeRedirect('https://troystack-webapp-git-feat-x-jon-5842s-projects.vercel.app/settings', FALLBACK),
     'https://troystack-webapp-git-feat-x-jon-5842s-projects.vercel.app/settings',
   );
+  for (const site of ['https://troystack.com', 'https://www.troystack.com', 'https://app.troystack.com']) {
+    assert.equal(safeRedirect(`${site}/settings?session_id={CHECKOUT_SESSION_ID}`, FALLBACK), `${site}/settings?session_id={CHECKOUT_SESSION_ID}`, `${site} gets checkout back after the domain move`);
+  }
 });
 
 test('redirects to anywhere else fall back', () => {
+  assert.equal(safeRedirect('https://troystack.com.evil.example/', FALLBACK), FALLBACK);
   assert.equal(safeRedirect('https://evil.example/settings', FALLBACK), FALLBACK);
   assert.equal(safeRedirect('https://troystack.ai.evil.example/', FALLBACK), FALLBACK);
   assert.equal(safeRedirect('javascript:alert(1)', FALLBACK), FALLBACK);

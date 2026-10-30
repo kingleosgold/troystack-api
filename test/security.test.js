@@ -91,3 +91,11 @@ test('an origin off the allow-list is refused with 403, not a 500', () => {
   assert.ok(handler.includes("return res.status(403).json({ error: 'Origin not allowed' });"), 'the early error handler answers it');
   assert.ok(src.indexOf('// JSON parse and CORS error handler') < src.indexOf('// Error handler\napp.use((err'), 'before the catch-all 500');
 });
+
+test('troystack.com and its www and app hosts may call the API, so the site works after the domain move', () => {
+  const src = require('node:fs').readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+  const list = src.slice(src.indexOf('const ALLOWED_ORIGINS = ['), src.indexOf('];', src.indexOf('const ALLOWED_ORIGINS = [')));
+  for (const origin of ['https://troystack.com', 'https://www.troystack.com', 'https://app.troystack.com', 'https://troystack.ai', 'https://www.troystack.ai']) {
+    assert.ok(list.includes(`'${origin}',`), `${origin} is allowed`);
+  }
+});
