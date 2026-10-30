@@ -231,6 +231,8 @@ test('on a trading day the reading is the live cache, whatever Friday left', asy
   assert.strictEqual(snap.marketsClosed, false);
   assert.strictEqual(snap.source, 'static-fallback');
   assert.notDeepStrictEqual(snap.prices, FRIDAY.prices);
+  // The visitor route reads this snapshot, so it carries the spike guard's flag.
+  assert.strictEqual(snap.spikeRejected, false);
 });
 
 test('price reads that arrive together share one live fetch', async (t) => {

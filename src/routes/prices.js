@@ -784,3 +784,4 @@ router.get('/composite', async (req, res) => {
 module.exports = router;
 module.exports.buildPriceHistory = buildPriceHistory;
 module.exports.scanDailyPriceLog = scanDailyPriceLog;
+module.exports.getDailyPriceLog = getDailyPriceLog;
