@@ -57,13 +57,16 @@ app.use(helmet({
 }));
 
 // ============================================================
-// CORS — locked to troystack.ai + stacktrackergold.com domains
+// CORS — locked to troystack.com, troystack.ai + stacktrackergold.com domains
 // LLM discovery endpoints allow all origins
 // ============================================================
 const ALLOWED_ORIGINS = [
   'https://stacktrackergold.com',
   'https://app.stacktrackergold.com',
   'https://www.stacktrackergold.com',
+  'https://troystack.com',
+  'https://www.troystack.com',
+  'https://app.troystack.com',
   'https://troystack.ai',
   'https://www.troystack.ai',
   'http://localhost:5173',
@@ -379,7 +382,7 @@ app.listen(PORT, () => {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('🧠 Gemini:', process.env.GEMINI_API_KEY ? 'ENABLED' : 'DISABLED');
   console.log('💳 Stripe:', process.env.STRIPE_SECRET_KEY ? 'ENABLED' : 'DISABLED');
-  console.log('🔒 CORS: Locked to troystack.ai + stacktrackergold.com domains');
+  console.log('🔒 CORS: Locked to troystack.com, troystack.ai + stacktrackergold.com domains');
   console.log('⚡ Rate Limits: Public 100/min, Auth 30/min, Dev tier-based');
 
   // Troy's price history reads all of price_log, longer than a question
