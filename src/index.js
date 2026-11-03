@@ -391,7 +391,11 @@ app.listen(PORT, () => {
 
   // One live check of the Gemini model that replaces 2.5 Flash on 12/1,
   // logged as [GeminiProbe] lines. See services/gemini-probe.js.
-  require('./services/gemini-probe').scheduleCandidateProbe();
+  try {
+    require('./services/gemini-probe').scheduleCandidateProbe();
+  } catch (err) {
+    console.log(`[GeminiProbe] not scheduled: ${err.message}`);
+  }
 
   // ── Intelligence cron: daily at 6:30 AM EST (11:30 UTC) ──
   if (process.env.GEMINI_API_KEY) {

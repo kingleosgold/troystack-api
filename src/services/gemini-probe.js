@@ -97,7 +97,7 @@ function checks(model) {
         },
       },
       judge: (text, finish) => {
-        if (finish !== 'STOP') return 'answer was cut off';
+        if (finish !== 'STOP') return `finish was ${finish}`;
         const v = parseJson(text);
         return Array.isArray(v) && v.length ? null : 'answer is not a JSON array';
       },
@@ -110,11 +110,11 @@ function checks(model) {
         contents: [{ role: 'user', parts: [{ text: 'Write one short line for stackers about this headline: "Silver climbs as industrial demand rises"' }] }],
         system_instruction: { parts: [{ text: 'Reply with one sentence, no quotes.' }] },
         generationConfig: {
-          ...generationConfig(model, { temperature: 0.9, maxOutputTokens: 100 }),
+          ...generationConfig(model, { temperature: 0.5, maxOutputTokens: 100 }),
           ...(thinkingOffConfig(model) ? { thinkingConfig: thinkingOffConfig(model) } : {}),
         },
       },
-      judge: (text, finish) => (finish !== 'STOP' ? 'answer was cut off' : text.trim() ? null : 'empty answer'),
+      judge: (text, finish) => (finish !== 'STOP' ? `finish was ${finish}` : text.trim() ? null : 'empty answer'),
     },
     {
       // The scraper's extraction calls, its own prompt, thinking off at 512
@@ -130,7 +130,7 @@ function checks(model) {
         },
       },
       judge: (text, finish) => {
-        if (finish !== 'STOP') return 'answer was cut off';
+        if (finish !== 'STOP') return `finish was ${finish}`;
         const v = parseJson(text);
         return v && Array.isArray(v.claims) && v.claims.length ? null : 'no claims array';
       },
@@ -163,7 +163,7 @@ function checks(model) {
         system_instruction: { parts: [{ text: 'You are Troy, a plain-spoken precious metals guide. Keep replies short.' }] },
         generationConfig: generationConfig(model, { temperature: 0.7, maxOutputTokens: 8192 }),
       },
-      judge: (text, finish) => (finish !== 'STOP' ? 'answer was cut off' : text.trim() ? null : 'empty answer'),
+      judge: (text, finish) => (finish !== 'STOP' ? `finish was ${finish}` : text.trim() ? null : 'empty answer'),
     },
     {
       // The receipt scanner's request shape, an image plus an extraction

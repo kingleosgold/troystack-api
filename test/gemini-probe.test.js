@@ -39,7 +39,7 @@ function fakePost(answers) {
 
 test('the probe is off without a key, when turned off, or when the candidate is already live', () => {
   assert.strictEqual(probe.probeEnabled({}), false);
-  assert.strictEqual(probe.probeEnabled({ GEMINI_API_KEY: KEY, GEMINI_PROBE: ' OFF ' }), false);
+  assert.strictEqual(probe.probeEnabled({ GEMINI_API_KEY: KEY, GEMINI_PROBE: ' OFF ' }, NOW), false);
   assert.strictEqual(probe.probeEnabled({ GEMINI_API_KEY: KEY, GEMINI_FLASH_MODEL: 'gemini-3.5-flash-lite' }, NOW), false);
   assert.strictEqual(probe.probeEnabled({ GEMINI_API_KEY: KEY }, Date.parse('2026-11-03T12:00:00Z')), true);
 });
