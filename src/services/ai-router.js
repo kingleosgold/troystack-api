@@ -1,6 +1,6 @@
 const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk');
-const { flashModel, proModel, thinkingOffConfig, geminiUrl, responseText } = require('./gemini-models');
+const { flashModel, proModel, thinkingOffConfig, generationConfig, geminiUrl, responseText } = require('./gemini-models');
 
 // ============================================
 // MODEL CONSTANTS
@@ -67,7 +67,7 @@ async function callGemini(model, systemPrompt, userMessage, options = {}) {
 
   const body = {
     contents: [{ role: 'user', parts: [{ text: userMessage }] }],
-    generationConfig: { temperature, maxOutputTokens },
+    generationConfig: generationConfig(model, { temperature, maxOutputTokens }),
   };
 
   if (systemPrompt) {

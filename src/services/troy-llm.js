@@ -13,7 +13,7 @@
 const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk');
 const { claudeTuning } = require('./ai-router');
-const { flashModel, geminiUrl, responseText } = require('./gemini-models');
+const { flashModel, generationConfig, historyContents, geminiUrl, responseText } = require('./gemini-models');
 
 // Read once at load, like the rest of this module's settings. GEMINI_FLASH_MODEL
 // in Railway changes it on the next deploy or restart.
@@ -77,19 +77,10 @@ function claudeSystemBlocks(prompt) {
   return blocks;
 }
 
-// Same mapping troy-chat.js used: user stays user, assistant becomes model,
-// anything else is skipped, and the new message goes last.
+// History mapping lives in gemini-models.js so every Gemini chat sends the
+// same shape, see historyContents.
 function geminiContents(priorMessages, message) {
-  const contents = [];
-  for (const msg of priorMessages) {
-    if (msg.role === 'user') {
-      contents.push({ role: 'user', parts: [{ text: msg.content }] });
-    } else if (msg.role === 'assistant') {
-      contents.push({ role: 'model', parts: [{ text: msg.content }] });
-    }
-  }
-  contents.push({ role: 'user', parts: [{ text: message }] });
-  return contents;
+  return historyContents(priorMessages, message);
 }
 
 // Claude wants alternating turns that open with the user. History can break
@@ -117,7 +108,7 @@ async function askGemini({ prompt, priorMessages, message, env, http }) {
   const resp = await http.post(url, {
     contents: geminiContents(priorMessages, message),
     system_instruction: { parts: [{ text: geminiSystemPrompt(prompt) }] },
-    generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
+    generationConfig: generationConfig(GEMINI_MODEL, { temperature: 0.7, maxOutputTokens: 8192 }),
   }, {
     headers: { 'Content-Type': 'application/json' },
     timeout: GEMINI_TIMEOUT_MS,

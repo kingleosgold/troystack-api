@@ -91,3 +91,53 @@ test('no Gemini model id is written outside gemini-models.js', () => {
   walk(root);
   assert.deepStrictEqual(hits, []);
 });
+
+test('a 3.x model gets no temperature, 2.x keeps the caller\'s', () => {
+  const cfg = { temperature: 0.1, maxOutputTokens: 2048, responseMimeType: 'application/json' };
+  assert.deepStrictEqual(gm.generationConfig('gemini-2.5-flash', cfg), cfg);
+  assert.deepStrictEqual(gm.generationConfig('gemini-3.5-flash-lite', cfg), { maxOutputTokens: 2048, responseMimeType: 'application/json' });
+  assert.deepStrictEqual(gm.generationConfig('gemini-3-pro-preview', { temperature: 0.7 }), {});
+  assert.deepStrictEqual(gm.generationConfig('gemini-flash-latest', cfg), cfg);
+  assert.strictEqual(cfg.temperature, 0.1, 'the caller\'s object is left alone');
+});
+
+test('history skips empty and unknown turns, joins same-side turns and opens on the user', () => {
+  const prior = [
+    { role: 'assistant', content: 'cut off by the 10-message window' },
+    { role: 'user', content: 'Q1' },
+    { role: 'assistant', content: 'A1' },
+    { role: 'assistant', content: '   ' },
+    { role: 'assistant', content: null },
+    { role: 'system', content: 'ignored' },
+    null,
+    { role: 'assistant', content: 'A1 more' },
+    { role: 'user', content: 'Q2 that never got an answer' },
+  ];
+  assert.deepStrictEqual(gm.historyContents(prior, 'Q3'), [
+    { role: 'user', parts: [{ text: 'Q1' }] },
+    { role: 'model', parts: [{ text: 'A1\n\nA1 more' }] },
+    { role: 'user', parts: [{ text: 'Q2 that never got an answer\n\nQ3' }] },
+  ]);
+  assert.deepStrictEqual(gm.historyContents(undefined, 'Hi'), [{ role: 'user', parts: [{ text: 'Hi' }] }]);
+  assert.deepStrictEqual(gm.historyContents([{ role: 'assistant', content: 'only me' }], 'Hi'), [{ role: 'user', parts: [{ text: 'Hi' }] }]);
+});
+
+test('callGemini leaves temperature off for a 3.x model', async () => {
+  process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'gemini-test-key';
+  const axios = require('axios');
+  const { callGemini } = require('../src/services/ai-router');
+  const real = axios.post;
+  const calls = [];
+  axios.post = async (url, body) => {
+    calls.push(body);
+    return { data: { candidates: [{ content: { parts: [{ text: 'ok' }] } }] } };
+  };
+  try {
+    await callGemini('gemini-3.5-flash-lite', 'sys', 'hi', { temperature: 0.2, maxOutputTokens: 100, thinking: false });
+    await callGemini('gemini-2.5-flash', 'sys', 'hi', { temperature: 0.2, maxOutputTokens: 100 });
+  } finally {
+    axios.post = real;
+  }
+  assert.deepStrictEqual(calls[0].generationConfig, { maxOutputTokens: 100, thinkingConfig: { thinkingLevel: 'minimal' } });
+  assert.deepStrictEqual(calls[1].generationConfig, { temperature: 0.2, maxOutputTokens: 100 });
+});

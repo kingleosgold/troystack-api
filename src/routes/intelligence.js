@@ -7,7 +7,7 @@ const { getTopIntelligence } = require('../services/intelligence-scraper');
 const router = express.Router();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const { flashModel, geminiUrl: buildGeminiUrl, responseText: geminiResponseText } = require('../services/gemini-models');
+const { flashModel, generationConfig, historyContents, geminiUrl: buildGeminiUrl, responseText: geminiResponseText } = require('../services/gemini-models');
 const MAX_BRIEFS_PER_DAY = 8;
 
 // ============================================
@@ -27,7 +27,7 @@ async function geminiSearch(prompt, systemPrompt, retries = 3) {
       const body = {
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         tools: [{ google_search: {} }],
-        generationConfig: { temperature: 0.3 },
+        generationConfig: generationConfig(flashModel(), { temperature: 0.3 }),
       };
       if (systemPrompt) {
         body.system_instruction = { parts: [{ text: systemPrompt }] };
@@ -331,7 +331,7 @@ Write Troy's Take: overnight moves and what changed for their stack, connect the
   const geminiResp = await axios.post(geminiUrl, {
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
     system_instruction: { parts: [{ text: systemPrompt }] },
-    generationConfig: { temperature: 0.7, maxOutputTokens: 4096 },
+    generationConfig: generationConfig(flashModel(), { temperature: 0.7, maxOutputTokens: 4096 }),
   }, {
     headers: { 'Content-Type': 'application/json' },
     timeout: 30000,
@@ -444,7 +444,7 @@ Gold/Silver Ratio: ${prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1
   const geminiResp = await axios.post(geminiUrl, {
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
     system_instruction: { parts: [{ text: systemPrompt }] },
-    generationConfig: { temperature: 0.7, maxOutputTokens: 4096, responseMimeType: 'application/json' },
+    generationConfig: generationConfig(flashModel(), { temperature: 0.7, maxOutputTokens: 4096, responseMimeType: 'application/json' }),
   }, {
     headers: { 'Content-Type': 'application/json' },
     timeout: 30000,
@@ -855,23 +855,13 @@ APP GUIDE (when users ask how to do things in the app):
 - Troy: Tap the gold coin button on any tab to talk to Troy.`;
 
     // Build conversation for Gemini
-    const contents = [];
-
     const history = Array.isArray(conversationHistory) ? conversationHistory.slice(-10) : [];
-    for (const msg of history) {
-      if (msg.role === 'user') {
-        contents.push({ role: 'user', parts: [{ text: msg.content }] });
-      } else if (msg.role === 'assistant') {
-        contents.push({ role: 'model', parts: [{ text: msg.content }] });
-      }
-    }
-
-    contents.push({ role: 'user', parts: [{ text: message }] });
+    const contents = historyContents(history, message);
 
     const geminiBody = {
       contents,
       system_instruction: { parts: [{ text: systemPrompt }] },
-      generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
+      generationConfig: generationConfig(flashModel(), { temperature: 0.7, maxOutputTokens: 8192 }),
     };
 
     const geminiUrl = buildGeminiUrl(flashModel(), GEMINI_API_KEY);

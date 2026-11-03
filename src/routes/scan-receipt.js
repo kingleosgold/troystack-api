@@ -4,7 +4,7 @@ const axios = require('axios');
 const router = express.Router();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const { flashModel, geminiUrl: buildGeminiUrl, responseText: geminiResponseText } = require('../services/gemini-models');
+const { flashModel, generationConfig, geminiUrl: buildGeminiUrl, responseText: geminiResponseText } = require('../services/gemini-models');
 
 // POST /v1/scan-receipt
 router.post('/', async (req, res) => {
@@ -77,10 +77,10 @@ If a field is unreadable, use null. Metal must be: gold, silver, platinum, or pa
             }
           ]
         }],
-        generationConfig: {
+        generationConfig: generationConfig(model, {
           temperature: 0.1,
           maxOutputTokens: 2048,
-        }
+        })
       }, {
         headers: { 'Content-Type': 'application/json' },
         timeout: 60000
