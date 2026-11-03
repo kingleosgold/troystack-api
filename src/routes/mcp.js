@@ -24,7 +24,7 @@ const supabase = require('../lib/supabase');
 const { getSpotPrices, getCachedPrices } = require('../services/price-fetcher');
 const { buildPriceHistory } = require('./prices');
 const { callGemini, MODELS } = require('../services/ai-router');
-const { flashModel, generationConfig, geminiUrl: buildGeminiUrl, responseText: geminiResponseText } = require('../services/gemini-models');
+const { flashModel, receiptScanConfig, geminiUrl: buildGeminiUrl, responseText: geminiResponseText } = require('../services/gemini-models');
 const { hashKey } = require('../middleware/api-key-auth');
 const { createDailyBudget } = require('../lib/daily-budget');
 
@@ -453,7 +453,7 @@ If a field is unreadable, use null. Metal must be: gold, silver, platinum, or pa
         { inline_data: { mime_type: 'image/jpeg', data: image_base64 } },
       ],
     }],
-    generationConfig: generationConfig(flashModel(), { temperature: 0.1, maxOutputTokens: 2048 }),
+    generationConfig: receiptScanConfig(flashModel()),
   }, { headers: { 'Content-Type': 'application/json' }, timeout: 60000 });
 
   const responseText = geminiResponseText(geminiResp.data);
