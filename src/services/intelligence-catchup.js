@@ -1,67 +1,135 @@
-// Runs the 11:30 UTC intelligence generation once after a restart that
-// missed it.
+// One intelligence generation per UTC day, and a catch-up after a restart
+// that missed it.
 //
-// The cron lives in the process. A deploy that lands around 11:30 UTC can
-// stop the old instance mid-run, and the new instance starts after the
-// minute has passed, so nothing runs that day and intelligence_briefs stays
-// empty until tomorrow. That happened on 11/3. So when the server starts
-// after 11:30 UTC and today has no briefs, it runs the generation once.
+// The 11:30 UTC cron lives in the process. A deploy around 11:30 can stop
+// the old instance mid-run, and the new instance starts after the minute has
+// passed, so nothing runs that day and intelligence_briefs stays empty until
+// tomorrow. That happened on 11/3.
 //
-// An app_state row claims the day first, so a crash loop or a second
-// replica can't run it again. A server that starts before 11:30 leaves it to
-// its own cron.
+// Two app_state rows keep it to one run a day across restarts and replicas.
+// intelligence_run_<day> is a lease. An instance that inserts it runs the
+// generation. A lease older than LEASE_MS belongs to a run that died, so
+// another instance clears it and claims the day again. A run that inserts no
+// briefs, or throws, gives its lease back. intelligence_done_<day> marks a
+// run that inserted briefs, and nothing runs again that day.
+//
+// The cron and the catch-up both go through runOncePerDay. The catch-up runs
+// a minute after a start that came after 11:30:00 UTC. If another instance
+// holds a fresh lease, it looks again once the lease would have run out.
 
-// The cron fires at 11:30:00 UTC. node-cron checks each second, so a server
-// that starts any later in that minute has already missed it.
-const CRON_SECOND_UTC = (11 * 60 + 30) * 60;
+const CRON_MS_UTC = (11 * 60 + 30) * 60 * 1000;
 const START_DELAY_MS = 60 * 1000;
+const LEASE_MS = 20 * 60 * 1000;
+const UNIQUE_VIOLATION = '23505';
 
-function utcDay(now) {
-  return new Date(now).toISOString().split('T')[0];
+function utcDay(t) {
+  return new Date(t).toISOString().split('T')[0];
 }
 
-function afterCron(now) {
-  const d = new Date(now);
-  return d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds() > CRON_SECOND_UTC;
+// True from 11:30:00.000 UTC. A server that starts in that second or later
+// has missed node-cron's tick for the day.
+function afterCron(t) {
+  const d = new Date(t);
+  const msOfDay = ((d.getUTCHours() * 60 + d.getUTCMinutes()) * 60 + d.getUTCSeconds()) * 1000 + d.getUTCMilliseconds();
+  return msOfDay >= CRON_MS_UTC;
 }
 
-// deps: { supabase, run, log }. run is runIntelligenceGeneration.
-async function catchUpIntelligence({ supabase, run, log = console.log, bootTime = Date.now(), now = Date.now() }) {
-  if (!afterCron(bootTime)) return { ran: false, reason: 'started before the cron' };
-  const today = utcDay(now);
-  // A server started late on day one and checked after midnight UTC would
-  // look at a day whose cron hasn't fired yet.
-  if (today !== utcDay(bootTime)) return { ran: false, reason: 'day changed' };
+function runKey(day) { return `intelligence_run_${day}`; }
+function doneKey(day) { return `intelligence_done_${day}`; }
 
-  const { count, error } = await supabase
-    .from('intelligence_briefs')
-    .select('id', { count: 'exact', head: true })
-    .eq('date', today);
-  if (error) return { ran: false, reason: `count failed: ${error.message}` };
-  if (count > 0) return { ran: false, reason: `${count} briefs already` };
+async function isDone(supabase, day) {
+  const { data, error } = await supabase.from('app_state').select('key').eq('key', doneKey(day)).maybeSingle();
+  if (error) throw new Error(`done check failed: ${error.message}`);
+  return Boolean(data);
+}
 
-  const { error: lockError } = await supabase
-    .from('app_state')
-    .insert({ key: `intelligence_catchup_${today}`, value: JSON.stringify({ claimed_at: new Date(now).toISOString() }) });
-  if (lockError) return { ran: false, reason: 'already claimed today' };
+// Returns { won: true } or { won: false, reason }.
+async function claimDay(supabase, day, now) {
+  const row = () => ({ key: runKey(day), value: JSON.stringify({ claimed_at: new Date(now).toISOString() }) });
+  let { error } = await supabase.from('app_state').insert(row());
+  if (!error) return { won: true };
+  if (error.code !== UNIQUE_VIOLATION) return { won: false, reason: `claim failed: ${error.code || ''} ${error.message}`.trim() };
 
-  log(`🧠 [Intelligence Catch-up] No briefs for ${today} after the 11:30 UTC cron, running it now`);
-  const result = await run();
-  log(`🧠 [Intelligence Catch-up] Done: ${result.briefsInserted} briefs, ${result.vaultInserted}/4 vault`);
+  // Someone holds the day. Clear the lease only if it's stale, then try once
+  // more. A fresh lease is never deleted, so two instances can't both win.
+  const cutoff = new Date(now - LEASE_MS).toISOString();
+  const { error: clearError } = await supabase.from('app_state').delete().eq('key', runKey(day)).lt('updated_at', cutoff);
+  if (clearError) return { won: false, reason: `stale lease clear failed: ${clearError.message}` };
+  ({ error } = await supabase.from('app_state').insert(row()));
+  if (!error) return { won: true };
+  if (error.code === UNIQUE_VIOLATION) return { won: false, reason: 'another run holds today', held: true };
+  return { won: false, reason: `claim failed: ${error.code || ''} ${error.message}`.trim() };
+}
+
+async function releaseDay(supabase, day, log) {
+  const { error } = await supabase.from('app_state').delete().eq('key', runKey(day));
+  if (error) log(`🧠 [Intelligence] Lease release failed: ${error.message}`);
+}
+
+// Runs the generation if today isn't done and this instance wins the lease.
+async function runOncePerDay({ supabase, run, log = console.log, now = Date.now(), who = 'cron' }) {
+  const day = utcDay(now);
+  if (await isDone(supabase, day)) return { ran: false, reason: `${day} already done` };
+  const claim = await claimDay(supabase, day, now);
+  if (!claim.won) return { ran: false, reason: claim.reason, held: Boolean(claim.held) };
+
+  log(`🧠 [Intelligence ${who}] Running for ${day}`);
+  let result;
+  try {
+    result = await run();
+  } catch (err) {
+    await releaseDay(supabase, day, log);
+    throw err;
+  }
+  if (result && result.briefsInserted > 0) {
+    const { error } = await supabase.from('app_state').insert({ key: doneKey(day), value: JSON.stringify({ briefs: result.briefsInserted }) });
+    if (error && error.code !== UNIQUE_VIOLATION) log(`🧠 [Intelligence] Done mark failed: ${error.message}`);
+  } else {
+    await releaseDay(supabase, day, log);
+  }
+  log(`🧠 [Intelligence ${who}] Done: ${result ? result.briefsInserted : 0} briefs`);
   return { ran: true, result };
+}
+
+// The catch-up's check, a minute after start. bootTime decides whether the
+// start missed today's cron.
+async function catchUpIntelligence({ supabase, run, log = console.log, bootTime, now = Date.now() }) {
+  if (!afterCron(bootTime)) return { ran: false, reason: 'started before the cron' };
+  // A server started late on one day and checked after midnight UTC would
+  // look at a day whose cron hasn't fired yet.
+  if (utcDay(now) !== utcDay(bootTime)) return { ran: false, reason: 'day changed' };
+  return runOncePerDay({ supabase, run, log, now, who: 'catch-up' });
 }
 
 function scheduleIntelligenceCatchUp({ delayMs = START_DELAY_MS } = {}) {
   const bootTime = Date.now();
-  const timer = setTimeout(() => {
+  const attempt = (retry) => {
     const supabase = require('../lib/supabase');
     const { runIntelligenceGeneration } = require('../routes/intelligence');
     catchUpIntelligence({ supabase, run: runIntelligenceGeneration, bootTime })
-      .then(r => { if (!r.ran) console.log(`🧠 [Intelligence Catch-up] Skipped: ${r.reason}`); })
-      .catch(err => console.error(`🧠 [Intelligence Catch-up] Failed: ${err.message}`));
-  }, delayMs);
+      .then(r => {
+        if (r.ran) return;
+        console.log(`🧠 [Intelligence catch-up] Skipped: ${r.reason}`);
+        // Another instance held a fresh lease. If that run died, the lease
+        // goes stale, so look once more after it would have run out.
+        if (r.held && !retry) {
+          const t = setTimeout(() => attempt(true), LEASE_MS + 60 * 1000);
+          if (t.unref) t.unref();
+        }
+      })
+      .catch(err => console.error(`🧠 [Intelligence catch-up] Failed: ${err.message}`));
+  };
+  const timer = setTimeout(() => attempt(false), delayMs);
   if (timer.unref) timer.unref();
   return timer;
 }
 
-module.exports = { catchUpIntelligence, scheduleIntelligenceCatchUp, afterCron, utcDay };
+module.exports = {
+  LEASE_MS,
+  afterCron,
+  utcDay,
+  claimDay,
+  runOncePerDay,
+  catchUpIntelligence,
+  scheduleIntelligenceCatchUp,
+};
