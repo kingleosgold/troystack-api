@@ -103,7 +103,8 @@ test('a stale lease from a run that died is taken over', async () => {
 test('a run that inserts nothing or throws gives the day back', async () => {
   const now = T('2026-11-03T11:31:00Z');
   const sb = fakeSupabase({ clock: () => now });
-  await ic.runOncePerDay({ supabase: sb, run: async () => ({ briefsInserted: 0 }), log: quiet, now });
+  const empty = await ic.runOncePerDay({ supabase: sb, run: async () => ({ briefsInserted: 0 }), log: quiet, now });
+  assert.deepStrictEqual([empty.ran, empty.reason, ic.retryable(empty)], [false, 'no briefs inserted', true]);
   assert.deepStrictEqual(Object.keys(sb.table), []);
   await assert.rejects(ic.runOncePerDay({ supabase: sb, run: async () => { throw new Error('gemini down'); }, log: quiet, now }), /gemini down/);
   assert.deepStrictEqual(Object.keys(sb.table), []);

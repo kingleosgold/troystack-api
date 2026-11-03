@@ -86,12 +86,16 @@ async function runOncePerDay({ supabase, run, log = console.log, now = Date.now(
     throw err;
   }
   if (result && result.briefsInserted > 0) {
-    const { error } = await supabase.from('app_state').insert({ key: doneKey(day), value: JSON.stringify({ briefs: result.briefsInserted }) });
+    const { error } = await supabase.from('app_state').insert({ key: doneKey(day), value: { briefs: result.briefsInserted } });
     if (error && error.code !== UNIQUE_VIOLATION) log(`🧠 [Intelligence] Done mark failed: ${error.message}`);
   } else {
     await releaseDay(supabase, day, claim.token, log);
   }
-  log(`🧠 [Intelligence ${who}] Done: ${result ? result.briefsInserted : 0} briefs`);
+  const briefs = result ? result.briefsInserted : 0;
+  log(`🧠 [Intelligence ${who}] Done: ${briefs} briefs`);
+  // A run that inserted nothing, like one where every search failed, gave
+  // the day back and gets the same one retry as a held lease.
+  if (!(briefs > 0)) return { ran: false, reason: 'no briefs inserted', result };
   return { ran: true, result };
 }
 
