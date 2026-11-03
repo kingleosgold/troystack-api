@@ -21,6 +21,7 @@ const CRON_MS_UTC = (11 * 60 + 30) * 60 * 1000;
 const START_DELAY_MS = 60 * 1000;
 const LEASE_MS = 20 * 60 * 1000;
 const UNIQUE_VIOLATION = '23505';
+const crypto = require('node:crypto');
 
 function utcDay(t) {
   return new Date(t).toISOString().split('T')[0];
@@ -44,10 +45,13 @@ async function isDone(supabase, day) {
 }
 
 // Returns { won: true } or { won: false, reason }.
+// The lease's value is a jsonb object with a token, so a run only ever gives
+// back its own lease, never one another instance took over.
 async function claimDay(supabase, day, now) {
-  const row = () => ({ key: runKey(day), value: JSON.stringify({ claimed_at: new Date(now).toISOString() }) });
+  const token = crypto.randomUUID();
+  const row = () => ({ key: runKey(day), value: { claimed_at: new Date(now).toISOString(), token } });
   let { error } = await supabase.from('app_state').insert(row());
-  if (!error) return { won: true };
+  if (!error) return { won: true, token };
   if (error.code !== UNIQUE_VIOLATION) return { won: false, reason: `claim failed: ${error.code || ''} ${error.message}`.trim() };
 
   // Someone holds the day. Clear the lease only if it's stale, then try once
@@ -56,13 +60,13 @@ async function claimDay(supabase, day, now) {
   const { error: clearError } = await supabase.from('app_state').delete().eq('key', runKey(day)).lt('updated_at', cutoff);
   if (clearError) return { won: false, reason: `stale lease clear failed: ${clearError.message}` };
   ({ error } = await supabase.from('app_state').insert(row()));
-  if (!error) return { won: true };
+  if (!error) return { won: true, token };
   if (error.code === UNIQUE_VIOLATION) return { won: false, reason: 'another run holds today', held: true };
   return { won: false, reason: `claim failed: ${error.code || ''} ${error.message}`.trim() };
 }
 
-async function releaseDay(supabase, day, log) {
-  const { error } = await supabase.from('app_state').delete().eq('key', runKey(day));
+async function releaseDay(supabase, day, token, log) {
+  const { error } = await supabase.from('app_state').delete().eq('key', runKey(day)).contains('value', { token });
   if (error) log(`🧠 [Intelligence] Lease release failed: ${error.message}`);
 }
 
@@ -78,14 +82,14 @@ async function runOncePerDay({ supabase, run, log = console.log, now = Date.now(
   try {
     result = await run();
   } catch (err) {
-    await releaseDay(supabase, day, log);
+    await releaseDay(supabase, day, claim.token, log);
     throw err;
   }
   if (result && result.briefsInserted > 0) {
     const { error } = await supabase.from('app_state').insert({ key: doneKey(day), value: JSON.stringify({ briefs: result.briefsInserted }) });
     if (error && error.code !== UNIQUE_VIOLATION) log(`🧠 [Intelligence] Done mark failed: ${error.message}`);
   } else {
-    await releaseDay(supabase, day, log);
+    await releaseDay(supabase, day, claim.token, log);
   }
   log(`🧠 [Intelligence ${who}] Done: ${result ? result.briefsInserted : 0} briefs`);
   return { ran: true, result };
@@ -101,25 +105,56 @@ async function catchUpIntelligence({ supabase, run, log = console.log, bootTime,
   return runOncePerDay({ supabase, run, log, now, who: 'catch-up' });
 }
 
+// Runs attempt() now, and once more after a lease would have run out when
+// it didn't run for any reason other than the day being done or a guard
+// saying it isn't this instance's day. That covers a lease held by a run
+// that may have died, a database error on the check or the claim, and a
+// generation that threw. The retry only fires on the same UTC day.
+function withOneRetry(label, attempt, { retryMs = LEASE_MS + 60 * 1000, setTimer = setTimeout, now = () => Date.now() } = {}) {
+  const firstDay = utcDay(now());
+  const go = (isRetry) => attempt()
+    .then(r => {
+      if (r.ran) return;
+      console.log(`🧠 [Intelligence ${label}] Skipped: ${r.reason}`);
+      if (!isRetry && r.retry) arm();
+    })
+    .catch(err => {
+      console.error(`🧠 [Intelligence ${label}] Failed: ${err.message}`);
+      if (!isRetry) arm();
+    });
+  const arm = () => {
+    const t = setTimer(() => {
+      if (utcDay(now()) !== firstDay) return;
+      go(true);
+    }, retryMs);
+    if (t && t.unref) t.unref();
+  };
+  return go(false);
+}
+
+// Whether a result that didn't run is worth one more look later.
+function retryable(r) {
+  return !r.ran && !/already done|before the cron|day changed/.test(r.reason || '');
+}
+
+function attemptWith(fn) {
+  return () => fn().then(r => ({ ...r, retry: retryable(r) }));
+}
+
+// The 11:30 UTC cron's handler.
+function runCronOncePerDay() {
+  const supabase = require('../lib/supabase');
+  const { runIntelligenceGeneration } = require('../routes/intelligence');
+  return withOneRetry('Cron', attemptWith(() => runOncePerDay({ supabase, run: runIntelligenceGeneration, who: 'Cron' })));
+}
+
 function scheduleIntelligenceCatchUp({ delayMs = START_DELAY_MS } = {}) {
   const bootTime = Date.now();
-  const attempt = (retry) => {
+  const timer = setTimeout(() => {
     const supabase = require('../lib/supabase');
     const { runIntelligenceGeneration } = require('../routes/intelligence');
-    catchUpIntelligence({ supabase, run: runIntelligenceGeneration, bootTime })
-      .then(r => {
-        if (r.ran) return;
-        console.log(`🧠 [Intelligence catch-up] Skipped: ${r.reason}`);
-        // Another instance held a fresh lease. If that run died, the lease
-        // goes stale, so look once more after it would have run out.
-        if (r.held && !retry) {
-          const t = setTimeout(() => attempt(true), LEASE_MS + 60 * 1000);
-          if (t.unref) t.unref();
-        }
-      })
-      .catch(err => console.error(`🧠 [Intelligence catch-up] Failed: ${err.message}`));
-  };
-  const timer = setTimeout(() => attempt(false), delayMs);
+    withOneRetry('catch-up', attemptWith(() => catchUpIntelligence({ supabase, run: runIntelligenceGeneration, bootTime })));
+  }, delayMs);
   if (timer.unref) timer.unref();
   return timer;
 }
@@ -132,4 +167,7 @@ module.exports = {
   runOncePerDay,
   catchUpIntelligence,
   scheduleIntelligenceCatchUp,
+  runCronOncePerDay,
+  withOneRetry,
+  retryable,
 };

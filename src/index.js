@@ -402,12 +402,9 @@ app.listen(PORT, () => {
     cron.schedule('30 11 * * *', async () => {
       console.log(`\n🧠 [Intelligence Cron] Triggered at ${new Date().toISOString()}`);
       try {
-        // One run a day across restarts and replicas, see
-        // services/intelligence-catchup.js.
-        const { runIntelligenceGeneration } = require('./routes/intelligence');
-        const { runOncePerDay } = require('./services/intelligence-catchup');
-        const r = await runOncePerDay({ supabase: require('./lib/supabase'), run: runIntelligenceGeneration, who: 'Cron' });
-        if (!r.ran) console.log(`🧠 [Intelligence Cron] Skipped: ${r.reason}`);
+        // One run a day across restarts and replicas, with one retry when
+        // it couldn't run. See services/intelligence-catchup.js.
+        await require('./services/intelligence-catchup').runCronOncePerDay();
       } catch (err) {
         console.error(`🧠 [Intelligence Cron] Failed:`, err.message);
       }
