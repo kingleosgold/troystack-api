@@ -13,8 +13,11 @@
 const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk');
 const { claudeTuning } = require('./ai-router');
+const { flashModel, geminiUrl } = require('./gemini-models');
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+// Read once at load, like the rest of this module's settings. GEMINI_FLASH_MODEL
+// in Railway changes it on the next deploy or restart.
+const GEMINI_MODEL = flashModel();
 const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-5-5';
 // Sonnet 5.5 thinks before it answers and max_tokens covers both. Low effort
 // keeps that short so chat and voice replies come back fast.
@@ -110,7 +113,7 @@ function claudeMessages(priorMessages, message) {
 }
 
 async function askGemini({ prompt, priorMessages, message, env, http }) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${env.GEMINI_API_KEY}`;
+  const url = geminiUrl(GEMINI_MODEL, env.GEMINI_API_KEY);
   const resp = await http.post(url, {
     contents: geminiContents(priorMessages, message),
     system_instruction: { parts: [{ text: geminiSystemPrompt(prompt) }] },

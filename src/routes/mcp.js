@@ -24,6 +24,7 @@ const supabase = require('../lib/supabase');
 const { getSpotPrices, getCachedPrices } = require('../services/price-fetcher');
 const { buildPriceHistory } = require('./prices');
 const { callGemini, MODELS } = require('../services/ai-router');
+const { flashModel, geminiUrl: buildGeminiUrl, responseText: geminiResponseText } = require('../services/gemini-models');
 const { hashKey } = require('../middleware/api-key-auth');
 const { createDailyBudget } = require('../lib/daily-budget');
 
@@ -444,7 +445,7 @@ Return ONLY valid JSON (no markdown, no explanation):
 
 If a field is unreadable, use null. Metal must be: gold, silver, platinum, or palladium.`;
 
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+  const geminiUrl = buildGeminiUrl(flashModel(), GEMINI_API_KEY);
   const geminiResp = await axios.post(geminiUrl, {
     contents: [{
       parts: [
@@ -455,7 +456,7 @@ If a field is unreadable, use null. Metal must be: gold, silver, platinum, or pa
     generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
   }, { headers: { 'Content-Type': 'application/json' }, timeout: 60000 });
 
-  const responseText = geminiResp.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const responseText = geminiResponseText(geminiResp.data);
   if (!responseText) return { error: 'No response from scanner' };
 
   const jsonMatch = responseText.match(/\{[\s\S]*\}/);

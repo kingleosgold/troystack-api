@@ -7,8 +7,7 @@ const { getTopIntelligence } = require('../services/intelligence-scraper');
 const router = express.Router();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = 'gemini-2.5-flash';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+const { flashModel, geminiUrl: buildGeminiUrl } = require('../services/gemini-models');
 const MAX_BRIEFS_PER_DAY = 8;
 
 // ============================================
@@ -34,7 +33,7 @@ async function geminiSearch(prompt, systemPrompt, retries = 3) {
         body.system_instruction = { parts: [{ text: systemPrompt }] };
       }
 
-      const resp = await axios.post(GEMINI_URL, body, {
+      const resp = await axios.post(buildGeminiUrl(flashModel(), GEMINI_API_KEY), body, {
         headers: { 'Content-Type': 'application/json' },
         timeout: 30000,
       });
@@ -331,7 +330,7 @@ ${newsContext || 'No news available yet today.'}
 
 Write Troy's Take: overnight moves and what changed for their stack, connect the news to their specific holdings, end with one thing to watch today. Under 200 words.`;
 
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const geminiUrl = buildGeminiUrl(flashModel(), GEMINI_API_KEY);
   const geminiResp = await axios.post(geminiUrl, {
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
     system_instruction: { parts: [{ text: systemPrompt }] },
@@ -447,7 +446,7 @@ SPOT PRICES:
 Gold: $${prices.gold}, Silver: $${prices.silver}, Platinum: $${prices.platinum}, Palladium: $${prices.palladium}
 Gold/Silver Ratio: ${prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1) : 'N/A'}`;
 
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const geminiUrl = buildGeminiUrl(flashModel(), GEMINI_API_KEY);
   const geminiResp = await axios.post(geminiUrl, {
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
     system_instruction: { parts: [{ text: systemPrompt }] },
@@ -884,7 +883,7 @@ APP GUIDE (when users ask how to do things in the app):
       generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
     };
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    const geminiUrl = buildGeminiUrl(flashModel(), GEMINI_API_KEY);
     const geminiResp = await axios.post(geminiUrl, geminiBody, {
       headers: { 'Content-Type': 'application/json' },
       timeout: 30000,
