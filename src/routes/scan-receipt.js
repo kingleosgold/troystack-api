@@ -4,7 +4,7 @@ const axios = require('axios');
 const router = express.Router();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const { flashModel, geminiUrl: buildGeminiUrl, responseText: geminiResponseText } = require('../services/gemini-models');
 
 // POST /v1/scan-receipt
 router.post('/', async (req, res) => {
@@ -61,9 +61,10 @@ If a field is unreadable, use null. Metal must be: gold, silver, platinum, or pa
     }
 
     try {
-      console.log('🤖 Calling Gemini 2.5 Flash API...');
+      const model = flashModel();
+      console.log(`🤖 Calling ${model}...`);
 
-      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+      const geminiUrl = buildGeminiUrl(model, GEMINI_API_KEY);
       const geminiResponse = await axios.post(geminiUrl, {
         contents: [{
           parts: [
@@ -85,9 +86,10 @@ If a field is unreadable, use null. Metal must be: gold, silver, platinum, or pa
         timeout: 60000
       });
 
-      if (geminiResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-        responseText = geminiResponse.data.candidates[0].content.parts[0].text;
-        apiSource = 'gemini-2.5-flash';
+      const text = geminiResponseText(geminiResponse.data);
+      if (text) {
+        responseText = text;
+        apiSource = model;
         console.log('✅ Gemini response received');
       } else {
         throw new Error('Invalid Gemini response structure');
