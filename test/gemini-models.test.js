@@ -141,3 +141,24 @@ test('callGemini leaves temperature off for a 3.x model', async () => {
   assert.deepStrictEqual(calls[0].generationConfig, { maxOutputTokens: 100, thinkingConfig: { thinkingLevel: 'minimal' } });
   assert.deepStrictEqual(calls[1].generationConfig, { temperature: 0.2, maxOutputTokens: 100 });
 });
+
+test('a receipt scan turns thinking down and leaves room for a long receipt', () => {
+  assert.deepStrictEqual(gm.receiptScanConfig('gemini-3.5-flash-lite'), {
+    maxOutputTokens: 4096,
+    thinkingConfig: { thinkingLevel: 'minimal' },
+  });
+  assert.deepStrictEqual(gm.receiptScanConfig('gemini-2.5-flash'), {
+    temperature: 0.1,
+    maxOutputTokens: 4096,
+    thinkingConfig: { thinkingBudget: 0 },
+  });
+  // A model the version can't be read from goes without a thinking setting.
+  assert.deepStrictEqual(gm.receiptScanConfig('gemini-flash-latest'), { temperature: 0.1, maxOutputTokens: 4096 });
+  assert.strictEqual(gm.receiptScanConfig(gm.flashModel({})).maxOutputTokens, gm.RECEIPT_MAX_OUTPUT_TOKENS);
+});
+
+test('finishReason reads why the model stopped', () => {
+  assert.strictEqual(gm.finishReason({ candidates: [{ finishReason: 'MAX_TOKENS' }] }), 'MAX_TOKENS');
+  assert.strictEqual(gm.finishReason({ candidates: [] }), null);
+  assert.strictEqual(gm.finishReason(undefined), null);
+});

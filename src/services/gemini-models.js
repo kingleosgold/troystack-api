@@ -62,6 +62,26 @@ function generationConfig(model, config) {
   return out;
 }
 
+// The generationConfig for reading a receipt photo into JSON. Extraction
+// needs no reasoning, and on 3.x Flash thinking is on by default and draws on
+// maxOutputTokens, so a long receipt could run out of room and come back cut
+// off, which the scan reads as no items. So thinking goes to its lowest
+// setting, and the limit is 4096, double the old 2048, which leaves room for
+// a receipt with dozens of lines.
+const RECEIPT_MAX_OUTPUT_TOKENS = 4096;
+
+function receiptScanConfig(model) {
+  const out = generationConfig(model, { temperature: 0.1, maxOutputTokens: RECEIPT_MAX_OUTPUT_TOKENS });
+  const thinkingConfig = thinkingOffConfig(model);
+  if (thinkingConfig) out.thinkingConfig = thinkingConfig;
+  return out;
+}
+
+// Why the model stopped, like STOP or MAX_TOKENS, or null.
+function finishReason(data) {
+  return data?.candidates?.[0]?.finishReason || null;
+}
+
 // Chat history as Gemini contents. A user turn stays user, an assistant turn
 // becomes model and anything else is skipped. Empty turns are skipped, since
 // Gemini refuses a part with no text. Two turns in a row from the same side
@@ -104,6 +124,9 @@ module.exports = {
   majorVersion,
   thinkingOffConfig,
   generationConfig,
+  receiptScanConfig,
+  RECEIPT_MAX_OUTPUT_TOKENS,
+  finishReason,
   historyContents,
   geminiUrl,
   responseText,
