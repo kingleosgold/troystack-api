@@ -26,19 +26,34 @@ const receipt = require('./gemini-probe-receipt');
 
 const START_DELAY_MS = 90 * 1000;
 
+// The probe only matters until the default moves. Past this date Google has
+// redirected 2.5 Flash anyway, so it stops calling on its own.
+const PROBE_UNTIL = Date.parse('2026-12-15T00:00:00Z');
+
 function candidateModel(env = process.env) {
   return candidateFlashModel(env);
 }
 
-function probeEnabled(env = process.env) {
+function probeEnabled(env = process.env, now = Date.now()) {
   if (!env.GEMINI_API_KEY) return false;
+  if (now >= PROBE_UNTIL) return false;
   if (String(env.GEMINI_PROBE || '').trim().toLowerCase() === 'off') return false;
   return candidateModel(env) !== flashModel(env);
 }
 
-// Parses JSON the way the callers do, with markdown fences stripped.
+function stripFences(text) {
+  return String(text || '').replace(/^```(?:json)?\s*\n?/g, '').replace(/\n?```\s*$/g, '').trim();
+}
+
+// geminiSearch's parse: fences stripped, then plain JSON.parse, nothing else.
+function parseStrict(text) {
+  try { return JSON.parse(stripFences(text)); } catch { return undefined; }
+}
+
+// The looser parse the scoring and receipt callers fall back to, which also
+// pulls the JSON out of words around it.
 function parseJson(text) {
-  const cleaned = String(text || '').replace(/^```(?:json)?\s*\n?/g, '').replace(/\n?```\s*$/g, '').trim();
+  const cleaned = stripFences(text);
   try {
     return JSON.parse(cleaned);
   } catch {
@@ -53,7 +68,10 @@ function parseJson(text) {
 function checks(model) {
   return [
     {
-      // The admin health check's ping, callGemini with a 10-token cap.
+      // The admin health check's ping, callGemini with a 10-token cap and
+      // thinking at its default. The health check itself goes green on any
+      // answer, so a FAIL here with finish=MAX_TOKENS means thinking used up
+      // the 10 tokens, not that the switch is unsafe.
       name: 'ping',
       body: {
         contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
@@ -63,13 +81,14 @@ function checks(model) {
       judge: (text) => (text.trim() ? null : 'empty answer'),
     },
     {
-      // Signal scoring, thinking off, JSON out, at the 100-token end.
+      // Signal scoring and clustering, callGemini with thinking off, JSON
+      // out and the default 4096 tokens.
       name: 'score',
       body: {
         contents: [{ role: 'user', parts: [{ text: 'Score this article for precious metals stacker relevance from 0 to 10:\n1. "Silver climbs as industrial demand rises"' }] }],
         system_instruction: { parts: [{ text: 'Return ONLY a JSON array like [{"index":1,"score":7}].' }] },
         generationConfig: {
-          ...generationConfig(model, { temperature: 0.2, maxOutputTokens: 100 }),
+          ...generationConfig(model, { temperature: 0.2, maxOutputTokens: 4096 }),
           responseMimeType: 'application/json',
           ...(thinkingOffConfig(model) ? { thinkingConfig: thinkingOffConfig(model) } : {}),
         },
@@ -78,6 +97,19 @@ function checks(model) {
         const v = parseJson(text);
         return Array.isArray(v) && v.length ? null : 'answer is not a JSON array';
       },
+    },
+    {
+      // The Signal one-liner, plain text, thinking off, 100 tokens.
+      name: 'oneliner',
+      body: {
+        contents: [{ role: 'user', parts: [{ text: 'Write one short line for stackers about this headline: "Silver climbs as industrial demand rises"' }] }],
+        system_instruction: { parts: [{ text: 'Reply with one sentence, no quotes.' }] },
+        generationConfig: {
+          ...generationConfig(model, { temperature: 0.9, maxOutputTokens: 100 }),
+          ...(thinkingOffConfig(model) ? { thinkingConfig: thinkingOffConfig(model) } : {}),
+        },
+      },
+      judge: (text) => (text.trim() ? null : 'empty answer'),
     },
     {
       // The scraper's extraction calls, thinking off at 512 tokens.
@@ -104,7 +136,7 @@ function checks(model) {
         system_instruction: { parts: [{ text: 'Return ONLY valid JSON, no markdown.' }] },
         generationConfig: generationConfig(model, { temperature: 0.3 }),
       },
-      judge: (text) => (parseJson(text) ? null : 'answer is not JSON'),
+      judge: (text) => (parseStrict(text) !== undefined ? null : 'answer is not plain JSON, geminiSearch would return null'),
     },
     {
       // Troy chat and the in-app advisor, multi-turn, thinking at its
@@ -124,7 +156,10 @@ function checks(model) {
       judge: (text) => (text.trim() ? null : 'empty answer'),
     },
     {
-      // The receipt scanner, an image with the extraction prompt.
+      // The receipt scanner's request shape, an image plus an extraction
+      // prompt. The prompt is a short stand-in for the route's, so a PASS
+      // shows the image path works on the model, not the full prompt's
+      // quality on real receipts.
       name: 'receipt',
       body: {
         contents: [{
@@ -139,8 +174,8 @@ function checks(model) {
         const v = parseJson(text);
         const items = v && Array.isArray(v.items) ? v.items : null;
         if (!items) return 'no items array';
-        const silver = items.find(i => String(i.metal).toLowerCase() === 'silver');
-        const gold = items.find(i => String(i.metal).toLowerCase() === 'gold');
+        const silver = items.find(i => i && String(i.metal).toLowerCase() === 'silver');
+        const gold = items.find(i => i && String(i.metal).toLowerCase() === 'gold');
         if (items.length !== 2 || !silver || !gold) return `read ${items.length} items, wanted the silver and the gold only`;
         if (Number(silver.quantity) !== 10 || Number(silver.unitPrice) !== 34.5) return 'silver line read wrong';
         if (Number(gold.unitPrice) !== 2712) return 'gold line read wrong';
@@ -157,8 +192,8 @@ function errorDetail(err) {
   return `${status ? `HTTP ${status} ` : ''}${String(msg).slice(0, 200)}`;
 }
 
-async function runCandidateProbe({ env = process.env, post = axios.post, log = console.log } = {}) {
-  if (!probeEnabled(env)) return [];
+async function runCandidateProbe({ env = process.env, post = axios.post, log = console.log, now = Date.now() } = {}) {
+  if (!probeEnabled(env, now)) return [];
   const model = candidateModel(env);
   const url = geminiUrl(model, env.GEMINI_API_KEY);
   const results = [];
@@ -169,7 +204,12 @@ async function runCandidateProbe({ env = process.env, post = axios.post, log = c
       const resp = await post(url, check.body, { headers: { 'Content-Type': 'application/json' }, timeout: 60000 });
       const data = resp && resp.data;
       const text = responseText(data);
-      const problem = check.judge(text);
+      let problem;
+      try {
+        problem = check.judge(text);
+      } catch (e) {
+        problem = `judge error: ${String(e && e.message).slice(0, 100)}`;
+      }
       const usage = data?.usageMetadata || {};
       const finish = data?.candidates?.[0]?.finishReason || 'none';
       result = {
@@ -205,6 +245,7 @@ module.exports = {
   candidateModel,
   probeEnabled,
   parseJson,
+  parseStrict,
   checks,
   runCandidateProbe,
   scheduleCandidateProbe,
