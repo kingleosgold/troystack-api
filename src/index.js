@@ -411,6 +411,14 @@ app.listen(PORT, () => {
     }, { timezone: 'UTC' });
     console.log('🧠 [Intelligence Cron] Scheduled: daily at 6:30 AM EST (11:30 UTC)');
 
+    // A restart after 11:30 UTC on a day with no briefs runs the generation
+    // once. See services/intelligence-catchup.js.
+    try {
+      require('./services/intelligence-catchup').scheduleIntelligenceCatchUp();
+    } catch (err) {
+      console.log(`🧠 [Intelligence Catch-up] not scheduled: ${err.message}`);
+    }
+
     // ── Daily Brief cron: 6:35 AM EST (11:35 UTC) ──
     cron.schedule('35 11 * * *', async () => {
       console.log(`\n📝 [Daily Brief Cron] Triggered at ${new Date().toISOString()}`);
