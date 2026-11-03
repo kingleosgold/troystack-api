@@ -8,7 +8,7 @@
 // Flash moved to gemini-3.5-flash-lite, the model Google sends 2.5 Flash
 // traffic to from 12/1, after a startup probe on 11/3 passed every
 // production request shape on it (API #53). Setting GEMINI_FLASH_MODEL to
-// gemini-2.5-flash in Railway goes back without a deploy until 12/1.
+// gemini-2.5-flash in Railway goes back without a code change until 12/1.
 // Pro stays on 2.5 until its successor has passed a live test.
 
 const DEFAULT_FLASH = 'gemini-3.5-flash-lite';

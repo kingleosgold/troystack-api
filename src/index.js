@@ -31,6 +31,7 @@ const { createTroyAskRouter } = require('./routes/troy-ask');
 const { sharedMarketBlock } = require('./services/troy-context');
 const troyLlm = require('./services/troy-llm');
 const { getTopIntelligence } = require('./services/intelligence-scraper');
+const { flashModel, proModel } = require('./services/gemini-models');
 const stackSignalRouter = require('./routes/stack-signal');
 const socialRouter = require('./routes/social');
 const dealerPricesRouter = require('./routes/dealerPrices');
@@ -380,7 +381,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`\n🪙 TroyStack API running on port ${PORT}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('🧠 Gemini:', process.env.GEMINI_API_KEY ? 'ENABLED' : 'DISABLED');
+  console.log('🧠 Gemini:', process.env.GEMINI_API_KEY ? `ENABLED, flash ${flashModel()}, pro ${proModel()}` : 'DISABLED');
   console.log('💳 Stripe:', process.env.STRIPE_SECRET_KEY ? 'ENABLED' : 'DISABLED');
   console.log('🔒 CORS: Locked to troystack.com, troystack.ai + stacktrackergold.com domains');
   console.log('⚡ Rate Limits: Public 100/min, Auth 30/min, Dev tier-based');
