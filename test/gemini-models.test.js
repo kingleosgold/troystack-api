@@ -8,19 +8,19 @@ const assert = require('node:assert');
 
 const gm = require('../src/services/gemini-models');
 
-test('defaults stay on 2.5 until a successor passes a live test', () => {
-  assert.strictEqual(gm.flashModel({}), 'gemini-2.5-flash');
+test('Flash defaults to gemini-3.5-flash-lite and Pro stays on 2.5', () => {
+  assert.strictEqual(gm.flashModel({}), 'gemini-3.5-flash-lite');
   assert.strictEqual(gm.proModel({}), 'gemini-2.5-pro');
 });
 
 test('GEMINI_FLASH_MODEL and GEMINI_PRO_MODEL pick the model', () => {
-  assert.strictEqual(gm.flashModel({ GEMINI_FLASH_MODEL: ' gemini-3.5-flash-lite ' }), 'gemini-3.5-flash-lite');
+  assert.strictEqual(gm.flashModel({ GEMINI_FLASH_MODEL: ' Gemini-2.5-Flash ' }), 'gemini-2.5-flash', 'the rollback until 12/1 is a Railway variable');
   assert.strictEqual(gm.proModel({ GEMINI_PRO_MODEL: 'Gemini-3.8-Flash' }), 'gemini-3.8-flash');
 });
 
 test('a value that is not a model id falls back to the default', () => {
   for (const bad of ['', '   ', 'gemini-3/../x', 'gemini?key=1', 'a b', 'gemini-3-' + 'x'.repeat(49), '-gemini', 'gemini-flash-latest', 'claude-sonnet-5-5', 'gemini-3']) {
-    assert.strictEqual(gm.flashModel({ GEMINI_FLASH_MODEL: bad }), 'gemini-2.5-flash', bad);
+    assert.strictEqual(gm.flashModel({ GEMINI_FLASH_MODEL: bad }), 'gemini-3.5-flash-lite', bad);
   }
 });
 

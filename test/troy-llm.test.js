@@ -132,15 +132,15 @@ test('default path calls Gemini exactly as troy-chat.js did', async () => {
   const prior = [{ role: 'user', content: 'Q1' }, { role: 'assistant', content: 'A1' }];
   const out = await llm.generateTroyReply({ userId: USER, priorMessages: prior, message: 'Q2', prompt: PROMPT, env: ENV_BOTH, deps: { http, anthropic } });
 
-  assert.deepStrictEqual(out, { text: 'Sounds like a sale.', provider: 'gemini', model: 'gemini-2.5-flash', fellBack: false });
+  assert.deepStrictEqual(out, { text: 'Sounds like a sale.', provider: 'gemini', model: 'gemini-3.5-flash-lite', fellBack: false });
   assert.strictEqual(anthropic.calls.length, 0);
   assert.strictEqual(http.calls.length, 1);
   const { url, body, opts } = http.calls[0];
-  assert.ok(url.startsWith('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='));
+  assert.ok(url.startsWith('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key='));
   assert.deepStrictEqual(body, {
     contents: llm.geminiContents(prior, 'Q2'),
     system_instruction: { parts: [{ text: llm.geminiSystemPrompt(PROMPT) }] },
-    generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
+    generationConfig: { maxOutputTokens: 8192 },
   });
   assert.deepStrictEqual(opts, { headers: { 'Content-Type': 'application/json' }, timeout: 30000 });
 });
@@ -197,7 +197,7 @@ test('a Claude refusal lets Gemini answer instead of saving a partial reply', as
   const http = fakeHttp(() => geminiOk('Gemini answered.'));
   const env = { ...ENV_BOTH, TROY_CHAT_PROVIDER: 'claude' };
   const out = await llm.generateTroyReply({ userId: USER, message: 'Q', prompt: PROMPT, env, deps: { anthropic, http } });
-  assert.deepStrictEqual(out, { text: 'Gemini answered.', provider: 'gemini', model: 'gemini-2.5-flash', fellBack: true });
+  assert.deepStrictEqual(out, { text: 'Gemini answered.', provider: 'gemini', model: 'gemini-3.5-flash-lite', fellBack: true });
 });
 
 test('thinking blocks are left out of the reply text', async () => {
@@ -215,7 +215,7 @@ test('a Claude error falls back to Gemini', async () => {
   const http = fakeHttp(() => geminiOk('Gemini answered.'));
   const env = { ...ENV_BOTH, TROY_CHAT_PROVIDER: 'claude' };
   const out = await llm.generateTroyReply({ userId: USER, message: 'Q', prompt: PROMPT, env, deps: { anthropic, http } });
-  assert.deepStrictEqual(out, { text: 'Gemini answered.', provider: 'gemini', model: 'gemini-2.5-flash', fellBack: true });
+  assert.deepStrictEqual(out, { text: 'Gemini answered.', provider: 'gemini', model: 'gemini-3.5-flash-lite', fellBack: true });
 });
 
 test('an empty Claude reply falls back to Gemini', async () => {

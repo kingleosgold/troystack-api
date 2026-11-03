@@ -31,6 +31,7 @@ const { createTroyAskRouter } = require('./routes/troy-ask');
 const { sharedMarketBlock } = require('./services/troy-context');
 const troyLlm = require('./services/troy-llm');
 const { getTopIntelligence } = require('./services/intelligence-scraper');
+const { flashModel, proModel } = require('./services/gemini-models');
 const stackSignalRouter = require('./routes/stack-signal');
 const socialRouter = require('./routes/social');
 const dealerPricesRouter = require('./routes/dealerPrices');
@@ -380,7 +381,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`\n🪙 TroyStack API running on port ${PORT}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('🧠 Gemini:', process.env.GEMINI_API_KEY ? 'ENABLED' : 'DISABLED');
+  console.log('🧠 Gemini:', process.env.GEMINI_API_KEY ? `ENABLED, flash ${flashModel()}, pro ${proModel()}` : 'DISABLED');
   console.log('💳 Stripe:', process.env.STRIPE_SECRET_KEY ? 'ENABLED' : 'DISABLED');
   console.log('🔒 CORS: Locked to troystack.com, troystack.ai + stacktrackergold.com domains');
   console.log('⚡ Rate Limits: Public 100/min, Auth 30/min, Dev tier-based');
@@ -388,14 +389,6 @@ app.listen(PORT, () => {
   // Troy's price history reads all of price_log, longer than a question
   // waits, so it starts now and the first question after a deploy has it.
   sharedMarketBlock().catch((err) => console.log(`[Troy Context] Warm-up failed: ${err.message}`));
-
-  // One live check of the Gemini model that replaces 2.5 Flash on 12/1,
-  // logged as [GeminiProbe] lines. See services/gemini-probe.js.
-  try {
-    require('./services/gemini-probe').scheduleCandidateProbe();
-  } catch (err) {
-    console.log(`[GeminiProbe] not scheduled: ${err.message}`);
-  }
 
   // ── Intelligence cron: daily at 6:30 AM EST (11:30 UTC) ──
   if (process.env.GEMINI_API_KEY) {

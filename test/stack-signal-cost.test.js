@@ -89,7 +89,7 @@ test('under the cap, scoring runs with thinking off', async () => {
   await withFakePost(() => geminiText(lowScores), async calls => {
     const result = await ssp.runStackSignalPipeline();
     assert.strictEqual(calls.length, 1, 'just the scoring call');
-    assert.deepStrictEqual(calls[0].body.generationConfig.thinkingConfig, { thinkingBudget: 0 });
+    assert.deepStrictEqual(calls[0].body.generationConfig.thinkingConfig, { thinkingLevel: 'minimal' });
     assert.strictEqual(result.synthesized, 0);
   });
 });
@@ -100,7 +100,7 @@ test('clustering runs with thinking off', async () => {
   await withFakePost(() => geminiText(clusters), async calls => {
     const out = await ssp.clusterArticles(worthy);
     assert.strictEqual(calls.length, 1);
-    assert.deepStrictEqual(calls[0].body.generationConfig.thinkingConfig, { thinkingBudget: 0 });
+    assert.deepStrictEqual(calls[0].body.generationConfig.thinkingConfig, { thinkingLevel: 'minimal' });
     assert.strictEqual(out[0].articles.length, 3);
   });
 });
@@ -111,7 +111,7 @@ test('the one-liner runs with thinking off inside its 100-token cap', async () =
     const meta = await ssp.generateArticleMetadata(cluster, 'Article body '.repeat(50));
     assert.strictEqual(meta.troy_one_liner, 'Physical metal is tighter than the screens say');
     assert.strictEqual(calls[0].body.generationConfig.maxOutputTokens, 100);
-    assert.deepStrictEqual(calls[0].body.generationConfig.thinkingConfig, { thinkingBudget: 0 });
+    assert.deepStrictEqual(calls[0].body.generationConfig.thinkingConfig, { thinkingLevel: 'minimal' });
   });
 });
 
