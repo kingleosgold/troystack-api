@@ -10,6 +10,11 @@
 const DEFAULT_FLASH = 'gemini-2.5-flash';
 const DEFAULT_PRO = 'gemini-2.5-pro';
 
+// The model Google sends gemini-2.5-flash traffic to from 12/1. The startup
+// probe in gemini-probe.js tries it before the default moves.
+// GEMINI_CANDIDATE_MODEL picks another one.
+const CANDIDATE_FLASH = 'gemini-3.5-flash-lite';
+
 // A model id is gemini-, a version number, then letters, digits, dots and
 // dashes, like gemini-3.5-flash-lite. Anything else would end up inside the
 // request URL or hide the version the thinking setting depends on, so it
@@ -28,6 +33,10 @@ function flashModel(env = process.env) {
 
 function proModel(env = process.env) {
   return pick(env.GEMINI_PRO_MODEL, DEFAULT_PRO);
+}
+
+function candidateFlashModel(env = process.env) {
+  return pick(env.GEMINI_CANDIDATE_MODEL, CANDIDATE_FLASH);
 }
 
 // Gemini 2.x turns thinking off with thinkingBudget 0. Gemini 3 and later
@@ -94,6 +103,8 @@ function responseText(data) {
 
 module.exports = {
   DEFAULT_FLASH,
+  CANDIDATE_FLASH,
+  candidateFlashModel,
   DEFAULT_PRO,
   flashModel,
   proModel,
