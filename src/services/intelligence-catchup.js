@@ -114,16 +114,16 @@ async function catchUpIntelligence({ supabase, run, log = console.log, bootTime,
 // saying it isn't this instance's day. That covers a lease held by a run
 // that may have died, a database error on the check or the claim, and a
 // generation that threw. The retry only fires on the same UTC day.
-function withOneRetry(label, attempt, { retryMs = LEASE_MS + 60 * 1000, setTimer = setTimeout, now = () => Date.now() } = {}) {
+function withOneRetry(label, attempt, { retryMs = LEASE_MS + 60 * 1000, setTimer = setTimeout, now = () => Date.now(), log = console.log, logError = console.error } = {}) {
   const firstDay = utcDay(now());
   const go = (isRetry) => attempt()
     .then(r => {
       if (r.ran) return;
-      console.log(`🧠 [Intelligence ${label}] Skipped: ${r.reason}`);
+      log(`🧠 [Intelligence ${label}] Skipped: ${r.reason}`);
       if (!isRetry && r.retry) arm();
     })
     .catch(err => {
-      console.error(`🧠 [Intelligence ${label}] Failed: ${err.message}`);
+      logError(`🧠 [Intelligence ${label}] Failed: ${err.message}`);
       if (!isRetry) arm();
     });
   const arm = () => {
