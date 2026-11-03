@@ -402,14 +402,22 @@ app.listen(PORT, () => {
     cron.schedule('30 11 * * *', async () => {
       console.log(`\n🧠 [Intelligence Cron] Triggered at ${new Date().toISOString()}`);
       try {
-        const { runIntelligenceGeneration } = require('./routes/intelligence');
-        const result = await runIntelligenceGeneration();
-        console.log(`🧠 [Intelligence Cron] Done: ${result.briefsInserted} briefs, ${result.vaultInserted}/4 vault`);
+        // One run a day across restarts and replicas, with one retry when
+        // it couldn't run. See services/intelligence-catchup.js.
+        await require('./services/intelligence-catchup').runCronOncePerDay();
       } catch (err) {
         console.error(`🧠 [Intelligence Cron] Failed:`, err.message);
       }
     }, { timezone: 'UTC' });
     console.log('🧠 [Intelligence Cron] Scheduled: daily at 6:30 AM EST (11:30 UTC)');
+
+    // A restart after 11:30 UTC on a day with no briefs runs the generation
+    // once. See services/intelligence-catchup.js.
+    try {
+      require('./services/intelligence-catchup').scheduleIntelligenceCatchUp();
+    } catch (err) {
+      console.log(`🧠 [Intelligence Catch-up] not scheduled: ${err.message}`);
+    }
 
     // ── Daily Brief cron: 6:35 AM EST (11:35 UTC) ──
     cron.schedule('35 11 * * *', async () => {

@@ -141,7 +141,8 @@ async function runIntelligenceGeneration() {
 
   // Delete existing briefs for today (idempotent)
   try {
-    await supabase.from('intelligence_briefs').delete().eq('date', today);
+    const { error: clearError } = await supabase.from('intelligence_briefs').delete().eq('date', today);
+    if (clearError) throw new Error(clearError.message);
     console.log(`🧠 [Intelligence] Cleared existing briefs for ${today}`);
   } catch (err) {
     console.log(`🧠 [Intelligence] Clear failed: ${err.message}`);
@@ -160,7 +161,8 @@ async function runIntelligenceGeneration() {
         source_url: brief.source_url || null,
         relevance_score: Math.min(Math.max(parseInt(brief.relevance_score) || 50, 1), 100),
       };
-      await supabase.from('intelligence_briefs').insert(row);
+      const { error: insertError } = await supabase.from('intelligence_briefs').insert(row);
+      if (insertError) throw new Error(insertError.message);
       briefsInserted++;
       console.log(`     ✅ ${row.title.slice(0, 60)}...`);
     } catch (err) {
