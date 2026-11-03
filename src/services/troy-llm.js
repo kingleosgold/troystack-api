@@ -13,7 +13,7 @@
 const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk');
 const { claudeTuning } = require('./ai-router');
-const { flashModel, geminiUrl } = require('./gemini-models');
+const { flashModel, geminiUrl, responseText } = require('./gemini-models');
 
 // Read once at load, like the rest of this module's settings. GEMINI_FLASH_MODEL
 // in Railway changes it on the next deploy or restart.
@@ -122,10 +122,7 @@ async function askGemini({ prompt, priorMessages, message, env, http }) {
     headers: { 'Content-Type': 'application/json' },
     timeout: GEMINI_TIMEOUT_MS,
   });
-  const text = resp.data?.candidates?.[0]?.content?.parts
-    ?.filter(p => p.text)
-    ?.map(p => p.text)
-    ?.join('') || '';
+  const text = responseText(resp.data);
   return { text, model: GEMINI_MODEL };
 }
 

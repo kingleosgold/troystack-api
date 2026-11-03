@@ -10,9 +10,12 @@
 const DEFAULT_FLASH = 'gemini-2.5-flash';
 const DEFAULT_PRO = 'gemini-2.5-pro';
 
-// A model id is letters, digits, dots and dashes. Anything else would end up
-// inside the request URL, so it falls back to the default instead.
-const MODEL_ID = /^[a-z0-9][a-z0-9.-]{0,63}$/;
+// A model id is gemini-, a version number, then letters, digits, dots and
+// dashes, like gemini-3.5-flash-lite. Anything else would end up inside the
+// request URL or hide the version the thinking setting depends on, so it
+// falls back to the default instead. That rules out aliases like
+// gemini-flash-latest on purpose.
+const MODEL_ID = /^gemini-\d+(?:\.\d+)?-[a-z0-9.-]{1,48}$/;
 
 function pick(value, fallback) {
   const v = String(value || '').trim().toLowerCase();
@@ -29,6 +32,7 @@ function proModel(env = process.env) {
 
 // Gemini 2.x turns thinking off with thinkingBudget 0. Gemini 3 and later
 // take a thinkingLevel instead, where minimal is the closest thing to off.
+// Pro models don't accept minimal, so they get low, their lowest level.
 // Returns null for a model the major version can't be read from, so the
 // request goes without a thinking setting rather than with a wrong one.
 function majorVersion(model) {
@@ -39,7 +43,8 @@ function majorVersion(model) {
 function thinkingOffConfig(model) {
   const major = majorVersion(model);
   if (major === null) return null;
-  return major >= 3 ? { thinkingLevel: 'minimal' } : { thinkingBudget: 0 };
+  if (major < 3) return { thinkingBudget: 0 };
+  return /-pro(?:-|$)/.test(String(model)) ? { thinkingLevel: 'low' } : { thinkingLevel: 'minimal' };
 }
 
 function geminiUrl(model, apiKey) {

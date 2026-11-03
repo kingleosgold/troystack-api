@@ -19,7 +19,7 @@ test('GEMINI_FLASH_MODEL and GEMINI_PRO_MODEL pick the model', () => {
 });
 
 test('a value that is not a model id falls back to the default', () => {
-  for (const bad of ['', '   ', 'gemini-3/../x', 'gemini?key=1', 'a b', 'x'.repeat(65), '-gemini']) {
+  for (const bad of ['', '   ', 'gemini-3/../x', 'gemini?key=1', 'a b', 'gemini-3-' + 'x'.repeat(49), '-gemini', 'gemini-flash-latest', 'claude-sonnet-5-5', 'gemini-3']) {
     assert.strictEqual(gm.flashModel({ GEMINI_FLASH_MODEL: bad }), 'gemini-2.5-flash', bad);
   }
 });
@@ -30,6 +30,9 @@ test('thinking off follows the model generation', () => {
   assert.deepStrictEqual(gm.thinkingOffConfig('gemini-3.5-flash-lite'), { thinkingLevel: 'minimal' });
   assert.deepStrictEqual(gm.thinkingOffConfig('gemini-3-flash-preview'), { thinkingLevel: 'minimal' });
   assert.deepStrictEqual(gm.thinkingOffConfig('gemini-10.0-flash'), { thinkingLevel: 'minimal' });
+  assert.deepStrictEqual(gm.thinkingOffConfig('gemini-3-pro-preview'), { thinkingLevel: 'low' });
+  assert.deepStrictEqual(gm.thinkingOffConfig('gemini-3.8-pro'), { thinkingLevel: 'low' });
+  assert.deepStrictEqual(gm.thinkingOffConfig('gemini-3.5-flash-lite-preview'), { thinkingLevel: 'minimal' });
   assert.strictEqual(gm.thinkingOffConfig('gemini-flash-latest'), null);
   assert.strictEqual(gm.thinkingOffConfig(''), null);
 });

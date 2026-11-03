@@ -7,7 +7,7 @@ const { getTopIntelligence } = require('../services/intelligence-scraper');
 const router = express.Router();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const { flashModel, geminiUrl: buildGeminiUrl } = require('../services/gemini-models');
+const { flashModel, geminiUrl: buildGeminiUrl, responseText: geminiResponseText } = require('../services/gemini-models');
 const MAX_BRIEFS_PER_DAY = 8;
 
 // ============================================
@@ -38,10 +38,7 @@ async function geminiSearch(prompt, systemPrompt, retries = 3) {
         timeout: 30000,
       });
 
-      const text = resp.data?.candidates?.[0]?.content?.parts
-        ?.filter(p => p.text)
-        ?.map(p => p.text)
-        ?.join('') || '';
+      const text = geminiResponseText(resp.data);
 
       if (!text) {
         console.log(`     Attempt ${attempt}: Empty Gemini response`);
@@ -340,10 +337,7 @@ Write Troy's Take: overnight moves and what changed for their stack, connect the
     timeout: 30000,
   });
 
-  const briefText = geminiResp.data?.candidates?.[0]?.content?.parts
-    ?.filter(p => p.text)
-    ?.map(p => p.text)
-    ?.join('') || '';
+  const briefText = geminiResponseText(geminiResp.data);
 
   if (!briefText) throw new Error('Gemini returned empty response');
 
@@ -456,10 +450,7 @@ Gold/Silver Ratio: ${prices.silver > 0 ? (prices.gold / prices.silver).toFixed(1
     timeout: 30000,
   });
 
-  const rawText = geminiResp.data?.candidates?.[0]?.content?.parts
-    ?.filter(p => p.text)
-    ?.map(p => p.text)
-    ?.join('') || '';
+  const rawText = geminiResponseText(geminiResp.data);
 
   if (!rawText) throw new Error('Gemini returned empty response');
 
@@ -889,10 +880,7 @@ APP GUIDE (when users ask how to do things in the app):
       timeout: 30000,
     });
 
-    const responseText = geminiResp.data?.candidates?.[0]?.content?.parts
-      ?.filter(p => p.text)
-      ?.map(p => p.text)
-      ?.join('') || '';
+    const responseText = geminiResponseText(geminiResp.data);
 
     if (!responseText) {
       return res.status(500).json({ error: 'AI advisor returned an empty response' });
