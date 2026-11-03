@@ -152,7 +152,7 @@ test('withOneRetry looks once more after the lease on a held lease, an error or 
     const { timers, setTimer } = fakeTimers();
     let calls = 0;
     const attempt = async () => { calls++; if (first instanceof Error && calls === 1) throw first; return calls === 1 ? first : { ran: true }; };
-    await ic.withOneRetry('test', attempt, { setTimer, now: day, retryMs: 5 });
+    await ic.withOneRetry('test', attempt, { setTimer, now: day, retryMs: 5, log: quiet, logError: quiet });
     assert.strictEqual(timers.length, armed ? 1 : 0, JSON.stringify(first.reason || first.message || first));
     if (armed) {
       timers[0].fn();
@@ -166,7 +166,7 @@ test('withOneRetry tries only once more, and not on a new UTC day', async () => 
   let t = T('2026-11-03T11:31:00Z');
   const { timers, setTimer } = fakeTimers();
   let calls = 0;
-  await ic.withOneRetry('test', async () => { calls++; return { ran: false, reason: 'held', retry: true }; }, { setTimer, now: () => t });
+  await ic.withOneRetry('test', async () => { calls++; return { ran: false, reason: 'held', retry: true }; }, { setTimer, now: () => t, log: quiet, logError: quiet });
   timers[0].fn();
   await new Promise(r => setImmediate(r));
   assert.strictEqual(calls, 2);
@@ -175,7 +175,7 @@ test('withOneRetry tries only once more, and not on a new UTC day', async () => 
   const second = fakeTimers();
   calls = 0;
   t = T('2026-11-03T23:59:00Z');
-  await ic.withOneRetry('test', async () => { calls++; return { ran: false, reason: 'held', retry: true }; }, { setTimer: second.setTimer, now: () => t });
+  await ic.withOneRetry('test', async () => { calls++; return { ran: false, reason: 'held', retry: true }; }, { setTimer: second.setTimer, now: () => t, log: quiet, logError: quiet });
   t = T('2026-11-04T00:20:00Z');
   second.timers[0].fn();
   await new Promise(r => setImmediate(r));
