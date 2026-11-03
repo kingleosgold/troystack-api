@@ -57,11 +57,11 @@ const geminiText = text => ({ data: { candidates: [{ content: { parts: [{ text }
 test('thinking: false turns Flash thinking off', async () => {
   await withFakePost(() => geminiText('[]'), async calls => {
     await callGemini(MODELS.flash, 'SYS', 'USER', { temperature: 0.2, responseMimeType: 'application/json', thinking: false });
+    // Flash is a 3.x model, so it takes no temperature and thinkingLevel minimal.
     assert.deepStrictEqual(calls[0].body.generationConfig, {
-      temperature: 0.2,
       maxOutputTokens: 4096,
       responseMimeType: 'application/json',
-      thinkingConfig: { thinkingBudget: 0 },
+      thinkingConfig: { thinkingLevel: 'minimal' },
     });
   });
 });
@@ -72,7 +72,7 @@ test('callers that leave thinking unset send the same request as before', async 
     assert.strictEqual(out, 'prose');
     assert.deepStrictEqual(calls[0].body, {
       contents: [{ role: 'user', parts: [{ text: 'USER' }] }],
-      generationConfig: { temperature: 0.9, maxOutputTokens: 4096 },
+      generationConfig: { maxOutputTokens: 4096 },
       system_instruction: { parts: [{ text: 'SYS' }] },
     });
   });
@@ -104,7 +104,7 @@ test('Reddit asks Gemini about a skipped post once, and every call has thinking 
 
       assert.strictEqual(calls.length, 2, 'one call per post across both runs');
       for (const c of calls) {
-        assert.deepStrictEqual(c.body.generationConfig.thinkingConfig, { thinkingBudget: 0 });
+        assert.deepStrictEqual(c.body.generationConfig.thinkingConfig, { thinkingLevel: 'minimal' });
       }
       assert.ok(scraper._skippedUrls.has('https://reddit.com/r/Gold/comments/aaa/meme/'));
       assert.ok(saved.has('https://reddit.com/r/Gold/comments/bbb/comex/'));

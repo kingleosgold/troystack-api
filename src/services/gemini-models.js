@@ -5,15 +5,14 @@
 // model from here, so the move is one change, and GEMINI_FLASH_MODEL or
 // GEMINI_PRO_MODEL in Railway can pick a model without a code change.
 //
-// The defaults stay on 2.5 until the successor has passed a live test.
+// Flash moved to gemini-3.5-flash-lite, the model Google sends 2.5 Flash
+// traffic to from 12/1, after a startup probe on 11/3 passed every
+// production request shape on it (API #53). Setting GEMINI_FLASH_MODEL to
+// gemini-2.5-flash in Railway goes back without a deploy until 12/1.
+// Pro stays on 2.5 until its successor has passed a live test.
 
-const DEFAULT_FLASH = 'gemini-2.5-flash';
+const DEFAULT_FLASH = 'gemini-3.5-flash-lite';
 const DEFAULT_PRO = 'gemini-2.5-pro';
-
-// The model Google sends gemini-2.5-flash traffic to from 12/1. The startup
-// probe in gemini-probe.js tries it before the default moves.
-// GEMINI_CANDIDATE_MODEL picks another one.
-const CANDIDATE_FLASH = 'gemini-3.5-flash-lite';
 
 // A model id is gemini-, a version number, then letters, digits, dots and
 // dashes, like gemini-3.5-flash-lite. Anything else would end up inside the
@@ -33,10 +32,6 @@ function flashModel(env = process.env) {
 
 function proModel(env = process.env) {
   return pick(env.GEMINI_PRO_MODEL, DEFAULT_PRO);
-}
-
-function candidateFlashModel(env = process.env) {
-  return pick(env.GEMINI_CANDIDATE_MODEL, CANDIDATE_FLASH);
 }
 
 // Gemini 2.x turns thinking off with thinkingBudget 0. Gemini 3 and later
@@ -103,8 +98,6 @@ function responseText(data) {
 
 module.exports = {
   DEFAULT_FLASH,
-  CANDIDATE_FLASH,
-  candidateFlashModel,
   DEFAULT_PRO,
   flashModel,
   proModel,
