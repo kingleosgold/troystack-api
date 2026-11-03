@@ -23,6 +23,7 @@ const {
   responseText,
 } = require('./gemini-models');
 const receipt = require('./gemini-probe-receipt');
+const { EXTRACTION_PROMPT } = require('./extraction-prompt');
 
 const START_DELAY_MS = 90 * 1000;
 
@@ -73,6 +74,7 @@ function checks(model) {
       // answer, so a FAIL here with finish=MAX_TOKENS means thinking used up
       // the 10 tokens, not that the switch is unsafe.
       name: 'ping',
+      timeout: 30000,
       body: {
         contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
         system_instruction: { parts: [{ text: 'You are a ping responder. Reply with exactly "pong".' }] },
@@ -84,6 +86,7 @@ function checks(model) {
       // Signal scoring and clustering, callGemini with thinking off, JSON
       // out and the default 4096 tokens.
       name: 'score',
+      timeout: 30000,
       body: {
         contents: [{ role: 'user', parts: [{ text: 'Score this article for precious metals stacker relevance from 0 to 10:\n1. "Silver climbs as industrial demand rises"' }] }],
         system_instruction: { parts: [{ text: 'Return ONLY a JSON array like [{"index":1,"score":7}].' }] },
@@ -93,7 +96,8 @@ function checks(model) {
           ...(thinkingOffConfig(model) ? { thinkingConfig: thinkingOffConfig(model) } : {}),
         },
       },
-      judge: (text) => {
+      judge: (text, finish) => {
+        if (finish !== 'STOP') return 'answer was cut off';
         const v = parseJson(text);
         return Array.isArray(v) && v.length ? null : 'answer is not a JSON array';
       },
@@ -101,6 +105,7 @@ function checks(model) {
     {
       // The Signal one-liner, plain text, thinking off, 100 tokens.
       name: 'oneliner',
+      timeout: 30000,
       body: {
         contents: [{ role: 'user', parts: [{ text: 'Write one short line for stackers about this headline: "Silver climbs as industrial demand rises"' }] }],
         system_instruction: { parts: [{ text: 'Reply with one sentence, no quotes.' }] },
@@ -109,27 +114,31 @@ function checks(model) {
           ...(thinkingOffConfig(model) ? { thinkingConfig: thinkingOffConfig(model) } : {}),
         },
       },
-      judge: (text) => (text.trim() ? null : 'empty answer'),
+      judge: (text, finish) => (finish !== 'STOP' ? 'answer was cut off' : text.trim() ? null : 'empty answer'),
     },
     {
-      // The scraper's extraction calls, thinking off at 512 tokens.
+      // The scraper's extraction calls, its own prompt, thinking off at 512
+      // tokens. A cut-off answer makes the scraper save empty claims.
       name: 'extract',
+      timeout: 30000,
       body: {
-        contents: [{ role: 'user', parts: [{ text: 'Article: "The US Mint said Tuesday it sold 1.2 million ounces of silver Eagles in October."\nReturn {"metal": string, "amount_oz": number}.' }] }],
-        system_instruction: { parts: [{ text: 'Extract the fields asked for. Return ONLY valid JSON.' }] },
+        contents: [{ role: 'user', parts: [{ text: 'Source: Kitco News\nArticle: COMEX registered silver fell to 120 million ounces this week, the lowest since 2023. Analysts at two banks raised their year-end gold target to $3,000 and said Fed rate cuts and central bank buying keep demand strong. One fund manager expects silver to reach $40 by the end of 2026 as industrial demand from solar keeps growing.' }] }],
+        system_instruction: { parts: [{ text: EXTRACTION_PROMPT }] },
         generationConfig: {
           ...generationConfig(model, { temperature: 0.2, maxOutputTokens: 512 }),
           ...(thinkingOffConfig(model) ? { thinkingConfig: thinkingOffConfig(model) } : {}),
         },
       },
-      judge: (text) => {
+      judge: (text, finish) => {
+        if (finish !== 'STOP') return 'answer was cut off';
         const v = parseJson(text);
-        return v && typeof v === 'object' && !Array.isArray(v) ? null : 'answer is not a JSON object';
+        return v && Array.isArray(v.claims) && v.claims.length ? null : 'no claims array';
       },
     },
     {
       // geminiSearch in routes/intelligence.js, with Google Search grounding.
       name: 'search',
+      timeout: 30000,
       body: {
         contents: [{ role: 'user', parts: [{ text: 'What is the latest spot price of gold in US dollars per ounce? Return {"gold_usd": number, "as_of": string}.' }] }],
         tools: [{ google_search: {} }],
@@ -142,6 +151,7 @@ function checks(model) {
       // Troy chat and the in-app advisor, multi-turn, thinking at its
       // default, 8192 output tokens.
       name: 'chat',
+      timeout: 30000,
       body: {
         contents: historyContents(
           [
@@ -153,7 +163,7 @@ function checks(model) {
         system_instruction: { parts: [{ text: 'You are Troy, a plain-spoken precious metals guide. Keep replies short.' }] },
         generationConfig: generationConfig(model, { temperature: 0.7, maxOutputTokens: 8192 }),
       },
-      judge: (text) => (text.trim() ? null : 'empty answer'),
+      judge: (text, finish) => (finish !== 'STOP' ? 'answer was cut off' : text.trim() ? null : 'empty answer'),
     },
     {
       // The receipt scanner's request shape, an image plus an extraction
@@ -161,6 +171,7 @@ function checks(model) {
       // shows the image path works on the model, not the full prompt's
       // quality on real receipts.
       name: 'receipt',
+      timeout: 60000,
       body: {
         contents: [{
           parts: [
@@ -178,7 +189,7 @@ function checks(model) {
         const gold = items.find(i => i && String(i.metal).toLowerCase() === 'gold');
         if (items.length !== 2 || !silver || !gold) return `read ${items.length} items, wanted the silver and the gold only`;
         if (Number(silver.quantity) !== 10 || Number(silver.unitPrice) !== 34.5) return 'silver line read wrong';
-        if (Number(gold.unitPrice) !== 2712) return 'gold line read wrong';
+        if (Number(gold.quantity) !== 1 || Number(gold.unitPrice) !== 2712) return 'gold line read wrong';
         return null;
       },
     },
@@ -201,17 +212,17 @@ async function runCandidateProbe({ env = process.env, post = axios.post, log = c
     const t0 = Date.now();
     let result;
     try {
-      const resp = await post(url, check.body, { headers: { 'Content-Type': 'application/json' }, timeout: 60000 });
+      const resp = await post(url, check.body, { headers: { 'Content-Type': 'application/json' }, timeout: check.timeout });
       const data = resp && resp.data;
       const text = responseText(data);
+      const finish = data?.candidates?.[0]?.finishReason || 'none';
       let problem;
       try {
-        problem = check.judge(text);
+        problem = check.judge(text, finish);
       } catch (e) {
         problem = `judge error: ${String(e && e.message).slice(0, 100)}`;
       }
       const usage = data?.usageMetadata || {};
-      const finish = data?.candidates?.[0]?.finishReason || 'none';
       result = {
         name: check.name,
         ok: !problem,
@@ -234,7 +245,7 @@ async function runCandidateProbe({ env = process.env, post = axios.post, log = c
 function scheduleCandidateProbe({ env = process.env, delayMs = START_DELAY_MS } = {}) {
   if (!probeEnabled(env)) return null;
   const timer = setTimeout(() => {
-    runCandidateProbe({ env }).catch(err => console.log(`[GeminiProbe] stopped: ${errorDetail(err)}`));
+    runCandidateProbe({ env }).catch(err => console.log(`[GeminiProbe] stopped: ${String(err && err.message).slice(0, 200)}`));
   }, delayMs);
   if (timer.unref) timer.unref();
   return timer;

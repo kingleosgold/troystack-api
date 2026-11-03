@@ -18,7 +18,7 @@ const GOOD = {
   ping: 'pong',
   oneliner: 'Silver keeps working for stackers.',
   score: '[{"index":1,"score":8}]',
-  extract: '{"metal":"silver","amount_oz":1200000}',
+  extract: '{"claims":["COMEX registered silver fell to 120 million oz"],"price_targets":[],"key_figures":[],"sentiment":"bullish","topics":["comex"],"summary":"Silver stocks fell."}',
   search: '```json\n{"gold_usd": 2700, "as_of": "2026-11-03"}\n```',
   chat: 'Adding a little gold balances a silver-heavy stack.',
   receipt: '{"dealer":"Sample Coin Dealer","purchaseDate":"2026-10-14","items":[{"description":"1 oz American Silver Eagle","quantity":10,"unitPrice":34.5,"metal":"silver","ozt":1},{"description":"1 oz Gold Maple Leaf","quantity":1,"unitPrice":2712,"metal":"gold","ozt":1}]}',
@@ -71,6 +71,7 @@ test('requests carry the 3.x shapes: no temperature, minimal thinking where call
   assert.strictEqual(by.oneliner.generationConfig.maxOutputTokens, 100);
   assert.deepStrictEqual(by.extract.generationConfig.thinkingConfig, { thinkingLevel: 'minimal' });
   assert.strictEqual(by.extract.generationConfig.maxOutputTokens, 512);
+  assert.match(by.extract.system_instruction.parts[0].text, /^Extract key claims, price targets/);
   assert.strictEqual(by.chat.generationConfig.thinkingConfig, undefined);
   assert.strictEqual(by.chat.generationConfig.maxOutputTokens, 8192);
   assert.deepStrictEqual(by.chat.contents.map(c => c.role), ['user', 'model', 'user']);
@@ -111,6 +112,25 @@ test('a receipt answer with a null item fails as a judge problem, not a request 
   const results = await probe.runCandidateProbe({ env: { GEMINI_API_KEY: KEY }, now: NOW, post, log: l => lines.push(l) });
   assert.strictEqual(results.find(r => r.name === 'receipt').ok, false);
   assert.ok(lines.some(l => /receipt FAIL .*finish=STOP/.test(l)));
+});
+
+test('a cut-off answer fails the checks that need the whole answer', async () => {
+  const names = probe.checks('gemini-3.5-flash-lite').map(c => c.name);
+  let n = 0;
+  const post = async () => {
+    const name = names[n++];
+    const r = answer(GOOD[name]);
+    r.data.candidates[0].finishReason = 'MAX_TOKENS';
+    return r;
+  };
+  const results = await probe.runCandidateProbe({ env: { GEMINI_API_KEY: KEY }, now: NOW, post, log: () => {} });
+  const ok = Object.fromEntries(results.map(r => [r.name, r.ok]));
+  assert.deepStrictEqual(ok, { ping: true, score: false, oneliner: false, extract: false, search: true, chat: false, receipt: true });
+});
+
+test('each check waits as long as its production caller', () => {
+  const t = Object.fromEntries(probe.checks('gemini-3.5-flash-lite').map(c => [c.name, c.timeout]));
+  assert.deepStrictEqual(t, { ping: 30000, score: 30000, oneliner: 30000, extract: 30000, search: 30000, chat: 30000, receipt: 60000 });
 });
 
 test('the probe stops on its own after 12/15/2026', () => {
