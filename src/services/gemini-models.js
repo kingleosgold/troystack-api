@@ -47,6 +47,38 @@ function thinkingOffConfig(model) {
   return /-pro(?:-|$)/.test(String(model)) ? { thinkingLevel: 'low' } : { thinkingLevel: 'minimal' };
 }
 
+// The generationConfig to send to a model. Google's guidance for Gemini 3
+// and later is to leave temperature at its default of 1.0, since a lower one
+// can make the model loop or answer worse. So a 3.x model gets the config
+// without temperature, and 2.x keeps the value each caller picked.
+function generationConfig(model, config) {
+  const out = { ...config };
+  const major = majorVersion(model);
+  if (major !== null && major >= 3) delete out.temperature;
+  return out;
+}
+
+// Chat history as Gemini contents. A user turn stays user, an assistant turn
+// becomes model and anything else is skipped. Empty turns are skipped, since
+// Gemini refuses a part with no text. Two turns in a row from the same side
+// are joined, which happens when a reply failed after the user's message was
+// saved, and history never opens on a model turn. The new message goes last.
+function historyContents(priorMessages, message) {
+  const turns = [];
+  for (const msg of Array.isArray(priorMessages) ? priorMessages : []) {
+    if (!msg || (msg.role !== 'user' && msg.role !== 'assistant')) continue;
+    if (typeof msg.content !== 'string' || !msg.content.trim()) continue;
+    const role = msg.role === 'user' ? 'user' : 'model';
+    const last = turns[turns.length - 1];
+    if (last && last.role === role) last.text = `${last.text}\n\n${msg.content}`;
+    else if (turns.length || role === 'user') turns.push({ role, text: msg.content });
+  }
+  const last = turns[turns.length - 1];
+  if (last && last.role === 'user') last.text = `${last.text}\n\n${message}`;
+  else turns.push({ role: 'user', text: message });
+  return turns.map(t => ({ role: t.role, parts: [{ text: t.text }] }));
+}
+
 function geminiUrl(model, apiKey) {
   return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 }
@@ -67,6 +99,8 @@ module.exports = {
   proModel,
   majorVersion,
   thinkingOffConfig,
+  generationConfig,
+  historyContents,
   geminiUrl,
   responseText,
 };
