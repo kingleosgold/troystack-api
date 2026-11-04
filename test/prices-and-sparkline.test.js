@@ -746,3 +746,139 @@ test('after a live reading the spike guard measures against it', async (t) => {
   assert.strictEqual(fetcher.getPriceSnapshot().spikeRejected, true);
   assert.deepStrictEqual(db.logged.map((row) => row.gold_price), [4000], 'only the first reading was logged');
 });
+
+// ---------- the previous day's prices ----------
+
+// Answers each fetch from `state.quotes`, or fails every source when it's null.
+function switchableAxios(state) {
+  return {
+    get: async (url) => {
+      if (!state.quotes) throw new Error('offline');
+      return fakeAxios(state.quotes).get(url);
+    },
+  };
+}
+
+// A price_log that keeps what's written to it and answers a day's read with
+// that day's newest row, like the real query. `rows` seeds it.
+function priceLogDb(rows = []) {
+  const logged = [...rows];
+  let reads = 0;
+  const query = () => {
+    let from = '';
+    let to = '';
+    const q = {
+      select: () => q, order: () => q, limit: () => q, eq: () => q,
+      gte: (_col, v) => { from = v; return q; },
+      lte: (_col, v) => { to = v; return q; },
+      single: () => {
+        reads += 1;
+        const day = logged.filter((r) => r.timestamp >= from && r.timestamp <= to)
+          .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+        return Promise.resolve(day.length ? { data: day[0], error: null } : { data: null, error: { message: 'no rows' } });
+      },
+      maybeSingle: () => Promise.resolve({ data: null, error: null }),
+      insert: (row) => { logged.push(row); return Promise.resolve({ error: null }); },
+      upsert: () => Promise.resolve({ error: null }),
+    };
+    return q;
+  };
+  return { logged, reads: () => reads, from: query };
+}
+
+const row = (timestamp, gold, silver) => ({ timestamp, gold_price: gold, silver_price: silver, platinum_price: 1550, palladium_price: 1100 });
+
+test("built-in prices from a start with every source down aren't the next day's reference", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T16:00:00Z') }); // Thursday
+  const state = { quotes: null };
+  const db = priceLogDb();
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: switchableAxios(state) });
+  await fetcher.fetchLiveSpotPrices();
+  assert.strictEqual(fetcher.getPriceSnapshot().source, 'static-fallback');
+
+  // Friday, and the sources are back. Nothing for Thursday is in price_log.
+  t.mock.timers.setTime(Date.parse('2026-10-09T14:00:00Z'));
+  state.quotes = { 'GC=F': 3939, 'SI=F': 49.8, 'PL=F': 1550, 'PA=F': 1100 };
+  await fetcher.fetchLiveSpotPrices();
+  await settle();
+  const snap = fetcher.getPriceSnapshot();
+  assert.strictEqual(snap.change.source, 'unavailable', 'no move measured against $5,150');
+  assert.deepStrictEqual(snap.change.gold, {});
+  assert.strictEqual(snap.spikeRejected, false, 'the spike guard skips the check too');
+  assert.deepStrictEqual(db.logged.map((r) => r.gold_price), [3939]);
+});
+
+test("each fetch of a day measures against the last trading day's last logged price", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T14:00:00Z') }); // Thursday
+  const db = priceLogDb([row('2026-10-07T15:00:00.000Z', 3880, 48), row('2026-10-07T21:00:00.000Z', 3900, 48.5)]);
+  const state = { quotes: { 'GC=F': 3990, 'SI=F': 49.5, 'PL=F': 1550, 'PA=F': 1100 } };
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: switchableAxios(state) });
+
+  // Two Thursday readings, a minute apart, both against Wednesday's last row.
+  await fetcher.fetchLiveSpotPrices();
+  await settle();
+  assert.strictEqual(fetcher.getPriceSnapshot().change.gold.prevClose, 3900);
+  t.mock.timers.tick(2 * 60 * 1000);
+  state.quotes = { 'GC=F': 4000, 'SI=F': 50, 'PL=F': 1550, 'PA=F': 1100 };
+  await fetcher.fetchLiveSpotPrices();
+  await settle();
+  assert.strictEqual(fetcher.getPriceSnapshot().change.gold.prevClose, 3900);
+  assert.strictEqual(db.reads(), 1, "Wednesday's row is read once and kept");
+
+  // Friday measures against Thursday's last reading, not its first or Wednesday's.
+  t.mock.timers.setTime(Date.parse('2026-10-09T14:00:00Z'));
+  state.quotes = { 'GC=F': 4040, 'SI=F': 50.5, 'PL=F': 1550, 'PA=F': 1100 };
+  await fetcher.fetchLiveSpotPrices();
+  const { change } = fetcher.getPriceSnapshot();
+  assert.strictEqual(change.source, 'calculated');
+  assert.strictEqual(change.gold.prevClose, 4000);
+  assert.strictEqual(change.gold.percent, 1);
+  assert.strictEqual(change.silver.prevClose, 50);
+});
+
+test("a cached reading at the start of a day isn't that day's reference", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-07T16:00:00Z') }); // Wednesday
+  const state = { quotes: { 'GC=F': 3900, 'SI=F': 48, 'PL=F': 1550, 'PA=F': 1100 } };
+  const fetcher = loadWith('services/price-fetcher', { supabase: priceLogDb(), axios: switchableAxios(state) });
+  await fetcher.fetchLiveSpotPrices();
+
+  // Thursday's first fetch fails and serves Wednesday's price from the cache.
+  t.mock.timers.setTime(Date.parse('2026-10-08T14:00:00Z'));
+  state.quotes = null;
+  await fetcher.fetchLiveSpotPrices();
+  assert.strictEqual(fetcher.getPriceSnapshot().source, 'cached-fallback');
+
+  // Then Thursday reads live.
+  t.mock.timers.tick(2 * 60 * 60 * 1000);
+  state.quotes = { 'GC=F': 4000, 'SI=F': 50, 'PL=F': 1550, 'PA=F': 1100 };
+  await fetcher.fetchLiveSpotPrices();
+  await settle();
+
+  // Friday measures against Thursday's live price, not Wednesday's.
+  t.mock.timers.setTime(Date.parse('2026-10-09T14:00:00Z'));
+  state.quotes = { 'GC=F': 4040, 'SI=F': 50.5, 'PL=F': 1550, 'PA=F': 1100 };
+  await fetcher.fetchLiveSpotPrices();
+  assert.strictEqual(fetcher.getPriceSnapshot().change.gold.prevClose, 4000);
+});
+
+test("a reading the spike guard rejects isn't the next day's reference", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T14:00:00Z') }); // Thursday
+  const db = priceLogDb([row('2026-10-07T21:00:00.000Z', 4000, 50)]);
+  const state = { quotes: { 'GC=F': 4000, 'SI=F': 50, 'PL=F': 1550, 'PA=F': 1100 } };
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: switchableAxios(state) });
+  await fetcher.fetchLiveSpotPrices();
+  await settle();
+
+  // Thursday's last reading is a bad gold tick, 15% over the one before.
+  t.mock.timers.tick(2 * 60 * 1000);
+  state.quotes = { 'GC=F': 4600, 'SI=F': 50, 'PL=F': 1550, 'PA=F': 1100 };
+  await fetcher.fetchLiveSpotPrices();
+  await settle();
+  assert.strictEqual(fetcher.getPriceSnapshot().spikeRejected, true);
+
+  // Friday measures against Thursday's last good reading, not the tick.
+  t.mock.timers.setTime(Date.parse('2026-10-09T14:00:00Z'));
+  state.quotes = { 'GC=F': 4040, 'SI=F': 50, 'PL=F': 1550, 'PA=F': 1100 };
+  await fetcher.fetchLiveSpotPrices();
+  assert.strictEqual(fetcher.getPriceSnapshot().change.gold.prevClose, 4000);
+});

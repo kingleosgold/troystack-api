@@ -28,8 +28,8 @@ let spotPriceCache = {
 };
 
 let fridayCloseData = null;
+// The last trading day's prices from price_log, kept for the day they're for.
 let previousDayPrices = { gold: 0, silver: 0, platinum: 0, palladium: 0, date: null };
-let lastSavedDate = null;
 
 // ============================================
 // MARKET HOURS DETECTION
@@ -90,16 +90,17 @@ function getLastTradingDay() {
  * one, and then what it read isn't kept.
  */
 async function getYesterdayPrices(isCurrent = () => true) {
-  const today = new Date().toISOString().split('T')[0];
+  const lastTradingDay = getLastTradingDay();
 
-  // Check in-memory first
-  if (previousDayPrices.date && previousDayPrices.date < today && previousDayPrices.gold > 0) {
+  // Read once per trading day, then kept in memory.
+  if (previousDayPrices.date === lastTradingDay && previousDayPrices.gold > 0) {
     return previousDayPrices;
   }
 
-  // Fallback: check price_log for last trading day
+  // The last row price_log holds for the last trading day. Only live readings
+  // the spike guard passed are logged, so built-in, cached and rejected prices
+  // never become the reference.
   try {
-    const lastTradingDay = getLastTradingDay();
     const dayStart = `${lastTradingDay}T00:00:00.000Z`;
     const dayEnd = `${lastTradingDay}T23:59:59.999Z`;
 
@@ -128,17 +129,6 @@ async function getYesterdayPrices(isCurrent = () => true) {
   }
 
   return null;
-}
-
-/**
- * Save current prices for tomorrow's change calculation.
- * Only saves once per day.
- */
-function savePreviousDayPrices(gold, silver, platinum, palladium) {
-  const today = new Date().toISOString().split('T')[0];
-  if (lastSavedDate === today || !gold || !silver) return;
-  lastSavedDate = today;
-  previousDayPrices = { gold, silver, platinum: platinum || 0, palladium: palladium || 0, date: today };
 }
 
 // ============================================
@@ -484,9 +474,6 @@ async function fetchLiveSpotPricesNow(generation) {
     }
 
     const changeData = calculateChanges(fetched, yesterday);
-
-    // Save for tomorrow's change calc
-    savePreviousDayPrices(fetched.gold, fetched.silver, fetched.platinum, fetched.palladium);
 
     const marketsClosed = areMarketsClosed();
 
