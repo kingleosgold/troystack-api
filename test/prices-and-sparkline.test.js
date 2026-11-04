@@ -682,3 +682,67 @@ test('when MetalPriceAPI stands in for Yahoo, a metal it leaves out is marked as
   assert.strictEqual(snap.source, 'metalpriceapi');
   assert.deepStrictEqual(snap.live, { gold: true, silver: true, platinum: false, palladium: true });
 });
+
+// ---------- the spike guard on a fresh start ----------
+
+// A database whose read of the last trading day's prices gives `lastDay` (or
+// nothing), and which keeps every row written to price_log.
+function lastDayDb(lastDay) {
+  const logged = [];
+  const query = {
+    select: () => query, gte: () => query, lte: () => query, order: () => query, limit: () => query, eq: () => query,
+    single: () => Promise.resolve(lastDay ? { data: lastDay, error: null } : { data: null, error: { message: 'no rows' } }),
+    maybeSingle: () => Promise.resolve({ data: null, error: null }),
+    insert: (row) => { logged.push(row); return Promise.resolve({ error: null }); },
+    upsert: () => Promise.resolve({ error: null }),
+  };
+  return { logged, from: () => query };
+}
+
+test("the first live price after a start isn't measured against the built-in prices", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T16:00:00Z') }); // Thursday
+  // Built-in gold is $5,150 and silver $87, so these read 23.5% and 42.8% off them.
+  const db = lastDayDb(null);
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios({ 'GC=F': 3939, 'SI=F': 49.8, 'PL=F': 1550, 'PA=F': 1100 }) });
+  await fetcher.fetchLiveSpotPrices();
+  await settle();
+  assert.strictEqual(fetcher.getPriceSnapshot().spikeRejected, false, 'Troy is told the price is confirmed');
+  assert.deepStrictEqual(db.logged.map((row) => row.gold_price), [3939], 'the reading goes to price_log');
+});
+
+test('on a fresh start the spike guard measures against the last trading day', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T16:00:00Z') }); // Thursday
+  const lastDay = { gold_price: 4000, silver_price: 50, platinum_price: 1550, palladium_price: 1100 };
+
+  // Within 10% of Wednesday's close, so it's logged.
+  const calm = lastDayDb(lastDay);
+  const ok = loadWith('services/price-fetcher', { supabase: calm, axios: fakeAxios({ 'GC=F': 4100, 'SI=F': 51, 'PL=F': 1560, 'PA=F': 1110 }) });
+  await ok.fetchLiveSpotPrices();
+  await settle();
+  assert.strictEqual(ok.getPriceSnapshot().spikeRejected, false);
+  assert.deepStrictEqual(calm.logged.map((row) => row.gold_price), [4100]);
+
+  // Silver 20% over Wednesday's close is still a spike.
+  const jumpy = lastDayDb(lastDay);
+  const spiked = loadWith('services/price-fetcher', { supabase: jumpy, axios: fakeAxios({ 'GC=F': 4010, 'SI=F': 60, 'PL=F': 1560, 'PA=F': 1110 }) });
+  await spiked.fetchLiveSpotPrices();
+  await settle();
+  assert.strictEqual(spiked.getPriceSnapshot().spikeRejected, true);
+  assert.deepStrictEqual(jumpy.logged, [], 'nothing goes to price_log');
+});
+
+test('after a live reading the spike guard measures against it', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T16:00:00Z') }); // Thursday
+  const quotes = { 'GC=F': 4000, 'SI=F': 50, 'PL=F': 1550, 'PA=F': 1100 };
+  const db = lastDayDb(null);
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios(quotes) });
+  await fetcher.fetchLiveSpotPrices();
+
+  // Two minutes on, gold reads 15% higher.
+  t.mock.timers.tick(2 * 60 * 1000);
+  quotes['GC=F'] = 4600;
+  await fetcher.fetchLiveSpotPrices();
+  await settle();
+  assert.strictEqual(fetcher.getPriceSnapshot().spikeRejected, true);
+  assert.deepStrictEqual(db.logged.map((row) => row.gold_price), [4000], 'only the first reading was logged');
+});
