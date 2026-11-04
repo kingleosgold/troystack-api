@@ -403,6 +403,18 @@ async function fetchFromMetalPriceAPI() {
   };
 }
 
+/**
+ * The prices the spike guard measures a new reading against. The cache's
+ * prices when they were read live (a cached fallback still holds the last live
+ * reading). Built-in prices were never read live, so then the last trading
+ * day's prices, or null when there are none.
+ */
+function spikeReference(cache, yesterday) {
+  if (cache.source !== 'static-fallback') return { gold: cache.prices.gold, silver: cache.prices.silver };
+  if (yesterday && yesterday.gold > 0) return { gold: yesterday.gold, silver: yesterday.silver };
+  return null;
+}
+
 // ============================================
 // MAIN FETCH FUNCTION
 // ============================================
@@ -478,8 +490,11 @@ async function fetchLiveSpotPricesNow(generation) {
 
     const marketsClosed = areMarketsClosed();
 
-    // Snapshot previous prices for spike guard (before cache update)
-    const prevPrices = { ...spotPriceCache.prices };
+    // The spike guard measures this reading against the last one read live.
+    // Built-in prices were never read live, so on a fresh start it measures
+    // against the last trading day's price instead, or skips the check when
+    // there's none. Taken before the cache update.
+    const prevPrices = spikeReference(spotPriceCache, yesterday);
 
     // Update cache. A fallback to the cached prices keeps the time they were
     // read live, and built-in prices were never read live at all.
@@ -519,9 +534,9 @@ async function fetchLiveSpotPricesNow(generation) {
     if (fetched.source === 'static-fallback' || fetched.source === 'cached-fallback') {
       console.log(`   Skipping price_log — source is ${fetched.source}`);
     } else {
-      // Spike guard: reject if gold or silver jumped >10% from previous cache
-      const goldPctChange = prevPrices.gold > 0 ? Math.abs((fetched.gold - prevPrices.gold) / prevPrices.gold) : 0;
-      const silverPctChange = prevPrices.silver > 0 ? Math.abs((fetched.silver - prevPrices.silver) / prevPrices.silver) : 0;
+      // Spike guard: reject if gold or silver moved more than 10% from the reference above
+      const goldPctChange = prevPrices && prevPrices.gold > 0 ? Math.abs((fetched.gold - prevPrices.gold) / prevPrices.gold) : 0;
+      const silverPctChange = prevPrices && prevPrices.silver > 0 ? Math.abs((fetched.silver - prevPrices.silver) / prevPrices.silver) : 0;
 
       // The reading is still served, so Troy is told it isn't confirmed and
       // never takes it for a new record (services/troy-history.js).
