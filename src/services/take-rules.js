@@ -3,7 +3,7 @@
 // opening on "missing the point" and calling dips a buying opportunity, which
 // reads as a trade call next to the site's not-financial-advice line.
 // Troy's chat prompt (troy-prompt.js) is separate and stays as it is, so his
-// chat answers the same on troystack.ai and in the app.
+// chat answers the same on troystack.com and in the app.
 
 const BANNED_OPENINGS = [
   'missing the point',

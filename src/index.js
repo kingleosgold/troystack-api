@@ -75,7 +75,7 @@ const ALLOWED_ORIGINS = [
 ];
 
 // Vercel previews of the web app, so a pull request's preview reads the API
-// the way troystack.ai does. Scoped to the troystack-webapp project.
+// the way troystack.com does. Scoped to the troystack-webapp project.
 const PREVIEW_ORIGIN = /^https:\/\/troystack-webapp-[a-z0-9-]+-jon-5842s-projects\.vercel\.app$/;
 
 const corsOptions = {
@@ -229,12 +229,12 @@ app.use('/v1/min-version', minVersionRouter);
 // routers so nothing there answers it first.
 app.post('/v1/troy/report', publicLimiter, createTroyReportHandler({ supabase: supabaseClient }));
 
-// Funnel counts from troystack.ai's Gold page (see routes/funnel.js).
+// Funnel counts from troystack.com's Gold page (see routes/funnel.js).
 const { createFunnelHandler, funnelLimiter } = require('./routes/funnel');
 app.post('/v1/funnel', publicLimiter, funnelLimiter, createFunnelHandler({ supabase: supabaseClient }));
 app.use('/v1/account', publicLimiter, createAccountRouter({ supabase: supabaseClient, stripe: stripeClient }));
 
-// Troy for visitors on troystack.ai who haven't signed in: capped per
+// Troy for visitors on troystack.com who haven't signed in: capped per
 // visitor and by a daily budget (see routes/troy-ask.js)
 app.use('/v1/troy', publicLimiter, createTroyAskRouter({
   llm: troyLlm,

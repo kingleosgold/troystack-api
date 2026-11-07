@@ -1092,8 +1092,8 @@ router.post('/create-checkout-session', async (req, res) => {
       mode: isLifetime ? 'payment' : 'subscription',
       customer: customerId,
       line_items: [{ price: price_id, quantity: 1 }],
-      success_url: safeRedirect(success_url, 'https://troystack.ai/settings?session_id={CHECKOUT_SESSION_ID}'),
-      cancel_url: safeRedirect(cancel_url, 'https://troystack.ai/settings'),
+      success_url: safeRedirect(success_url, 'https://troystack.com/settings?session_id={CHECKOUT_SESSION_ID}'),
+      cancel_url: safeRedirect(cancel_url, 'https://troystack.com/settings'),
       client_reference_id: user_id,
       metadata: campaign ? { user_id, tier, campaign } : { user_id, tier },
     };
@@ -1281,7 +1281,7 @@ router.post('/customer-portal', async (req, res) => {
 
     const session = await stripe.billingPortal.sessions.create({
       customer: portalCustomer,
-      return_url: safeRedirect(return_url, 'https://troystack.ai/settings'),
+      return_url: safeRedirect(return_url, 'https://troystack.com/settings'),
     });
 
     console.log(`💳 [Stripe] Customer portal session created for user ${user_id}`);
@@ -1295,7 +1295,7 @@ router.post('/customer-portal', async (req, res) => {
 
 // GET /v1/stripe/my-plan
 // The web plan Stripe holds for the signed-in account. A plan bought on
-// troystack.ai lives in Stripe, not RevenueCat, so the iPhone app asks here
+// troystack.com lives in Stripe, not RevenueCat, so the iPhone app asks here
 // before it treats an account with no App Store plan as free. Answers
 // { plan: 'gold' | 'lifetime' | null, status, trial_end }.
 router.get('/my-plan', async (req, res) => {

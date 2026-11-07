@@ -573,7 +573,7 @@ router.post('/conversations/:id/messages', async (req, res) => {
       }).join('\n');
 
     // The day's moves, Troy's latest Stack Signal and the newest headlines, so
-    // he can say what moved metals, the same as on troystack.ai.
+    // he can say what moved metals, the same as on troystack.com.
     let marketBlock = '';
     try {
       marketBlock = (await sharedMarketBlock(snapshot)) || '';
