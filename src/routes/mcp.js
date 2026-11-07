@@ -186,7 +186,7 @@ async function tool_getSpeculation({ gold, silver, platinum, palladium }) {
 // AUTH HELPER — shared by all authenticated MCP tools
 // ============================================
 
-const AUTH_ERROR = { error: 'Invalid API key. Generate one at troystack.ai/developers/keys' };
+const AUTH_ERROR = { error: 'Invalid API key. Generate one at troystack.com/developers/keys' };
 
 /**
  * Validate an api_key param: hash it, look up in api_keys table.

@@ -58,7 +58,7 @@ function askSource(req) {
 }
 
 const WHO = {
-  web: "A visitor on troystack.ai who hasn't signed in. You don't know what they hold, so never invent a stack for them. If they ask about their own stack, tell them they can add it at troystack.ai/stack or in the TroyStack iPhone app, and you'll know it from then on.",
+  web: "A visitor on troystack.com who hasn't signed in. You don't know what they hold, so never invent a stack for them. If they ask about their own stack, tell them they can add it at troystack.com/stack or in the TroyStack iPhone app, and you'll know it from then on.",
   app: "A guest in the TroyStack app who hasn't made an account. You can't see what they hold, even if they've added holdings on this phone, so never invent a stack for them. If they ask about their own stack, tell them a free account lets you see the stack they've added in the app, and what they've saved on this phone moves over with it.",
 };
 

@@ -70,7 +70,7 @@ test('a visitor gets an answer and a count of what is left', async () => {
   assert.strictEqual(call.message, 'What moved silver today?');
   assert.strictEqual(call.prompt.persona, TROY_PERSONA);
   assert.strictEqual(call.prompt.knowledge, TROY_KNOWLEDGE);
-  assert.match(call.prompt.stack, /visitor on troystack\.ai/);
+  assert.match(call.prompt.stack, /visitor on troystack\.com/);
   assert.match(call.prompt.stack, /Gold: \$4173\.3/);
   assert.match(call.prompt.stack, /Gold\/Silver Ratio: 69\.7/);
 });
@@ -232,10 +232,10 @@ test('an app guest hears about the app, not troystack.ai', async () => {
   const [noOrigin, saysApp, saysWeb] = llm.calls.map((c) => c.prompt.stack);
   for (const stack of [noOrigin, saysApp]) {
     assert.match(stack, /guest in the TroyStack app/);
-    assert.doesNotMatch(stack, /troystack\.ai\/stack|iPhone app/);
+    assert.doesNotMatch(stack, /troystack\.(?:ai|com)\/stack|iPhone app/);
     assert.match(stack, /Gold: \$4173\.3/);
   }
-  assert.match(saysWeb, /visitor on troystack\.ai/);
+  assert.match(saysWeb, /visitor on troystack\.com/);
 });
 
 test('askSource reads the body first, then the Origin header', () => {
