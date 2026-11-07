@@ -28,12 +28,12 @@
 // RevenueCat's REST API with REVENUECAT_SECRET_KEY and gets the plan RevenueCat
 // now holds for it. Without the key it's logged so it can be settled by hand.
 // The sync and TRANSFER also need the web plan check stripe.js hands in, since
-// without it a plan bought on troystack.ai looks like nothing and would be
+// without it a plan bought on troystack.com looks like nothing and would be
 // written over. Until it's handed in, the sync answers 503 and TRANSFER is
 // only logged.
 //
 // When an App Store plan ends, by expiry or refund, the account may still hold
-// another plan: one bought on troystack.ai, which stripe.js hands this module a
+// another plan: one bought on troystack.com, which stripe.js hands this module a
 // check for, or another App Store plan on record. The profile gets that plan
 // before it gets free.
 //
@@ -438,7 +438,7 @@ function storePlanOnRecord(record, ignore = null) {
 }
 
 // The plan an account is left with once an App Store plan ends: lifetime from
-// troystack.ai or the App Store, then an App Store subscription still
+// troystack.com or the App Store, then an App Store subscription still
 // running, then a web subscription, or free. The App Store subscription comes
 // before the web one because its expiry goes on the profile, which lets
 // stripe.js see it when the web plan ends. A profile with no customer id is
@@ -577,7 +577,7 @@ function storeHoldings(subscriber, id) {
 }
 
 // Reads what RevenueCat holds for an account and puts it on the record and on
-// the profile, alongside any plan bought on troystack.ai, in the account's
+// the profile, alongside any plan bought on troystack.com, in the account's
 // turn. A temporary grant that's still running is left alone, since
 // RevenueCat may not show it by product. A read or write that fails throws.
 async function syncFromRevenueCat(id) {
@@ -927,7 +927,7 @@ async function signedInAccount(req) {
 async function revenueCatSyncHandler(req, res) {
   const id = await signedInAccount(req);
   if (!id) return res.status(401).json({ error: 'Sign in first' });
-  // Without stripe.js's web plan check, a plan bought on troystack.ai would
+  // Without stripe.js's web plan check, a plan bought on troystack.com would
   // look like nothing and be written over, so the sync doesn't run.
   if (!process.env.REVENUECAT_SECRET_KEY || !webPlanCheck) {
     if (!webPlanCheck) console.warn('[RevenueCat Sync] No web plan check from stripe.js, so nothing is synced');
@@ -981,7 +981,7 @@ async function revenueCatHoldings(id, { timeoutMs } = {}) {
 // never got. The record alone can't tell a grace period from a plan that
 // ended, and a plan sold on the web during one would be billed twice once
 // Apple's retry goes through. So without REVENUECAT_SECRET_KEY, or without
-// the web plan check that keeps a plan bought on troystack.ai from being
+// the web plan check that keeps a plan bought on troystack.com from being
 // written over, nothing is synced and it answers null. Otherwise it answers
 // the plan the account now has, and a read or write that fails throws.
 async function syncStorePlan(id) {

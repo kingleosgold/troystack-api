@@ -1,6 +1,6 @@
 const rateLimit = require('express-rate-limit');
 
-// Daily counts of the steps from troystack.ai's Gold page to an open
+// Daily counts of the steps from troystack.com's Gold page to an open
 // checkout, kept in funnel_counts (migration 010). The site counts the page
 // view, the plan tap and the sign-up. The API counts a checkout it opened,
 // so that step can't be counted from a browser.

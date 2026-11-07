@@ -9,7 +9,7 @@
 // must name that session's own user, or it's refused with 403. A call with no
 // token, or with a token that doesn't check out, goes through as before, and
 // one log line counts it, so the logs show when the apps have caught up.
-// Step two. The iPhone app and troystack.ai send their session token on
+// Step two. The iPhone app and troystack.com send their session token on
 // these calls.
 // Step three. Once the count says they do, a user id with no valid token is
 // refused. Alerts a signed-out phone keeps by device_id stay as they are.

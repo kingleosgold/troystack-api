@@ -1,4 +1,4 @@
-// Troy for visitors on troystack.ai who haven't signed in.
+// Troy for visitors on troystack.com who haven't signed in.
 //
 // POST /v1/troy/ask        { message, history?, source? }  -> { reply, questionsUsed, questionsLimit, resetsAt }
 // GET  /v1/troy/ask/status                         -> { questionsUsed, questionsLimit, resetsAt }
@@ -14,7 +14,7 @@
 // The TroyStack app sends its guests here too. source 'app' says so, and a
 // call with no Origin header counts as the app, since a browser always sends
 // one on a cross-origin POST and the app never does. An app guest hears about
-// adding their stack in the app instead of at troystack.ai.
+// adding their stack in the app instead of at troystack.com.
 
 const express = require('express');
 const { ipKeyGenerator } = require('express-rate-limit');

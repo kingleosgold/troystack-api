@@ -1032,6 +1032,24 @@ test('the billing page opens on the customer that holds the plan', async () => {
   assert.equal(state.portal.customer, 'cus_old');
 });
 
+test('checkout and the billing page send people back to troystack.com when the page gives no address', async () => {
+  reset({ profile: { email: 'a@example.com', stripe_customer_id: 'cus_1' } });
+  const res = fakeRes();
+  await createCheckout({ headers: { authorization: 'Bearer good-token' }, body: { user_id: USER, price_id: 'price_gold_yearly' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.created.success_url, 'https://troystack.com/settings?session_id={CHECKOUT_SESSION_ID}');
+  assert.equal(state.created.cancel_url, 'https://troystack.com/settings');
+
+  reset({
+    profile: { stripe_customer_id: 'cus_1' },
+    subscriptions: [{ id: 'sub_1', customer: 'cus_1', status: 'active', items: { data: [{ price: { id: 'price_gold_monthly', product: 'prod_gold' } }] } }],
+  });
+  const portal = fakeRes();
+  await portalHandler({ headers: { authorization: 'Bearer good-token' }, body: { user_id: USER } }, portal);
+  assert.equal(portal.statusCode, 200);
+  assert.equal(state.portal.return_url, 'https://troystack.com/settings');
+});
+
 test('a late subscription update is checked against where the subscription stands now', async () => {
   reset({
     profile: { id: USER, subscription_tier: 'free', subscription_status: 'canceled', stripe_customer_id: 'cus_1' },

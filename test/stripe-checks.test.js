@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { safeRedirect, cleanCampaign, signedInUserId, liveSubscriptions, subscriptionTier, paidLifetimeSessions, soldLifetime } = require('../src/lib/stripe-checks');
 
-const FALLBACK = 'https://troystack.ai/settings';
+const FALLBACK = 'https://troystack.com/settings';
 
 test('redirects stay on TroyStack sites', () => {
   const back = 'https://troystack.ai/settings?session_id={CHECKOUT_SESSION_ID}';
