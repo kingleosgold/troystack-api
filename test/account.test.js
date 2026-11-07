@@ -199,6 +199,8 @@ test('an account on a Stripe plan that will charge again is told to cancel first
     const res = await callDelete(supabase, { authorization: 'Bearer good' });
     assert.strictEqual(res.statusCode, 409, status);
     assert.strictEqual(res.body.error, 'stripe_plan_active');
+    // troystack.ai redirects to troystack.com since the 11/6 domain move.
+    assert.match(res.body.message, /Settings on troystack\.com first/);
     assert.ok(!supabase.log.some(([, op]) => op === 'delete'));
     assert.strictEqual(supabase.deletedUsers.length, 0);
   }

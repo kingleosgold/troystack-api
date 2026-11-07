@@ -189,7 +189,7 @@ function createAccountRouter({ supabase, stripe = null }) {
       if (charges) {
         return res.status(409).json({
           error: 'stripe_plan_active',
-          message: 'Cancel your Gold plan in Settings on troystack.ai first, so your card isn\'t charged again, then delete your account. Or email support@troystack.com and we\'ll do both.',
+          message: 'Cancel your Gold plan in Settings on troystack.com first, so your card isn\'t charged again, then delete your account. Or email support@troystack.com and we\'ll do both.',
         });
       }
 

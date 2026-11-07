@@ -300,7 +300,7 @@ app.get('/', (req, res) => {
     name: 'TroyStack API',
     version: '3.0.1',
     description: 'AI-powered precious metals portfolio tracking and market intelligence',
-    docs: 'https://troystack.ai/developers',
+    docs: 'https://troystack.com/developers',
     mcp: 'https://api.troystack.ai/.well-known/mcp.json',
     openapi: 'https://api.troystack.ai/openapi.json',
     llms: 'https://api.troystack.ai/llms.txt',
