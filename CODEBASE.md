@@ -12,7 +12,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 - **Purpose:** Express app entry point — CORS, middleware, route mounting, 14 cron jobs
 - **Exports:** None (starts server)
 - **Dependencies:** All route/service/middleware modules, dotenv, express, cors, helmet, node-cron
-- **Last modified:** 2026-03-26
+- **Last modified:** 2026-11-07
 
 ### src/routes/prices.js
 - **Purpose:** Live and historical precious metals spot prices
@@ -112,7 +112,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 - **Purpose:** Troy AI chatbot — persistent conversations, TTS, STT, preview detection
 - **Exports:** Express router
 - **Dependencies:** supabase, axios, number-to-words, multer, price-fetcher, Gemini API
-- **Last modified:** 2026-04-08
+- **Last modified:** 2026-11-07
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -133,7 +133,7 @@ Both the signed-in chat and the visitor chat add the day's market context from `
 - **Purpose:** Troy for visitors on troystack.com who haven't signed in. Single answers, no saved history; the page sends back the last few turns for context
 - **Exports:** `createTroyAskRouter({ llm, getPrices, getIntel, getMarket, now, env })`, `cleanHistory()`, `visitorBlock()`
 - **Dependencies:** troy-llm, troy-prompt, daily-budget, price-fetcher, intelligence-scraper, troy-context (wired in index.js)
-- **Last modified:** 2026-10-08
+- **Last modified:** 2026-11-07
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -224,7 +224,7 @@ Both the signed-in chat and the visitor chat add the day's market context from `
 - **Purpose:** App Store purchases from RevenueCat land on profiles. Once migration 006 is on, this webhook and its sync route are the only ways an App Store plan reaches profiles.
 - **Exports:** `revenueCatWebhookHandler`, `revenueCatSyncHandler`, `setWebPlanCheck` for stripe.js to hand in its Stripe plan check, `appStorePlanOnRecord` and `hadAppStorePlan` for stripe.js to read the App Store record, `revenueCatHoldings` for checkout to ask RevenueCat what the App Store holds and has held for the account, `syncStorePlan` for checkout to put that on the record and profile, plus `applyEvent`, `mapProductToTier` and `authorized` for tests
 - **Dependencies:** supabase, RevenueCat's REST API with `REVENUECAT_SECRET_KEY`, and the Stripe check handed in with `setWebPlanCheck`
-- **Last modified:** 2026-10-09
+- **Last modified:** 2026-11-07
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
