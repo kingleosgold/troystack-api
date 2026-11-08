@@ -9,7 +9,7 @@ Express 5 REST API powering the TroyStack precious metals portfolio app. Deploye
 ## 1. API Routes
 
 ### src/index.js
-- **Purpose:** Express app entry point — CORS, middleware, route mounting, 14 cron jobs
+- **Purpose:** Express app entry point. CORS, middleware, route mounting, 21 cron jobs (three run only when their API key is set)
 - **Exports:** None (starts server)
 - **Dependencies:** All route/service/middleware modules, dotenv, express, cors, helmet, node-cron
 - **Last modified:** 2026-11-07
@@ -490,11 +490,11 @@ Auth model: shared secret via `ADMIN_AUTH_KEY` env var (compared verbatim agains
 
 ## 3. Cron Jobs
 
-All scheduled in `src/index.js`. Timezone: UTC unless noted.
+All scheduled in `src/index.js`. Timezone: UTC unless noted. 21 run. The intelligence and daily brief crons run only when `GEMINI_API_KEY` is set, and the Stripe reconcile only when `STRIPE_SECRET_KEY` is set. Struck rows are commented out in index.js.
 
 | Schedule | Time (EST) | Job | Source |
 |----------|-----------|-----|--------|
-| `30 11 * * *` | 6:30 AM | Intelligence generation | intelligence.js `runIntelligenceGeneration()` |
+| `30 11 * * *` | 6:30 AM | Intelligence generation, once a day across restarts with one retry | intelligence-catchup.js `runCronOncePerDay()` |
 | `35 11 * * *` | 6:35 AM | Daily brief for Gold/Lifetime users + push | intelligence.js `generateDailyBrief()` |
 | `0 23 * * *` | 6:00 PM | COMEX vault data scrape | comex-scraper.js `scrapeComexVaultData()` |
 | `* * * * *` | Every 60s | Price fetch + cache update + price_log write (Yahoo Finance primary) | price-fetcher.js `fetchLiveSpotPrices()`, price_log written every 60s (decimated later). One live fetch runs at a time: the cron, startup and `getSpotPrices()` callers that arrive while one is running share it, and one still running after 30 seconds is replaced. At that point everyone waiting on it, however late they joined, gets the cached prices rather than waiting on a fetch that may never finish. A replaced fetch that finishes later writes nothing, so it can't put back older prices |
@@ -504,16 +504,19 @@ All scheduled in `src/index.js`. Timezone: UTC unless noted.
 | `30 21 * * 1-5` | 4:30 PM (weekdays) | Stack Signal evening digest | `generateStackSignal('evening')` |
 | `0 22 * * 5` | 5:00 PM (Fri) | Weekly recap | `generateStackSignal('weekly_recap')` |
 | `15 11 * * 1` | 6:15 AM (Mon) | Weekly preview | `generateStackSignal('weekly_preview')` |
-| `0 22 * * 0` | 6:00 PM (Sun) | Weekly X thread to @troystack_ | weekly-thread.js `generateAndPostWeeklyThread()` |
-| `*/5 * * * *` | Every 5 minutes | Tweet queue processor (1 tweet per cycle, urgent first) | auto-tweet.js `processTweetQueue()` |
+| ~~`0 22 * * 0`~~ | ~~6:00 PM (Sun)~~ | **DISABLED** 2026-05-30, X integration off. Weekly X thread to @troystack_ | weekly-thread.js `generateAndPostWeeklyThread()` |
+| ~~`*/5 * * * *`~~ | ~~Every 5 minutes~~ | **DISABLED** 2026-05-30, X integration off. Tweet queue processor (1 tweet per cycle, urgent first) | auto-tweet.js `processTweetQueue()` |
 | `0 */4 * * *` | Every 4 hours | YouTube intelligence scrape | intelligence-scraper.js `scrapeYouTubeChannels()` |
-| `0 */2 * * *` | Every 2 hours | Twitter intelligence scrape | intelligence-scraper.js `scrapeTwitterAccounts()` |
+| ~~`0 */2 * * *`~~ | ~~Every 2 hours~~ | **DISABLED** 2026-05-30, X integration off. Twitter intelligence scrape | intelligence-scraper.js `scrapeTwitterAccounts()` |
 | `0 */3 * * *` | Every 3 hours | Reddit intelligence scrape | intelligence-scraper.js `scrapeReddit()` |
 | `*/5 * * * *` | Every 5m (market) / 15m (off) | Composite spot price cross-check | price-consensus.js `updateCompositePrice()` |
 | `0 3 * * *` (ET) | 3:00 AM EST nightly | price_log decimation (5-min / 1-hour / daily tiers, skips rows already marked) | price-log-decimator.js `decimatePriceLog()` |
 | `0 22 28-31 * *` | 5:00 PM (last day) | Monthly recap | `generateStackSignal('monthly_recap')` |
 | `0 15 1 1 *` | 10:00 AM (Jan 1) | Yearly recap | `generateStackSignal('yearly_recap')` |
 | `10 8 * * *` | 3:10 AM | TTS audio cache TTL cleanup (evicts troy-voice-cache objects >30 days old) | tts-cache.js `cleanupExpired()` |
+| `7-59/10 * * * *` | Every 10 min from :07 | Signal hero images, light JPEG copies of the PNGs, 20 a run until each has one | signal-image-web.js `runSignalImageWeb()` |
+| `40 9 * * *` | 4:40 AM | Stripe reconcile, the profile follows Stripe for every Gold profile with a customer | stripe.js `reconcileWebGold()` |
+| `0 2 * * *` (ET) | 2:00 AM EST nightly | Finance cost snapshot into `cost_snapshots` | admin/finance `runAllCostSources()` |
 | `15 12 * * *` | 7:15 AM | Podcast heal cron — sweeps the last 3 days for missing/expired-pending episodes; an hour past generation (outside the 10-min claim lease) and independent of the 11:15 process surviving | podcast.js `sweepRecentEpisodes(3)` |
 | ~~`5 * * * *`~~ | ~~Every hour at :05~~ | **DISABLED** — Dealer price scraping (re-enable when affiliate integrations ready) | dealerScraper.js `scrapeAllDealers()` |
 
