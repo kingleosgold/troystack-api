@@ -2033,11 +2033,26 @@ test('verify-session answers a junk id with 400 and an unknown one with 404, not
 
     // One past Stripe's cap is the caller's 400, so the cap sits at exactly 66.
     fakeStripe.checkout.sessions.retrieve = async () => {
+      state.stripeCalls.push('checkout.sessions.retrieve');
       throw Object.assign(new Error('Invalid checkout.session id: must be at most 66 characters'), { type: 'StripeInvalidRequestError', statusCode: 400 });
     };
+    state.stripeCalls.length = 0;
     res = fakeRes();
     await quietly(() => verifySession({ body: { session_id: `cs_live_${'e'.repeat(59)}` } }, res));
     assert.equal(res.statusCode, 400, 'a 67-character id is past the cap');
+    assert.deepEqual(state.stripeCalls, ['checkout.sessions.retrieve'], 'the 67-character id reached Stripe');
+    assert.equal(state.updates.length, 0);
+
+    // An id at the shape check's 255-character ceiling still goes to Stripe,
+    // which turns it away, so the caller gets a 400.
+    const ceiling = `cs_${'f'.repeat(252)}`;
+    assert.equal(ceiling.length, 255);
+    state.stripeCalls.length = 0;
+    res = fakeRes();
+    await quietly(() => verifySession({ body: { session_id: ceiling } }, res));
+    assert.equal(res.statusCode, 400);
+    assert.deepEqual(state.stripeCalls, ['checkout.sessions.retrieve'], 'a 255-character id reached Stripe');
+    assert.equal(state.updates.length, 0);
   } finally {
     fakeStripe.checkout.sessions.retrieve = real;
   }
