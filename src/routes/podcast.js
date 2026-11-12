@@ -30,21 +30,43 @@ const EPISODE_PAGE_BASE = `${SITE_URL}/signal/`;
 // App Store Connect attribute installs that come from the show.
 const APP_STORE_PODCAST_URL = 'https://apps.apple.com/app/apple-store/id6757343766?pt=96487801&ct=podcast&mt=8';
 
+// Apple Podcasts content guideline 1.11: a show with a synthetic voice or an
+// AI-generated host discloses it in the metadata of the show and of every
+// episode, and in the audio (the spoken outro in services/podcast.js). This
+// line is that episode-level disclosure, added at render time so every
+// episode in the feed carries it, old and new. Titles stay free of it.
+const EPISODE_DISCLOSURE = "Troy's voice and script are AI-generated.";
+
+// The Stack Signal for October 28, 2026, so the date stays one glance away
+// now that titles carry the news.
+function episodeDateLine(ep) {
+  const d = new Date(ep.published_at);
+  if (Number.isNaN(d.getTime())) return '';
+  const label = d.toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
+  });
+  return `The Stack Signal for ${label}.`;
+}
+
 function showNotes(ep) {
+  const header = [episodeDateLine(ep), EPISODE_DISCLOSURE].filter(Boolean).join(' ');
   const footer = [
     `Read the full Signal: ${EPISODE_PAGE_BASE}${ep.slug}`,
     `Track your own stack with TroyStack, free on the App Store: ${APP_STORE_PODCAST_URL}`,
   ].join('\n');
-  return [ep.description, footer].filter(Boolean).join('\n\n');
+  return [header, ep.description, footer].filter(Boolean).join('\n\n');
 }
 const CHANNEL = {
   title: 'The Stack Signal: Daily Gold & Silver Brief',
   author: 'TroyStack',
   ownerName: 'TroyStack',
   ownerEmail: 'support@troystack.com',
+  // The last sentence is the show-level disclosure guideline 1.11 asks for.
   description:
-    "Troy's daily read on gold, silver, and the forces moving them — spot prices, COMEX flows, central bank buying, and what it all means for physical stackers. " +
-    "Hosted by Troy, TroyStack's AI market analyst. Episodes are AI-generated daily from live market data.",
+    "Troy's daily read on gold, silver and the forces moving them. " +
+    'Spot prices, COMEX flows, central bank buying and what it all means for physical stackers. ' +
+    'A new episode every morning, built from live market data. ' +
+    "Troy's voice and scripts are AI-generated.",
   language: 'en-us',
   explicit: 'false',
 };
@@ -73,6 +95,7 @@ function cdata(s) {
 function buildFeedXml(episodes) {
   const items = episodes.map((ep) => `    <item>
       <title>${xmlEscape(ep.title)}</title>
+      <itunes:title>${xmlEscape(ep.title)}</itunes:title>
       <link>${xmlEscape(EPISODE_PAGE_BASE + ep.slug)}</link>
       <description>${cdata(showNotes(ep))}</description>
       <enclosure url="${xmlEscape(ep.audio_url)}" length="${ep.audio_bytes}" type="audio/mpeg"/>
@@ -144,3 +167,5 @@ router.get('/feed.xml', async (_req, res) => {
 module.exports = router;
 module.exports.buildFeedXml = buildFeedXml;
 module.exports.showNotes = showNotes;
+module.exports.CHANNEL = CHANNEL;
+module.exports.EPISODE_DISCLOSURE = EPISODE_DISCLOSURE;
