@@ -1160,8 +1160,14 @@ router.post('/verify-session', async (req, res) => {
       if (error?.code === 'resource_missing') {
         // Logged so a test id sent to the live key, or a live id sent to the
         // test key, still shows up in the logs.
-        console.warn(`[Stripe] verify-session: no such checkout session ${session_id.slice(0, 12)}...`);
+        console.warn(`⚠️ [Stripe] verify-session: no such checkout session ${session_id.slice(0, 12)}...`);
         return res.status(404).json({ error: 'No such checkout session' });
+      }
+      // Any other id Stripe turns away, like one past its own length cap, is
+      // the caller's mistake too. Stripe's message is logged, never the id.
+      if (error?.type === 'StripeInvalidRequestError') {
+        console.warn(`⚠️ [Stripe] verify-session: Stripe refused the id ${session_id.slice(0, 12)}...:`, error.message);
+        return res.status(400).json({ error: 'That is not a checkout session id' });
       }
       throw error;
     }
