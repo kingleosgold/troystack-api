@@ -1998,14 +1998,14 @@ test('verify-session answers a junk id with 400 and an unknown one with 404, not
     assert.equal(res.statusCode, 500, 'a real Stripe fault still reads as ours');
     assert.deepEqual(state.stripeCalls, ['checkout.sessions.retrieve'], 'the Stripe fault came from the call');
 
-    // The longest id Stripe can issue still reaches Stripe.
+    // A 66-character id, the longest Stripe issues, that Stripe doesn't know is a 404.
     fakeStripe.checkout.sessions.retrieve = async () => {
       state.stripeCalls.push('checkout.sessions.retrieve');
       throw Object.assign(new Error('No such checkout.session'), { type: 'StripeInvalidRequestError', code: 'resource_missing' });
     };
     state.stripeCalls.length = 0;
     res = fakeRes();
-    await verifySession({ body: { session_id: `cs_${'a'.repeat(252)}` } }, res);
+    await quietly(() => verifySession({ body: { session_id: `cs_live_${'a'.repeat(58)}` } }, res));
     assert.equal(res.statusCode, 404);
     assert.deepEqual(state.stripeCalls, ['checkout.sessions.retrieve']);
 
@@ -2029,6 +2029,15 @@ test('verify-session answers a junk id with 400 and an unknown one with 404, not
     res = fakeRes();
     await quietly(() => verifySession({ body: { session_id: `cs_live_${'d'.repeat(58)}` } }, res));
     assert.equal(res.statusCode, 500, 'a bad request of ours on a real-length id still reads as ours');
+    assert.equal(res.body.error, 'Could not verify that checkout', "Stripe's words stay out of the answer");
+
+    // One past Stripe's cap is the caller's 400, so the cap sits at exactly 66.
+    fakeStripe.checkout.sessions.retrieve = async () => {
+      throw Object.assign(new Error('Invalid checkout.session id: must be at most 66 characters'), { type: 'StripeInvalidRequestError', statusCode: 400 });
+    };
+    res = fakeRes();
+    await quietly(() => verifySession({ body: { session_id: `cs_live_${'e'.repeat(59)}` } }, res));
+    assert.equal(res.statusCode, 400, 'a 67-character id is past the cap');
   } finally {
     fakeStripe.checkout.sessions.retrieve = real;
   }

@@ -1132,7 +1132,9 @@ router.post('/create-checkout-session', async (req, res) => {
 });
 
 // POST /v1/stripe/verify-session
-// Stripe caps object ids at 255 characters, the cs_ prefix included.
+// The shape of a checkout id, cs_ and then letters, digits and underscores.
+// The 255-character ceiling only keeps junk short. Stripe's own cap on a
+// checkout id is the 66 below, which it enforces itself on retrieve.
 const CHECKOUT_SESSION_ID = /^cs_[A-Za-z0-9_]{1,252}$/;
 // Stripe's own cap on a checkout session id, which it enforces on retrieve.
 const STRIPE_CHECKOUT_ID_MAX = 66;
@@ -1251,7 +1253,9 @@ router.post('/verify-session', async (req, res) => {
 
   } catch (error) {
     console.error('❌ [Stripe Verify] Error:', error.message);
-    return res.status(500).json({ error: error.message });
+    // This route needs no sign-in, so Stripe's or the database's own words
+    // stay in the log and never reach the caller.
+    return res.status(500).json({ error: 'Could not verify that checkout' });
   }
 });
 
