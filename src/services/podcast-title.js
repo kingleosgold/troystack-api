@@ -100,13 +100,38 @@ function toTitleCase(headline) {
 function numbersIn(text, { rounding = true } = {}) {
   const out = [];
   const src = String(text || '');
-  for (const m of src.matchAll(/(\$?)(\d[\d,]*(?:\.\d+)?)(\s*(?:%|percent\b))?(\s*(?:thousand|million|billion|trillion)\b)?/gi)) {
-    const base = Number(m[2].replace(/,/g, ''));
+  // Every number is read, wherever it sits, so a headline can't slip one
+  // past the check. What decides is only whether a minus belongs to it, so a
+  // headline can't turn "-0.5%" into "0.5%". A minus counts before the
+  // figure or right after its $. That's the ASCII hyphen-minus, typeset
+  // hyphens and dashes, the Unicode minus, or the word minus or negative.
+  // A hyphen or dash right after a letter, digit or period joins words or
+  // ranges (3-Year, 2024-25, 1-2%) and is never a sign, while the Unicode,
+  // small and fullwidth minus always are, a space after them included.
+  // Headlines can't hold a dash at all, so the wider set only changes how
+  // notes read.
+  const HYPHENS = '[-\\u2010\\u2011\\u2012\\u2013\\u2014]';
+  const MINUS = '[\\u2212\\uFE63\\uFF0D\\u2796\\u02D7]';
+  const re = new RegExp(
+    '(?:\\b(?<word>minus|negative)\\s+)?'
+    + `(?:(?<![\\p{L}\\p{N}.])(?<s1>${HYPHENS})|(?<m1>${MINUS})\\s?)?`
+    + `(?:(?<usd>\\$)(?:(?<s2>${HYPHENS})|(?<m2>${MINUS})\\s?)?)?`
+    + '(?<num>\\d[\\d,]*(?:\\.\\d+)?|\\.\\d+)'
+    + '(?<pct>\\s*(?:%|percent\\b))?'
+    + '(?<scale>\\s*(?:thousand|million|billion|trillion)\\b)?',
+    'giu',
+  );
+  for (const m of src.matchAll(re)) {
+    const g = m.groups;
+    // Notes stack signs for stress ("turned negative -0.5%") and never mean
+    // a double negative as a plus, so any sign makes the figure negative.
+    const sign = [g.word, g.s1, g.m1, g.s2, g.m2].some(Boolean) ? -1 : 1;
+    const base = sign * Number(g.num.replace(/,/g, ''));
     if (!Number.isFinite(base)) continue;
-    const value = m[4] ? base * SCALE_WORDS[m[4].trim().toLowerCase()] : base;
-    const kind = m[1] ? 'usd' : m[3] ? 'pct' : 'num';
+    const value = g.scale ? base * SCALE_WORDS[g.scale.trim().toLowerCase()] : base;
+    const kind = g.usd ? 'usd' : g.pct ? 'pct' : 'num';
     out.push({ kind, value });
-    if (rounding && kind === 'usd' && !m[4] && value >= 1000) out.push({ kind, value: Math.round(value), rounded: true });
+    if (rounding && kind === 'usd' && !g.scale && Math.abs(value) >= 1000) out.push({ kind, value: sign * Math.round(Math.abs(value)), rounded: true });
   }
   for (const m of src.toLowerCase().matchAll(/\b([a-z]+)\b/g)) {
     if (NUMBER_WORDS[m[1]] !== undefined) out.push({ kind: 'num', value: NUMBER_WORDS[m[1]] });

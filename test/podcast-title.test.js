@@ -14,6 +14,7 @@ const {
   fallbackTitle,
   titleSuffix,
   toTitleCase,
+  numbersIn,
   MAX_TITLE_CHARS,
 } = require('../src/services/podcast-title');
 
@@ -317,4 +318,52 @@ test('purchase news, the Sell America trade and bargain hunters stay reporting',
   ]) {
     assert.deepStrictEqual(headlineProblems(headline, notes, SUFFIX), [], headline);
   }
+});
+
+test('a negative figure keeps its sign, so a headline cannot flip it', () => {
+  const suffix = ' | Oct 28';
+  for (const minus of ['-', '−']) {
+    const source = `Real yields are ${minus}0.5% as gold holds $4,057.10.`;
+    assert.ok(
+      headlineProblems('Gold Holds $4,057 as Real Yields Hit 0.5%', source, suffix).some((p) => p.startsWith('number')),
+      `a positive 0.5% rides on ${minus}0.5%`,
+    );
+    assert.deepEqual(headlineProblems('Gold Holds $4,057 as Real Yields Hit -0.5%', source, suffix), []);
+  }
+  // The other way round, a minus the notes never state is refused too.
+  assert.ok(headlineProblems('Gold Holds $4,057 as Real Yields Hit -0.5%', 'Real yields are 0.5% as gold holds $4,057.10.', suffix)
+    .some((p) => p.startsWith('number')));
+  // A sign after the dollar sign counts the same.
+  assert.deepEqual(numbersIn('$-12 and -$12').map((n) => n.value), [-12, -12]);
+});
+
+test('hyphens inside words and ranges are never read as a minus', () => {
+  const values = numbersIn('a 3-year high, the 2024-25 season, a 1-2% move, $4,057-$4,100, Q3-2026 and\n- 2% bullet', { rounding: false }).filter((n) => n.kind !== 'num' || n.value !== 3);
+  assert.ok(values.every((n) => n.value >= 0), JSON.stringify(values));
+  assert.deepEqual(headlineProblems('Gold Holds $4,057 at a 3-Year High', 'Gold holds $4,057.10, a three-year high.', ' | Oct 28'), []);
+});
+
+test('every headline number is read, a leading dot or a letter before it included', () => {
+  const suffix = ' | Oct 28';
+  assert.ok(headlineProblems('Gold Holds $4,057 as Real Yields Hit .5%', 'Real yields -0.5%. Gold $4,057.10.', suffix)
+    .some((p) => p.startsWith('number')));
+  assert.ok(headlineProblems('Silver Jumps to $.75 Over Spot Today', 'Premium $1.50. Silver firm.', suffix)
+    .some((p) => p.startsWith('number')));
+  assert.ok(headlineProblems('Gold Holds $4,057 as G9 Meets', 'Gold $4,057.10 as ministers meet.', suffix)
+    .some((p) => p.startsWith('number')));
+});
+
+test('a Unicode minus counts after a letter or before a space, and signed dollars round by size', () => {
+  assert.deepEqual(numbersIn('YTD−0.5% and − 0.5%', { rounding: false }).map((n) => n.value), [-0.5, -0.5]);
+  assert.ok(numbersIn('-$4,057.50').some((n) => n.rounded && n.value === -4058));
+  assert.ok(numbersIn('negative $1.2 billion', { rounding: false }).some((n) => n.kind === 'usd' && n.value === -1.2e9));
+});
+
+test('stacked signs, dashes, words and parentheses in the notes all keep the minus', () => {
+  const suffix = ' | Oct 28';
+  for (const notes of ['turned negative −0.5%', 'went negative -0.5%', 'fell –0.5%', 'sits at minus 0.5%', 'real yields (-0.5%)']) {
+    const source = `Gold $4,057.10 as real yields ${notes}.`;
+    assert.ok(headlineProblems('Gold Holds $4,057 as Real Yields Hit 0.5%', source, suffix).some((p) => p.startsWith('number')), notes);
+  }
+  assert.deepEqual(numbersIn('minus -$12 and -$-12', { rounding: false }).map((n) => n.value), [-12, -12]);
 });
