@@ -1132,6 +1132,7 @@ router.post('/create-checkout-session', async (req, res) => {
 });
 
 // POST /v1/stripe/verify-session
+const CHECKOUT_SESSION_ID = /^cs_[A-Za-z0-9_]{1,250}$/;
 router.post('/verify-session', async (req, res) => {
   try {
     if (!stripe) {
@@ -1142,10 +1143,24 @@ router.post('/verify-session', async (req, res) => {
     if (!session_id || typeof session_id !== 'string') {
       return res.status(400).json({ error: 'session_id is required' });
     }
+    // Stripe's checkout ids start cs_. Anything else, like the junk crawlers
+    // post here, is the caller's mistake and never reaches Stripe.
+    if (!CHECKOUT_SESSION_ID.test(session_id)) {
+      return res.status(400).json({ error: 'That is not a checkout session id' });
+    }
 
-    const session = await stripe.checkout.sessions.retrieve(session_id, {
-      expand: ['subscription'],
-    });
+    let session;
+    try {
+      session = await stripe.checkout.sessions.retrieve(session_id, {
+        expand: ['subscription'],
+      });
+    } catch (error) {
+      // An id Stripe doesn't know is a 404, not a fault on our side.
+      if (error?.code === 'resource_missing') {
+        return res.status(404).json({ error: 'No such checkout session' });
+      }
+      throw error;
+    }
 
     const userId = session.client_reference_id || session.metadata?.user_id;
     if (!userId || !isUUID(userId)) {
