@@ -1133,8 +1133,7 @@ router.post('/create-checkout-session', async (req, res) => {
 
 // POST /v1/stripe/verify-session
 // The shape of a checkout id, cs_ and then letters, digits and underscores.
-// The 255-character ceiling only keeps junk short. Stripe's own cap on a
-// checkout id is the 66 below, which it enforces itself on retrieve.
+// The 255-character ceiling only keeps junk short.
 const CHECKOUT_SESSION_ID = /^cs_[A-Za-z0-9_]{1,252}$/;
 // Stripe's own cap on a checkout session id, which it enforces on retrieve.
 const STRIPE_CHECKOUT_ID_MAX = 66;
