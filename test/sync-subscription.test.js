@@ -2008,7 +2008,56 @@ test('verify-session answers a junk id with 400 and an unknown one with 404, not
     await verifySession({ body: { session_id: `cs_${'a'.repeat(252)}` } }, res);
     assert.equal(res.statusCode, 404);
     assert.deepEqual(state.stripeCalls, ['checkout.sessions.retrieve']);
+
+    // Stripe turns away a checkout id past 66 characters as an invalid
+    // request, not resource_missing. That's the caller's 400, not our 500.
+    fakeStripe.checkout.sessions.retrieve = async () => {
+      state.stripeCalls.push('checkout.sessions.retrieve');
+      throw Object.assign(new Error('Invalid checkout.session id: must be at most 66 characters'), { type: 'StripeInvalidRequestError', statusCode: 400 });
+    };
+    state.stripeCalls.length = 0;
+    res = fakeRes();
+    await quietly(() => verifySession({ body: { session_id: `cs_live_${'b'.repeat(100)}` } }, res));
+    assert.equal(res.statusCode, 400);
+    assert.deepEqual(state.stripeCalls, ['checkout.sessions.retrieve']);
+    assert.equal(state.updates.length, 0);
+
+    // The same error on an id Stripe could have issued is ours, so it stays 500.
+    fakeStripe.checkout.sessions.retrieve = async () => {
+      throw Object.assign(new Error('This property cannot be expanded (subscriptionz).'), { type: 'StripeInvalidRequestError', statusCode: 400, param: 'expand' });
+    };
+    res = fakeRes();
+    await quietly(() => verifySession({ body: { session_id: `cs_live_${'d'.repeat(58)}` } }, res));
+    assert.equal(res.statusCode, 500, 'a bad request of ours on a real-length id still reads as ours');
   } finally {
     fakeStripe.checkout.sessions.retrieve = real;
+  }
+});
+
+test('verify-session warns with only the first 12 characters of an id Stripe turns away', async () => {
+  reset({});
+  const real = fakeStripe.checkout.sessions.retrieve;
+  const before = console.warn;
+  const lines = [];
+  console.warn = (...args) => lines.push(args.join(' '));
+  const longId = `cs_live_${'c'.repeat(60)}SECRETTAIL`;
+  try {
+    for (const error of [
+      Object.assign(new Error('No such checkout.session'), { type: 'StripeInvalidRequestError', code: 'resource_missing' }),
+      Object.assign(new Error(`Invalid checkout.session id: ${longId}`), { type: 'StripeInvalidRequestError' }),
+    ]) {
+      fakeStripe.checkout.sessions.retrieve = async () => { throw error; };
+      await verifySession({ body: { session_id: longId } }, fakeRes());
+    }
+  } finally {
+    console.warn = before;
+    fakeStripe.checkout.sessions.retrieve = real;
+  }
+  assert.equal(lines.length, 2);
+  for (const line of lines) {
+    assert.match(line, /^⚠️ \[Stripe\] verify-session/);
+    assert.ok(line.includes(`${longId.slice(0, 12)}...`), line);
+    assert.ok(!line.includes(longId.slice(0, 13)), line);
+    assert.ok(!line.includes('SECRETTAIL'), line);
   }
 });
