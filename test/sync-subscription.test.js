@@ -2021,6 +2021,14 @@ test('verify-session answers a junk id with 400 and an unknown one with 404, not
     assert.equal(res.statusCode, 400);
     assert.deepEqual(state.stripeCalls, ['checkout.sessions.retrieve']);
     assert.equal(state.updates.length, 0);
+
+    // The same error on an id Stripe could have issued is ours, so it stays 500.
+    fakeStripe.checkout.sessions.retrieve = async () => {
+      throw Object.assign(new Error('This property cannot be expanded (subscriptionz).'), { type: 'StripeInvalidRequestError', statusCode: 400, param: 'expand' });
+    };
+    res = fakeRes();
+    await quietly(() => verifySession({ body: { session_id: `cs_live_${'d'.repeat(58)}` } }, res));
+    assert.equal(res.statusCode, 500, 'a bad request of ours on a real-length id still reads as ours');
   } finally {
     fakeStripe.checkout.sessions.retrieve = real;
   }
@@ -2036,7 +2044,7 @@ test('verify-session warns with only the first 12 characters of an id Stripe tur
   try {
     for (const error of [
       Object.assign(new Error('No such checkout.session'), { type: 'StripeInvalidRequestError', code: 'resource_missing' }),
-      Object.assign(new Error('Invalid checkout.session id: must be at most 66 characters'), { type: 'StripeInvalidRequestError' }),
+      Object.assign(new Error(`Invalid checkout.session id: ${longId}`), { type: 'StripeInvalidRequestError' }),
     ]) {
       fakeStripe.checkout.sessions.retrieve = async () => { throw error; };
       await verifySession({ body: { session_id: longId } }, fakeRes());

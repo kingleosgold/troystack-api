@@ -1134,6 +1134,8 @@ router.post('/create-checkout-session', async (req, res) => {
 // POST /v1/stripe/verify-session
 // Stripe caps object ids at 255 characters, the cs_ prefix included.
 const CHECKOUT_SESSION_ID = /^cs_[A-Za-z0-9_]{1,252}$/;
+// Stripe's own cap on a checkout session id, which it enforces on retrieve.
+const STRIPE_CHECKOUT_ID_MAX = 66;
 router.post('/verify-session', async (req, res) => {
   try {
     if (!stripe) {
@@ -1163,10 +1165,12 @@ router.post('/verify-session', async (req, res) => {
         console.warn(`⚠️ [Stripe] verify-session: no such checkout session ${session_id.slice(0, 12)}...`);
         return res.status(404).json({ error: 'No such checkout session' });
       }
-      // Any other id Stripe turns away, like one past its own length cap, is
-      // the caller's mistake too. Stripe's message is logged, never the id.
-      if (error?.type === 'StripeInvalidRequestError') {
-        console.warn(`⚠️ [Stripe] verify-session: Stripe refused the id ${session_id.slice(0, 12)}...:`, error.message);
+      // Stripe turns away a checkout id past 66 characters as an invalid
+      // request. That's the caller's mistake too. A shorter id keeps a 500
+      // here, so a fault on our side, like a bad expand, still shows as one.
+      // Stripe's message can echo the id, so only its code and param are logged.
+      if (error?.type === 'StripeInvalidRequestError' && session_id.length > STRIPE_CHECKOUT_ID_MAX) {
+        console.warn(`⚠️ [Stripe] verify-session: Stripe refused the id ${session_id.slice(0, 12)}... (${session_id.length} characters, code ${error.code || 'none'}, param ${error.param || 'none'})`);
         return res.status(400).json({ error: 'That is not a checkout session id' });
       }
       throw error;
