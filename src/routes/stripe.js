@@ -1132,7 +1132,8 @@ router.post('/create-checkout-session', async (req, res) => {
 });
 
 // POST /v1/stripe/verify-session
-const CHECKOUT_SESSION_ID = /^cs_[A-Za-z0-9_]{1,250}$/;
+// Stripe caps object ids at 255 characters, the cs_ prefix included.
+const CHECKOUT_SESSION_ID = /^cs_[A-Za-z0-9_]{1,252}$/;
 router.post('/verify-session', async (req, res) => {
   try {
     if (!stripe) {
@@ -1157,6 +1158,9 @@ router.post('/verify-session', async (req, res) => {
     } catch (error) {
       // An id Stripe doesn't know is a 404, not a fault on our side.
       if (error?.code === 'resource_missing') {
+        // Logged so a test id sent to the live key, or a live id sent to the
+        // test key, still shows up in the logs.
+        console.warn(`[Stripe] verify-session: no such checkout session ${session_id.slice(0, 12)}...`);
         return res.status(404).json({ error: 'No such checkout session' });
       }
       throw error;
