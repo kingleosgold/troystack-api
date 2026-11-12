@@ -1970,7 +1970,7 @@ test('a checkout landing while the reconcile holds the account waits its turn', 
 
 test('verify-session answers a junk id with 400 and an unknown one with 404, not 500', async () => {
   reset({});
-  for (const id of ['x`', 'pi_123', 'cs_', 'cs_abc/../x', `cs_${'a'.repeat(251)}`]) {
+  for (const id of ['x`', 'pi_123', 'cs_', 'cs_abc/../x', `cs_${'a'.repeat(253)}`]) {
     const res = fakeRes();
     await verifySession({ body: { session_id: id } }, res);
     assert.equal(res.statusCode, 400, id);
@@ -1989,11 +1989,25 @@ test('verify-session answers a junk id with 400 and an unknown one with 404, not
     assert.equal(state.updates.length, 0);
 
     fakeStripe.checkout.sessions.retrieve = async () => {
+      state.stripeCalls.push('checkout.sessions.retrieve');
       throw Object.assign(new Error('Stripe is down'), { type: 'StripeAPIError' });
     };
+    state.stripeCalls.length = 0;
     res = fakeRes();
     await verifySession({ body: { session_id: 'cs_live_ok' } }, res);
     assert.equal(res.statusCode, 500, 'a real Stripe fault still reads as ours');
+    assert.deepEqual(state.stripeCalls, ['checkout.sessions.retrieve'], 'the Stripe fault came from the call');
+
+    // The longest id Stripe can issue still reaches Stripe.
+    fakeStripe.checkout.sessions.retrieve = async () => {
+      state.stripeCalls.push('checkout.sessions.retrieve');
+      throw Object.assign(new Error('No such checkout.session'), { type: 'StripeInvalidRequestError', code: 'resource_missing' });
+    };
+    state.stripeCalls.length = 0;
+    res = fakeRes();
+    await verifySession({ body: { session_id: `cs_${'a'.repeat(252)}` } }, res);
+    assert.equal(res.statusCode, 404);
+    assert.deepEqual(state.stripeCalls, ['checkout.sessions.retrieve']);
   } finally {
     fakeStripe.checkout.sessions.retrieve = real;
   }
