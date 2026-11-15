@@ -824,4 +824,5 @@ module.exports = {
   logPriceToSupabase,
   fetchFromYahooFinance,
   getReferenceSession,
+  getYesterdayPrices,
 };

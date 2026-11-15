@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../lib/supabase');
+const { getYesterdayPrices } = require('../services/price-fetcher');
 
 // ============================================
 // Shared: filter out market-closed rows
@@ -132,17 +133,16 @@ router.get('/widget-data', async (req, res) => {
 
     if (latestErr) throw latestErr;
 
-    // Get price from ~24h of trading ago for change calculation
-    const yesterday = new Date(latest.timestamp);
-    yesterday.setDate(yesterday.getDate() - 1);
-
-    const { data: prev } = await supabase
-      .from('price_log')
-      .select('gold_price, silver_price, platinum_price, palladium_price')
-      .lte('timestamp', yesterday.toISOString())
-      .order('timestamp', { ascending: false })
-      .limit(1)
-      .single();
+    // The change measures from the same reference as /v1/prices, the last
+    // reading of the previous futures session, so the widget and the app
+    // show the same move.
+    const reference = await getYesterdayPrices();
+    const prev = reference && {
+      gold_price: reference.gold,
+      silver_price: reference.silver,
+      platinum_price: reference.platinum,
+      palladium_price: reference.palladium,
+    };
 
     // Get last 24h of trading data (skips weekends)
     const sparklineData = await getTradingRows(96);
