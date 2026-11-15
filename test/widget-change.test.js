@@ -139,3 +139,20 @@ test('the reference is read once per session, not on every widget request', asyn
   await getWidget(router);
   assert.strictEqual(db.boundedReads(), 1);
 });
+
+test('a metal missing from the newest reading reads no change, not a 100% drop', async (t) => {
+  const db = priceLog([
+    row('2026-11-12T22:55:00.000Z', 3881.7, 49.96),
+    { timestamp: '2026-11-13T15:00:00.000Z', gold_price: 3900, silver_price: 50.5, platinum_price: null, palladium_price: 0 },
+  ]);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-13T15:00:30Z') });
+  const { status, body } = await getWidget(loadWidget(db));
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.change.platinum.percent, 0);
+  assert.strictEqual(body.change.platinum.amount, 0);
+  assert.strictEqual(body.change.platinum.prevClose, 1550);
+  assert.strictEqual(body.change.palladium.percent, 0);
+  assert.strictEqual(body.metals[2].change_pct, 0);
+  assert.strictEqual(body.metals[3].change_pct, 0);
+  assert.strictEqual(body.change.gold.percent, 0.47);
+});

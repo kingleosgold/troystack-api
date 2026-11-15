@@ -160,7 +160,10 @@ router.get('/widget-data', async (req, res) => {
       return result;
     };
 
+    // A missing price on either side reads as no change. A null current
+    // price would otherwise compute as a 100% drop.
     const calcChange = (current, previous) => {
+      if (!(current > 0)) return { amount: 0, percent: 0, prevClose: previous || null };
       if (!previous) return { amount: 0, percent: 0, prevClose: current };
       const amount = Math.round((current - previous) * 100) / 100;
       const percent = Math.round(((current - previous) / previous) * 10000) / 100;
