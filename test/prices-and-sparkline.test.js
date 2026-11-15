@@ -275,7 +275,7 @@ function stallingDb(hangOnRead = 1) {
   const logged = [];
   let reads = 0;
   const query = {
-    select: () => query, gte: () => query, lte: () => query, order: () => query, limit: () => query,
+    select: () => query, gte: () => query, lte: () => query, lt: () => query, order: () => query, limit: () => query,
     single: () => {
       reads += 1;
       if (reads !== hangOnRead) return Promise.resolve({ data: null, error: null });
@@ -412,7 +412,7 @@ function fridayCloseDb(stored = null) {
     from(table) {
       let kind = table === 'app_state' ? 'close' : 'yesterday';
       const q = {
-        select: () => q, eq: () => q, gte: () => q, lte: () => q, order: () => q, limit: () => q,
+        select: () => q, eq: () => q, gte: () => q, lte: () => q, lt: () => q, order: () => q, limit: () => q,
         gt: () => { kind = 'ptpd'; return q; },
         single: () => {
           const answer = table === 'app_state' && stored ? { data: { value: stored }, error: null } : missing;
@@ -690,7 +690,7 @@ test('when MetalPriceAPI stands in for Yahoo, a metal it leaves out is marked as
 function lastDayDb(lastDay) {
   const logged = [];
   const query = {
-    select: () => query, gte: () => query, lte: () => query, order: () => query, limit: () => query, eq: () => query,
+    select: () => query, gte: () => query, lte: () => query, lt: () => query, order: () => query, limit: () => query, eq: () => query,
     single: () => Promise.resolve(lastDay ? { data: lastDay, error: null } : { data: null, error: { message: 'no rows' } }),
     maybeSingle: () => Promise.resolve({ data: null, error: null }),
     insert: (row) => { logged.push(row); return Promise.resolve({ error: null }); },
@@ -767,13 +767,15 @@ function priceLogDb(rows = []) {
   const query = () => {
     let from = '';
     let to = '';
+    let toOpen = false;
     const q = {
       select: () => q, order: () => q, limit: () => q, eq: () => q,
       gte: (_col, v) => { from = v; return q; },
-      lte: (_col, v) => { to = v; return q; },
+      lte: (_col, v) => { to = v; toOpen = false; return q; },
+      lt: (_col, v) => { to = v; toOpen = true; return q; },
       single: () => {
         reads += 1;
-        const day = logged.filter((r) => r.timestamp >= from && r.timestamp <= to)
+        const day = logged.filter((r) => r.timestamp >= from && (toOpen ? r.timestamp < to : r.timestamp <= to))
           .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
         return Promise.resolve(day.length ? { data: day[0], error: null } : { data: null, error: { message: 'no rows' } });
       },
@@ -881,4 +883,66 @@ test("a reading the spike guard rejects isn't the next day's reference", async (
   state.quotes = { 'GC=F': 4040, 'SI=F': 50, 'PL=F': 1550, 'PA=F': 1100 };
   await fetcher.fetchLiveSpotPrices();
   assert.strictEqual(fetcher.getPriceSnapshot().change.gold.prevClose, 4000);
+});
+
+// ---------- the session a day's change measures from ----------
+
+test('the reference session ends at 6 PM in New York, skips weekends and follows daylight time', () => {
+  const { getReferenceSession } = loadWith('services/price-fetcher', { supabase: priceLogDb(), axios: fakeAxios({}) });
+  const at = (iso) => getReferenceSession(Date.parse(iso));
+  const cases = [
+    // Tuesday morning measures from Monday's session, which opened Sunday evening.
+    ['2026-11-10T15:00:00Z', '2026-11-09', '2026-11-08T23:00:00.000Z', '2026-11-09T23:00:00.000Z'],
+    // In the hour after the 5 PM settle it's still Monday's.
+    ['2026-11-10T22:30:00Z', '2026-11-09', '2026-11-08T23:00:00.000Z', '2026-11-09T23:00:00.000Z'],
+    // Once Wednesday's session opens at 6 PM, Tuesday's is the reference.
+    ['2026-11-10T23:30:00Z', '2026-11-10', '2026-11-09T23:00:00.000Z', '2026-11-10T23:00:00.000Z'],
+    // Friday after the close, Saturday and Sunday afternoon keep Friday's move.
+    ['2026-11-13T23:30:00Z', '2026-11-12', '2026-11-11T23:00:00.000Z', '2026-11-12T23:00:00.000Z'],
+    ['2026-11-14T15:00:00Z', '2026-11-12', '2026-11-11T23:00:00.000Z', '2026-11-12T23:00:00.000Z'],
+    ['2026-11-15T22:00:00Z', '2026-11-12', '2026-11-11T23:00:00.000Z', '2026-11-12T23:00:00.000Z'],
+    // Sunday evening's open and Monday measure from Friday's session.
+    ['2026-11-15T23:30:00Z', '2026-11-13', '2026-11-12T23:00:00.000Z', '2026-11-13T23:00:00.000Z'],
+    ['2026-11-16T14:00:00Z', '2026-11-13', '2026-11-12T23:00:00.000Z', '2026-11-13T23:00:00.000Z'],
+    // Daylight time puts 6 PM at 22:00 UTC.
+    ['2026-10-08T14:00:00Z', '2026-10-07', '2026-10-06T22:00:00.000Z', '2026-10-07T22:00:00.000Z'],
+    // Across the November change, Friday's session was on daylight time and Monday's isn't.
+    ['2026-11-02T15:00:00Z', '2026-10-30', '2026-10-29T22:00:00.000Z', '2026-10-30T22:00:00.000Z'],
+    ['2026-11-03T15:00:00Z', '2026-11-02', '2026-11-01T23:00:00.000Z', '2026-11-02T23:00:00.000Z'],
+    // And across the March change the other way.
+    ['2026-03-09T15:00:00Z', '2026-03-06', '2026-03-05T23:00:00.000Z', '2026-03-06T23:00:00.000Z'],
+    ['2026-03-10T15:00:00Z', '2026-03-09', '2026-03-08T22:00:00.000Z', '2026-03-09T22:00:00.000Z'],
+    // A month boundary.
+    ['2026-12-01T15:00:00Z', '2026-11-30', '2026-11-29T23:00:00.000Z', '2026-11-30T23:00:00.000Z'],
+  ];
+  for (const [now, date, start, end] of cases) {
+    assert.deepStrictEqual(at(now), { date, start, end }, now);
+  }
+});
+
+test("a move after the settle counts toward the next day, not the one it followed", async (t) => {
+  // Thursday's session closes at 5 PM EST, 22:00 UTC, and the next opens at 23:00 UTC.
+  const db = priceLogDb([
+    row('2026-11-12T21:55:00.000Z', 3881.4, 49.94),
+    row('2026-11-12T22:55:00.000Z', 3881.7, 49.96), // the halt hour holds the close
+    row('2026-11-12T23:55:00.000Z', 3882.9, 50.0), // Friday's session
+  ]);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-13T15:00:00Z') }); // Friday, 10 AM in New York
+  const state = { quotes: { 'GC=F': 3900, 'SI=F': 50, 'PL=F': 1550, 'PA=F': 1100 } };
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: switchableAxios(state) });
+  await fetcher.fetchLiveSpotPrices();
+  await settle();
+  const { change } = fetcher.getPriceSnapshot();
+  assert.strictEqual(change.gold.prevClose, 3881.7);
+  assert.strictEqual(change.silver.prevClose, 49.96);
+});
+
+test("a session with nothing logged leaves the change unavailable, not measured from an older one", async (t) => {
+  const db = priceLogDb([row('2026-11-11T21:00:00.000Z', 3850, 49)]); // Wednesday only
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-13T15:00:00Z') }); // Friday
+  const state = { quotes: { 'GC=F': 3900, 'SI=F': 50, 'PL=F': 1550, 'PA=F': 1100 } };
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: switchableAxios(state) });
+  await fetcher.fetchLiveSpotPrices();
+  await settle();
+  assert.strictEqual(fetcher.getPriceSnapshot().change.source, 'unavailable');
 });

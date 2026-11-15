@@ -65,50 +65,105 @@ function areMarketsClosed() {
 }
 
 // ============================================
-// LAST TRADING DAY
+// THE SESSION A DAY'S CHANGE MEASURES FROM
 // ============================================
 
-/**
- * Get the last trading day (skips weekends).
- * Monday → Friday, Sunday → Friday, otherwise → yesterday.
- */
-function getLastTradingDay() {
-  const today = new Date();
-  let daysBack = 1;
-  if (today.getDay() === 0) daysBack = 2;       // Sunday → Friday
-  else if (today.getDay() === 1) daysBack = 3;  // Monday → Friday
+// Metals futures trade from 6 PM ET to 5 PM ET the next day, Sunday evening
+// through Friday. A day's change measures from the last reading of the
+// session before the current one, so a move after the 5 PM settle counts
+// toward the next day, the way quote screens show it. It used to measure from
+// the last reading of the prior UTC day, which ran an hour or two into the
+// next session.
+const SESSION_START_HOUR_ET = 18;
 
-  const lastTrading = new Date(today);
-  lastTrading.setDate(today.getDate() - daysBack);
-  return lastTrading.toISOString().split('T')[0];
+const etDateFmt = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  year: 'numeric', month: 'numeric', day: 'numeric',
+  hour: 'numeric', minute: 'numeric', second: 'numeric',
+  hourCycle: 'h23',
+});
+
+function etParts(ms) {
+  const parts = {};
+  for (const p of etDateFmt.formatToParts(new Date(ms))) parts[p.type] = p.value;
+  return {
+    year: Number(parts.year), month: Number(parts.month), day: Number(parts.day),
+    hour: Number(parts.hour), minute: Number(parts.minute), second: Number(parts.second),
+  };
+}
+
+// The UTC time of a wall-clock time in New York. `day` can run past the end
+// of the month, and Date.UTC carries it over.
+function etWallToUtc(year, month, day, hour) {
+  const wall = Date.UTC(year, month - 1, day, hour);
+  let guess = wall + 5 * 3600 * 1000;
+  for (let i = 0; i < 2; i += 1) {
+    const p = etParts(guess);
+    const seen = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+    guess += wall - seen;
+  }
+  return guess;
 }
 
 /**
- * Get yesterday's prices for change calculation.
- * Checks in-memory cache first, then falls back to price_log in Supabase.
- * `isCurrent` is false once the fetch asking has been replaced by a newer
- * one, and then what it read isn't kept.
+ * The session the current day's change measures from, as the UTC times it
+ * started and ended, plus its trade date in New York. After 6 PM ET a new
+ * session has begun, so the one that just closed is the reference. From
+ * Friday's close through Sunday's open the reference stays the one before
+ * Friday's, so the weekend keeps showing Friday's move.
+ */
+function getReferenceSession(nowMs = Date.now()) {
+  const now = etParts(nowMs);
+  // The trade date of the session in progress, or of Friday's over a weekend.
+  // Each date is a UTC midnight standing for a calendar day in New York.
+  const dayMs = 86400 * 1000;
+  let trade = Date.UTC(now.year, now.month - 1, now.day);
+  if (now.hour >= SESSION_START_HOUR_ET) trade += dayMs;
+  const tradeDow = new Date(trade).getUTCDay();
+  if (tradeDow === 6) trade -= dayMs;
+  else if (tradeDow === 0) trade -= 2 * dayMs;
+
+  // The trading day before it, skipping the weekend.
+  let ref = trade - dayMs;
+  const refDow = new Date(ref).getUTCDay();
+  if (refDow === 0) ref -= 2 * dayMs;
+  else if (refDow === 6) ref -= dayMs;
+
+  const d = new Date(ref);
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  // Every session opens the evening before its trade date, Monday's on Sunday.
+  return {
+    date: d.toISOString().split('T')[0],
+    start: new Date(etWallToUtc(y, m, day - 1, SESSION_START_HOUR_ET)).toISOString(),
+    end: new Date(etWallToUtc(y, m, day, SESSION_START_HOUR_ET)).toISOString(),
+  };
+}
+
+/**
+ * The reference session's last prices, for the change calculation. Read from
+ * price_log once per session, then kept in memory. `isCurrent` is false once
+ * the fetch asking has been replaced by a newer one, and then what it read
+ * isn't kept.
  */
 async function getYesterdayPrices(isCurrent = () => true) {
-  const lastTradingDay = getLastTradingDay();
+  const session = getReferenceSession();
 
-  // Read once per trading day, then kept in memory.
-  if (previousDayPrices.date === lastTradingDay && previousDayPrices.gold > 0) {
+  if (previousDayPrices.date === session.end && previousDayPrices.gold > 0) {
     return previousDayPrices;
   }
 
-  // The last row price_log holds for the last trading day. Only live readings
-  // the spike guard passed are logged, so built-in, cached and rejected prices
-  // never become the reference.
+  // The last row price_log holds for that session. Only live readings the
+  // spike guard passed are logged, so built-in, cached and rejected prices
+  // never become the reference. Readings in the hour after the 5 PM settle
+  // hold the closing price, since nothing trades then.
   try {
-    const dayStart = `${lastTradingDay}T00:00:00.000Z`;
-    const dayEnd = `${lastTradingDay}T23:59:59.999Z`;
-
     const { data, error } = await supabase
       .from('price_log')
       .select('gold_price, silver_price, platinum_price, palladium_price')
-      .gte('timestamp', dayStart)
-      .lte('timestamp', dayEnd)
+      .gte('timestamp', session.start)
+      .lt('timestamp', session.end)
       .order('timestamp', { ascending: false })
       .limit(1)
       .single();
@@ -119,13 +174,13 @@ async function getYesterdayPrices(isCurrent = () => true) {
         silver: parseFloat(data.silver_price),
         platinum: data.platinum_price ? parseFloat(data.platinum_price) : 0,
         palladium: data.palladium_price ? parseFloat(data.palladium_price) : 0,
-        date: lastTradingDay,
+        date: session.end,
       };
       if (isCurrent()) previousDayPrices = result;
       return result;
     }
   } catch (err) {
-    console.log('   Could not fetch last trading day prices:', err.message);
+    console.log('   Could not fetch the reference session prices:', err.message);
   }
 
   return null;
@@ -768,4 +823,5 @@ module.exports = {
   areMarketsClosed,
   logPriceToSupabase,
   fetchFromYahooFinance,
+  getReferenceSession,
 };

@@ -52,7 +52,8 @@ function usd(n) {
 
 // The price itself is in the route's own part of the prompt, so a move line
 // says only how far it went. The change is the same "today" figure the app
-// shows, measured from the price cache's last reading of the previous day.
+// shows, measured from the last reading of the previous futures session,
+// which closes at 5 PM in New York (services/price-fetcher.js).
 function moveLine(metal, price, change) {
   const name = metal.charAt(0).toUpperCase() + metal.slice(1);
   if (!(price > 0)) return null;
