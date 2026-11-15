@@ -133,6 +133,24 @@ router.get('/widget-data', async (req, res) => {
 
     if (latestErr) throw latestErr;
 
+    // price-fetcher logs a metal it has no price for as null, so a missing
+    // metal shows its newest logged price instead of a blank. Its change
+    // still reads zero, since that price may be older than the reference.
+    const missing = { gold_price: false, silver_price: false, platinum_price: false, palladium_price: false };
+    const shown = { ...latest };
+    await Promise.all(PRICE_COLS.map(async (col) => {
+      if (latest[col] > 0) return;
+      missing[col] = true;
+      const { data } = await supabase
+        .from('price_log')
+        .select(`timestamp, ${col}`)
+        .gt(col, 0)
+        .order('timestamp', { ascending: false })
+        .limit(1)
+        .single();
+      shown[col] = data && data[col] > 0 ? data[col] : null;
+    }));
+
     // The change measures from the same reference as /v1/prices, the last
     // reading of the previous futures session, so the widget and the app
     // show the same move.
@@ -170,21 +188,24 @@ router.get('/widget-data', async (req, res) => {
       return { amount, percent, prevClose: previous };
     };
 
+    const change = (col, prevCol) => (missing[col]
+      ? { amount: 0, percent: 0, prevClose: prevCol || shown[col] || null }
+      : calcChange(latest[col], prevCol));
+    const gold = change('gold_price', prev?.gold_price);
+    const silver = change('silver_price', prev?.silver_price);
+    const platinum = change('platinum_price', prev?.platinum_price);
+    const palladium = change('palladium_price', prev?.palladium_price);
+
     res.json({
       success: true,
       metals: [
-        { symbol: 'Au', price: latest.gold_price, change_pct: calcChange(latest.gold_price, prev?.gold_price).percent, sparkline: sample(sparklineData, 'gold_price') },
-        { symbol: 'Ag', price: latest.silver_price, change_pct: calcChange(latest.silver_price, prev?.silver_price).percent, sparkline: sample(sparklineData, 'silver_price') },
-        { symbol: 'Pt', price: latest.platinum_price, change_pct: calcChange(latest.platinum_price, prev?.platinum_price).percent, sparkline: sample(sparklineData, 'platinum_price') },
-        { symbol: 'Pd', price: latest.palladium_price, change_pct: calcChange(latest.palladium_price, prev?.palladium_price).percent, sparkline: sample(sparklineData, 'palladium_price') },
+        { symbol: 'Au', price: shown.gold_price, change_pct: gold.percent, sparkline: sample(sparklineData, 'gold_price') },
+        { symbol: 'Ag', price: shown.silver_price, change_pct: silver.percent, sparkline: sample(sparklineData, 'silver_price') },
+        { symbol: 'Pt', price: shown.platinum_price, change_pct: platinum.percent, sparkline: sample(sparklineData, 'platinum_price') },
+        { symbol: 'Pd', price: shown.palladium_price, change_pct: palladium.percent, sparkline: sample(sparklineData, 'palladium_price') },
       ],
       timestamp: latest.timestamp,
-      change: {
-        gold: calcChange(latest.gold_price, prev?.gold_price),
-        silver: calcChange(latest.silver_price, prev?.silver_price),
-        platinum: calcChange(latest.platinum_price, prev?.platinum_price),
-        palladium: calcChange(latest.palladium_price, prev?.palladium_price),
-      },
+      change: { gold, silver, platinum, palladium },
     });
   } catch (err) {
     console.error('Widget data error:', err);
