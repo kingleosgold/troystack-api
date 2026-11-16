@@ -81,3 +81,21 @@ test('a reading missing the quotedAt key still answers quotedAt null', async () 
   assert.strictEqual(body.quotedAt, null);
   assert.strictEqual(body.marketsClosed, true);
 });
+
+test('the OpenAPI spec for /v1/prices marks quotedAt nullable and requires it', async () => {
+  const llms = require(path.join(SRC, 'routes', 'llms'));
+  const layer = llms.stack.find((l) => l.route && l.route.path === '/openapi.json');
+  let spec;
+  layer.route.stack[0].handle({}, { json(b) { spec = b; return this; } });
+  const schema = spec.paths['/v1/prices'].get.responses['200'].content['application/json'].schema;
+  assert.strictEqual(schema.properties.quotedAt.nullable, true);
+  assert.strictEqual(schema.properties.quotedAt.format, 'date-time');
+  assert.ok(schema.required.includes('quotedAt'), 'quotedAt is always sent, null or not');
+  assert.ok(!schema.properties.timestamp.nullable, 'timestamp is never null');
+  const body = await getPrices({
+    prices: PRICES, change: CHANGE, source: 'static-fallback', cacheAgeMinutes: 0, marketsClosed: false,
+    timestamp: '2026-11-16T15:10:00.000Z', quotedAt: null,
+  });
+  for (const key of schema.required) assert.ok(key in body, `the route sends ${key}`);
+  for (const key of Object.keys(body)) assert.ok(key in schema.properties, `the spec names ${key}`);
+});
