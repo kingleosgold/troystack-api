@@ -124,8 +124,8 @@ Manifest: https://api.troystack.ai/.well-known/mcp.json
 // OpenAPI 3.0 specification
 // ============================================================
 // The /v1/prices answer, as src/routes/prices.js builds it. timestamp is when
-// the reading was last rebuilt, and over the weekend when Friday's close was
-// read. quotedAt is when its prices were last read from a live source, and
+// the reading was last rebuilt, and while markets are closed and a Friday close
+// is stored, when that close's prices were read. quotedAt is when its prices were last read from a live source, and
 // null when they never were, so it's nullable.
 const METAL_PRICE_SCHEMA = {
   type: 'object',
@@ -154,7 +154,7 @@ const PRICES_RESPONSE_SCHEMA = {
   required: ['success', 'timestamp', 'quotedAt', 'prices', 'source', 'cacheAgeMinutes', 'marketsClosed', 'change'],
   properties: {
     success: { type: 'boolean' },
-    timestamp: { type: 'string', format: 'date-time', description: 'When this reading was last rebuilt, and a failed fetch moves it. While markets are closed it is when Friday\'s close was read.' },
+    timestamp: { type: 'string', format: 'date-time', description: 'When this reading was last rebuilt, and a failed fetch moves it. While markets are closed and a Friday close is stored, it is when that close\'s prices were read.' },
     quotedAt: { type: 'string', format: 'date-time', nullable: true, description: 'When these prices were last read from a live source, or null if they never were.' },
     prices: {
       type: 'object',
@@ -167,7 +167,7 @@ const PRICES_RESPONSE_SCHEMA = {
       },
     },
     source: { type: 'string', description: 'Where the prices came from, such as yahoo_finance, cached-fallback or a Friday close' },
-    cacheAgeMinutes: { type: 'number', description: 'Minutes since the reading was rebuilt, 0 for a fresh fetch or a Friday close' },
+    cacheAgeMinutes: { type: 'number', description: 'Minutes since a cached reading was rebuilt. 0 when this request ran a fetch, even one that failed and kept the old prices, and for a Friday close. timestamp and quotedAt say how old the prices are.' },
     marketsClosed: { type: 'boolean' },
     change: {
       type: 'object',
@@ -178,7 +178,7 @@ const PRICES_RESPONSE_SCHEMA = {
         silver: METAL_CHANGE_SCHEMA,
         platinum: METAL_CHANGE_SCHEMA,
         palladium: METAL_CHANGE_SCHEMA,
-        source: { type: 'string', description: 'How the change was measured, such as calculated, or unavailable' },
+        source: { type: 'string', enum: ['calculated', 'unavailable'], description: 'calculated when measured against the previous close, unavailable when there was none' },
       },
     },
   },

@@ -164,5 +164,6 @@ test('the spec requires cacheAgeMinutes and the change of all four metals', () =
   assert.ok(schema.required.includes('cacheAgeMinutes'));
   assert.ok(schema.required.includes('change'));
   assert.deepStrictEqual(schema.properties.change.required, ['gold', 'silver', 'platinum', 'palladium', 'source']);
-  assert.match(schema.properties.timestamp.description, /Friday/);
+  assert.match(schema.properties.timestamp.description, /Friday close is stored/);
+  assert.deepStrictEqual(schema.properties.change.properties.source.enum, ['calculated', 'unavailable']);
 });
