@@ -725,10 +725,15 @@ async function getSpotPrices() {
       friday = getFridayClose();
     }
 
+    // A close's timestamp is when its fetch finished, which can be just past
+    // 5 PM for a reading taken before it. Over the weekend getSpotPrices
+    // callers (/v1/prices, MCP, junk silver, Troy's stack moves) get when the
+    // prices were read instead, and the finish time when that's unknown.
+    // getPriceSnapshot keeps the rebuild time, and its quotedAt has the read.
     if (friday) {
       return {
         prices: friday.prices,
-        timestamp: friday.timestamp,
+        timestamp: fridayQuotedAt(friday) || friday.timestamp,
         quotedAt: fridayQuotedAt(friday),
         source: friday.source + ' (friday-close)',
         cacheAgeMinutes: 0,

@@ -334,6 +334,85 @@ test('a 4:59 PM Friday reading whose fetch finishes after 5 is logged at 4:59 an
   assert.strictEqual(snap.quotedAt, '2026-10-09T20:59:50.000Z', 'quoted at the time it was read, as the widget shows it');
 });
 
+test('over the weekend /v1/prices dates a stalled 4:59 PM close by its reading, not by when its fetch finished', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T20:59:50Z') }); // Friday, 4:59:50 PM in New York
+  const db = stallingDb();
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios({ ...FRIDAY_QUOTES }) });
+  const fetch = fetcher.fetchLiveSpotPrices();
+  await db.stalled;
+  t.mock.timers.setTime(Date.parse('2026-10-09T21:00:20Z')); // 5:00:20 PM
+  db.release();
+  await fetch;
+
+  t.mock.timers.setTime(Date.parse('2026-10-10T16:00:00Z')); // Saturday noon
+  const weekend = await fetcher.getSpotPrices();
+  assert.strictEqual(weekend.source, 'yahoo_finance (friday-close)');
+  assert.strictEqual(weekend.timestamp, '2026-10-09T20:59:50.000Z');
+  assert.strictEqual(weekend.quotedAt, '2026-10-09T20:59:50.000Z');
+});
+
+test('a stored close from before quotedAt was kept still dates the weekend by its timestamp', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-10T16:00:00Z') }); // Saturday noon in New York
+  const legacy = { prices: FRIDAY.prices, change: FRIDAY.change, source: 'yahoo_finance', timestamp: '2026-10-09T20:58:00.000Z' };
+  const fetcher = loadWith('services/price-fetcher', { supabase: chainable(legacy), axios: offline });
+  await fetcher.initPriceFetcher();
+  assert.strictEqual((await fetcher.getSpotPrices()).timestamp, '2026-10-09T20:58:00.000Z');
+});
+
+test('a stored fallback close with no live read keeps its own timestamp over the weekend', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-10T16:00:00Z') }); // Saturday noon in New York
+  const stored = { prices: FRIDAY.prices, change: FRIDAY.change, source: 'cached-fallback', quotedAt: null, timestamp: '2026-10-09T20:45:00.000Z', savedAt: '2026-10-09T20:45:00.000Z' };
+  const fetcher = loadWith('services/price-fetcher', { supabase: chainable(stored), axios: offline });
+  await fetcher.initPriceFetcher();
+  const weekend = await fetcher.getSpotPrices();
+  assert.strictEqual(weekend.source, 'cached-fallback (friday-close)');
+  assert.strictEqual(weekend.timestamp, '2026-10-09T20:45:00.000Z');
+  assert.strictEqual(weekend.quotedAt, null);
+});
+
+test('a 4:59 PM Friday fetch replaced while it stalls leaves the close and price_log to the newer one', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T20:59:00Z') }); // Friday, 4:59 PM in New York
+  const quotes = { ...FRIDAY_QUOTES };
+  const db = stallingDb();
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios(quotes) });
+  const slow = fetcher.fetchLiveSpotPrices();
+  await db.stalled;
+
+  // 31 seconds on, still before 5, a newer fetch reads $4,305.
+  quotes['GC=F'] = 4305;
+  t.mock.timers.tick(31 * 1000);
+  await fetcher.fetchLiveSpotPrices();
+
+  // The stalled one comes back after 5.
+  t.mock.timers.setTime(Date.parse('2026-10-09T21:00:10Z'));
+  db.release();
+  await slow;
+  await settle();
+
+  assert.deepStrictEqual(db.logged.map((row) => [row.timestamp, row.gold_price]), [['2026-10-09T20:59:31.000Z', 4305]]);
+  t.mock.timers.setTime(Date.parse('2026-10-09T21:30:00Z'));
+  const close = await fetcher.getSpotPrices();
+  assert.strictEqual(close.prices.gold, 4305);
+  assert.strictEqual(close.timestamp, '2026-10-09T20:59:31.000Z');
+});
+
+test('a Friday reading at 5:00:05 PM logs nothing and leaves the 4:59 close', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T20:59:00Z') }); // Friday, 4:59 PM in New York
+  const quotes = { ...FRIDAY_QUOTES };
+  const db = stallingDb(0);
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios(quotes) });
+  await fetcher.fetchLiveSpotPrices();
+
+  quotes['GC=F'] = 4330;
+  t.mock.timers.setTime(Date.parse('2026-10-09T21:00:05Z')); // 5:00:05 PM
+  await fetcher.fetchLiveSpotPrices();
+
+  assert.deepStrictEqual(db.logged.map((row) => row.gold_price), [4300], 'only the 4:59 reading is logged');
+  const close = await fetcher.getSpotPrices();
+  assert.strictEqual(close.prices.gold, 4300, 'and it stays the close');
+  assert.strictEqual(close.timestamp, '2026-10-09T20:59:00.000Z');
+});
+
 // Lets waiting promise callbacks run without moving the mocked clock.
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
