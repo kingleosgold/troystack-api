@@ -356,7 +356,20 @@ test('a stored close from before quotedAt was kept still dates the weekend by it
   const legacy = { prices: FRIDAY.prices, change: FRIDAY.change, source: 'yahoo_finance', timestamp: '2026-10-09T20:58:00.000Z' };
   const fetcher = loadWith('services/price-fetcher', { supabase: chainable(legacy), axios: offline });
   await fetcher.initPriceFetcher();
-  assert.strictEqual((await fetcher.getSpotPrices()).timestamp, '2026-10-09T20:58:00.000Z');
+  const weekend = await fetcher.getSpotPrices();
+  assert.strictEqual(weekend.timestamp, '2026-10-09T20:58:00.000Z');
+  assert.strictEqual(weekend.quotedAt, '2026-10-09T20:58:00.000Z', 'a live close saved before quotedAt was kept was read when it was saved');
+});
+
+test('a stored fallback close from before quotedAt was kept answers quotedAt null over the weekend', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-10T16:00:00Z') }); // Saturday noon in New York
+  const legacy = { prices: FRIDAY.prices, change: FRIDAY.change, source: 'cached-fallback', timestamp: '2026-10-09T20:45:00.000Z' };
+  const fetcher = loadWith('services/price-fetcher', { supabase: chainable(legacy), axios: offline });
+  await fetcher.initPriceFetcher();
+  const weekend = await fetcher.getSpotPrices();
+  assert.strictEqual(weekend.source, 'cached-fallback (friday-close)');
+  assert.strictEqual(weekend.timestamp, '2026-10-09T20:45:00.000Z');
+  assert.strictEqual(weekend.quotedAt, null, 'when a fallback close was last read live is unknown');
 });
 
 test('a stored fallback close with no live read keeps its own timestamp over the weekend', async (t) => {

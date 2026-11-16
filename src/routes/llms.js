@@ -123,6 +123,44 @@ Manifest: https://api.troystack.ai/.well-known/mcp.json
 // ============================================================
 // OpenAPI 3.0 specification
 // ============================================================
+// The /v1/prices answer, as src/routes/prices.js builds it. timestamp is when
+// the reading was last rebuilt. quotedAt is when its prices were last read
+// from a live source, and null when they never were, so it's nullable.
+const METAL_PRICE_SCHEMA = {
+  type: 'object',
+  required: ['symbol', 'price', 'change_pct', 'unit'],
+  properties: {
+    symbol: { type: 'string', example: 'Au' },
+    price: { type: 'number', description: 'Spot price in US dollars per troy ounce' },
+    change_pct: { type: 'number', description: 'Daily change in percent, 0 when unknown' },
+    unit: { type: 'string', example: 'USD/oz' },
+  },
+};
+
+const PRICES_RESPONSE_SCHEMA = {
+  type: 'object',
+  required: ['success', 'timestamp', 'quotedAt', 'prices', 'source', 'marketsClosed'],
+  properties: {
+    success: { type: 'boolean' },
+    timestamp: { type: 'string', format: 'date-time', description: 'When this reading was last rebuilt. A failed fetch moves it.' },
+    quotedAt: { type: 'string', format: 'date-time', nullable: true, description: 'When these prices were last read from a live source, or null if they never were.' },
+    prices: {
+      type: 'object',
+      required: ['gold', 'silver', 'platinum', 'palladium'],
+      properties: {
+        gold: METAL_PRICE_SCHEMA,
+        silver: METAL_PRICE_SCHEMA,
+        platinum: METAL_PRICE_SCHEMA,
+        palladium: METAL_PRICE_SCHEMA,
+      },
+    },
+    source: { type: 'string', description: 'Where the prices came from, such as yahoo_finance, cached-fallback or a Friday close' },
+    cacheAgeMinutes: { type: 'number' },
+    marketsClosed: { type: 'boolean' },
+    change: { type: 'object', description: 'Daily change per metal with amount, percent and prevClose when known' },
+  },
+};
+
 router.get('/openapi.json', (req, res) => {
   res.json({
     openapi: '3.0.3',
@@ -141,7 +179,10 @@ router.get('/openapi.json', (req, res) => {
           operationId: 'getPrices',
           tags: ['Prices'],
           responses: {
-            '200': { description: 'Live spot prices for all 4 metals' }
+            '200': {
+              description: 'Live spot prices for all 4 metals',
+              content: { 'application/json': { schema: PRICES_RESPONSE_SCHEMA } }
+            }
           }
         }
       },
