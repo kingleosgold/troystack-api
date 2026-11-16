@@ -38,7 +38,9 @@ function loadWidget(supabase) {
 // an unbounded one with the newest row of all, and the sparkline's paged read
 // with nothing. Counts the bounded reads. maybeSingle answers no rows with no
 // error, as Supabase does, or with `lastKnownError` when one is given.
-function priceLog(rows, { lastKnownError = null } = {}) {
+// The sparkline's paged read answers with `sparkRows` newest first, or with
+// `sparkError`. A single read with no rows answers PGRST116, as Supabase does.
+function priceLog(rows, { lastKnownError = null, sparkRows = [], sparkError = null } = {}) {
   let boundedReads = 0;
   const from = () => {
     let gte = null;
@@ -51,18 +53,20 @@ function priceLog(rows, { lastKnownError = null } = {}) {
       lt: (_c, v) => { lt = v; return q; },
       lte: (_c, v) => { lte = v; return q; },
       gt: (c, v) => { gt = [c, v]; return q; },
-      range: () => Promise.resolve({ data: [], error: null }),
+      range: (a, b) => Promise.resolve(sparkError
+        ? { data: null, error: sparkError }
+        : { data: [...sparkRows].sort((x, y) => y.timestamp.localeCompare(x.timestamp)).slice(a, b + 1), error: null }),
       single: () => {
         if (gte || lt || lte) boundedReads += 1;
         const hit = rows
           .filter((r) => (!gte || r.timestamp >= gte) && (!lt || r.timestamp < lt) && (!lte || r.timestamp <= lte) && (!gt || r[gt[0]] > gt[1]))
           .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-        return Promise.resolve(hit.length ? { data: hit[0], error: null } : { data: null, error: { message: 'no rows' } });
+        return Promise.resolve(hit.length ? { data: hit[0], error: null } : { data: null, error: { code: 'PGRST116', message: 'no rows' } });
       },
       maybeSingle: () => {
         if (lastKnownError) return Promise.resolve({ data: null, error: lastKnownError });
         const hit = rows
-          .filter((r) => (!gt || r[gt[0]] > gt[1]))
+          .filter((r) => (!lt || r.timestamp < lt) && (!gt || r[gt[0]] > gt[1]))
           .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
         return Promise.resolve({ data: hit.length ? hit[0] : null, error: null });
       },
@@ -227,9 +231,10 @@ test('a real error on the last-known lookup is logged and the metal stays null',
   assert.strictEqual(body.metals[2].price, null);
   assert.deepStrictEqual(body.change.platinum, { amount: 0, percent: 0, prevClose: 1550 });
   assert.strictEqual(body.metals[3].price, 1104.5);
-  assert.strictEqual(errors.length, 1);
-  assert.match(String(errors[0][0]), /platinum_price/);
-  assert.strictEqual(errors[0][1].code, '57014');
+  const lastKnown = errors.filter((e) => /last-known/.test(String(e[0])));
+  assert.strictEqual(lastKnown.length, 1);
+  assert.match(String(lastKnown[0][0]), /platinum_price/);
+  assert.strictEqual(lastKnown[0][1].code, '57014');
 });
 
 test('a metal never logged with a price logs no error', async (t) => {
@@ -243,4 +248,87 @@ test('a metal never logged with a price logs no error', async (t) => {
   assert.strictEqual(status, 200);
   assert.strictEqual(body.metals[2].price, null);
   assert.deepStrictEqual(errors.filter((e) => /last-known/.test(String(e[0]))), []);
+});
+
+test('a weekend reading logged after the close leaves the widget on Friday', async (t) => {
+  // A deploy on Saturday reads and logs a price while markets are closed.
+  const db = priceLog([
+    row('2026-11-12T22:55:00.000Z', 3881.7, 49.96), // Thursday's last reading
+    row('2026-11-13T21:59:00.000Z', 3920, 50.2), // Friday's last reading
+    row('2026-11-14T16:00:00.000Z', 3950, 51), // Saturday's deploy
+  ]);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-14T17:00:00Z') });
+  const { status, body } = await getWidget(loadWidget(db));
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.metals[0].price, 3920);
+  assert.strictEqual(body.metals[1].price, 50.2);
+  assert.strictEqual(body.timestamp, '2026-11-13T21:59:00.000Z');
+  assert.strictEqual(body.change.gold.prevClose, 3881.7);
+  assert.strictEqual(body.change.gold.amount, 38.3);
+});
+
+test('the close starts at 5 PM EDT too, an hour earlier in UTC', async (t) => {
+  // Friday 10/30 is on daylight time, so 5 PM ET is 21:00 UTC.
+  const db = priceLog([
+    row('2026-10-29T20:55:00.000Z', 3800, 48), // Thursday's last reading
+    row('2026-10-30T20:59:00.000Z', 3820, 48.5), // Friday 4:59 PM EDT
+    row('2026-10-30T21:30:00.000Z', 3830, 48.7), // Friday 5:30 PM EDT, closed
+  ]);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-31T15:00:00Z') });
+  const { status, body } = await getWidget(loadWidget(db));
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.metals[0].price, 3820);
+});
+
+test('with nothing logged before the close the widget shows the newest reading', async (t) => {
+  const db = priceLog([
+    row('2026-11-14T16:00:00.000Z', 3950, 51),
+  ]);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-14T17:00:00Z') });
+  const { status, body } = await getWidget(loadWidget(db));
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.metals[0].price, 3950);
+});
+
+test("over the weekend a metal missing from Friday's reading shows its last price before the close", async (t) => {
+  const db = priceLog([
+    row('2026-11-12T22:55:00.000Z', 3881.7, 49.96),
+    { timestamp: '2026-11-13T20:00:00.000Z', gold_price: 3915, silver_price: 50.1, platinum_price: 1561.2, palladium_price: 1104.5 },
+    { timestamp: '2026-11-13T21:59:00.000Z', gold_price: 3920, silver_price: 50.2, platinum_price: null, palladium_price: 1104.5 },
+    { timestamp: '2026-11-14T16:00:00.000Z', gold_price: 3950, silver_price: 51, platinum_price: 1599, palladium_price: 1110 },
+  ]);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-14T17:00:00Z') });
+  const { status, body } = await getWidget(loadWidget(db));
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.metals[2].price, 1561.2);
+  assert.strictEqual(body.metals[2].change_pct, 0);
+});
+
+test('a sparkline row missing a metal leaves that point out of its line only', async (t) => {
+  const spark = [
+    row('2026-11-13T14:30:00.000Z', 3895, 50.4),
+    { timestamp: '2026-11-13T14:45:00.000Z', gold_price: 3897, silver_price: 50.45, platinum_price: null, palladium_price: 1100 },
+    row('2026-11-13T15:00:00.000Z', 3900, 50.5),
+  ];
+  const db = priceLog([
+    row('2026-11-12T22:55:00.000Z', 3881.7, 49.96),
+    row('2026-11-13T15:00:00.000Z', 3900, 50.5),
+  ], { sparkRows: spark });
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-13T15:00:30Z') });
+  const { status, body } = await getWidget(loadWidget(db));
+  assert.strictEqual(status, 200);
+  assert.deepStrictEqual(body.metals[0].sparkline, [3895, 3897, 3900]);
+  assert.deepStrictEqual(body.metals[2].sparkline, [1550, 1550]);
+  assert.deepStrictEqual(body.metals[3].sparkline, [1100, 1100, 1100]);
+});
+
+test('a failed sparkline read answers 500', async (t) => {
+  const db = priceLog([
+    row('2026-11-12T22:55:00.000Z', 3881.7, 49.96),
+    row('2026-11-13T15:00:00.000Z', 3900, 50.5),
+  ], { sparkError: { code: '57014', message: 'canceling statement due to statement timeout' } });
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-13T15:00:30Z') });
+  const { status, body } = await getWidget(loadWidget(db));
+  assert.strictEqual(status, 500);
+  assert.deepStrictEqual(body, { error: 'Failed to fetch widget data' });
 });

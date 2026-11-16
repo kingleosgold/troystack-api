@@ -31,6 +31,22 @@ function isDuringMarketClose(isoTimestamp) {
 }
 
 /**
+ * When the weekend close began, Friday 5 PM ET, if `nowMs` falls in it, or
+ * null on a trading hour. Rows logged after it (a deploy over the weekend
+ * reads and logs a price) aren't Friday's close, so the widget reads before
+ * it and shows what /v1/prices shows. ET is a whole number of hours off UTC,
+ * so the close starts on a UTC hour.
+ */
+const HOUR_MS = 60 * 60 * 1000;
+
+function weekendCloseStart(nowMs) {
+  if (!isDuringMarketClose(new Date(nowMs).toISOString())) return null;
+  let t = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
+  while (isDuringMarketClose(new Date(t - HOUR_MS).toISOString())) t -= HOUR_MS;
+  return new Date(t).toISOString();
+}
+
+/**
  * Remove single-point outlier spikes caused by bad bid/ask bounces.
  * If ANY metal deviates >1.5% from its neighbor average at index i,
  * that entire row is removed (keeps all arrays aligned).
@@ -123,13 +139,20 @@ async function getTradingRows(points = 96) {
 // GET /v1/widget-data — Widget display data with sparklines
 router.get('/widget-data', async (req, res) => {
   try {
-    // Get latest price
-    const { data: latest, error: latestErr } = await supabase
-      .from('price_log')
-      .select('timestamp, gold_price, silver_price, platinum_price, palladium_price')
-      .order('timestamp', { ascending: false })
-      .limit(1)
-      .single();
+    // Get latest price. Over the weekend that's Friday's last reading, and
+    // when nothing was logged before the close, the newest row there is.
+    const closedSince = weekendCloseStart(Date.now());
+    const readLatest = (before) => {
+      let q = supabase
+        .from('price_log')
+        .select('timestamp, gold_price, silver_price, platinum_price, palladium_price');
+      if (before) q = q.lt('timestamp', before);
+      return q.order('timestamp', { ascending: false }).limit(1).single();
+    };
+    let { data: latest, error: latestErr } = await readLatest(closedSince);
+    if (closedSince && latestErr && latestErr.code === 'PGRST116') {
+      ({ data: latest, error: latestErr } = await readLatest(null));
+    }
 
     if (latestErr) throw latestErr;
 
@@ -143,10 +166,12 @@ router.get('/widget-data', async (req, res) => {
     const lastKnown = Promise.all(PRICE_COLS.map(async (col) => {
       if (latest[col] > 0) return;
       missing[col] = true;
-      const { data, error } = await supabase
+      let q = supabase
         .from('price_log')
         .select(`timestamp, ${col}`)
-        .gt(col, 0)
+        .gt(col, 0);
+      if (closedSince && Date.parse(latest.timestamp) < Date.parse(closedSince)) q = q.lt('timestamp', closedSince);
+      const { data, error } = await q
         .order('timestamp', { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -158,6 +183,7 @@ router.get('/widget-data', async (req, res) => {
     // reading of the previous futures session, so the widget and the app
     // show the same move. The reference, the last-known lookups and the
     // last 24h of trading data (weekends skipped) are read together.
+    // lastKnown resolves to nothing, it only fills `shown` and `missing`.
     const [reference, sparklineData] = await Promise.all([
       getYesterdayPrices(),
       getTradingRows(96),
