@@ -312,6 +312,28 @@ test('a replaced fetch that finishes late leaves the newer prices alone', async 
   assert.deepStrictEqual(db.logged.map((row) => row.gold_price), [5160.25], 'only the newer price went to price_log');
 });
 
+test('a 4:59 PM Friday reading whose fetch finishes after 5 is logged at 4:59 and kept as the close', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T20:59:50Z') }); // Friday, 4:59:50 PM in New York
+  const quotes = { 'GC=F': 5140.5, 'SI=F': 86.9, 'PL=F': 2160, 'PA=F': 1775 };
+  const db = stallingDb();
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios(quotes) });
+
+  // The prices are read before 5, then the read of yesterday's prices runs past it.
+  const fetch = fetcher.fetchLiveSpotPrices();
+  await db.stalled;
+  t.mock.timers.setTime(Date.parse('2026-10-09T21:00:20Z')); // 5:00:20 PM, markets closed
+  db.release();
+  await fetch;
+
+  assert.deepStrictEqual(db.logged.map((row) => [row.timestamp, row.gold_price]), [['2026-10-09T20:59:50.000Z', 5140.5]],
+    'the row is stamped with the time the prices were read');
+  t.mock.timers.setTime(Date.parse('2026-10-09T21:30:00Z')); // 5:30 PM
+  const snap = fetcher.getPriceSnapshot();
+  assert.strictEqual(snap.source, 'yahoo_finance (friday-close)');
+  assert.strictEqual(snap.prices.gold, 5140.5, 'and the reading is saved as the Friday close');
+  assert.strictEqual(snap.quotedAt, '2026-10-09T20:59:50.000Z', 'quoted at the time it was read, as the widget shows it');
+});
+
 // Lets waiting promise callbacks run without moving the mocked clock.
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 

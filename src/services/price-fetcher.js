@@ -47,9 +47,9 @@ const marketFmt = new Intl.DateTimeFormat('en-US', {
   hourCycle: 'h23',
 });
 
-function areMarketsClosed() {
+function areMarketsClosed(at = new Date()) {
   const parts = {};
-  for (const p of marketFmt.formatToParts(new Date())) {
+  for (const p of marketFmt.formatToParts(at)) {
     parts[p.type] = p.value;
   }
 
@@ -518,6 +518,12 @@ async function fetchLiveSpotPricesNow(generation) {
       };
     }
 
+    // When the prices were read. The database reads below can be slow, and a
+    // reading taken at 4:59 PM on a Friday is still a trading-hours reading
+    // when they finish after 5. So price_log, the Friday close and the
+    // closed-market checks go by this time, not by when the fetch finished.
+    const readAt = new Date();
+
     // Always self-calculate change from last trading day's price_log entry
     const yesterday = await getYesterdayPrices(isCurrent);
 
@@ -530,7 +536,7 @@ async function fetchLiveSpotPricesNow(generation) {
 
     const changeData = calculateChanges(fetched, yesterday);
 
-    const marketsClosed = areMarketsClosed();
+    const marketsClosed = areMarketsClosed(readAt);
 
     // The spike guard measures this reading against the last one read live.
     // Built-in prices were never read live, so on a fresh start it measures
@@ -538,10 +544,11 @@ async function fetchLiveSpotPricesNow(generation) {
     // there's none. Taken before the cache update.
     const prevPrices = spikeReference(spotPriceCache, yesterday);
 
-    // Update cache. A fallback to the cached prices keeps the time they were
-    // read live, and built-in prices were never read live at all.
+    // Update cache. Live prices are quoted at the time they were read, a
+    // fallback to the cached prices keeps the time those were read live, and
+    // built-in prices were never read live at all.
     const now = new Date();
-    let quotedAt = now.toISOString();
+    let quotedAt = readAt.toISOString();
     if (fetched.source === 'cached-fallback') quotedAt = spotPriceCache.quotedAt;
     else if (fetched.source === 'static-fallback') quotedAt = null;
     spotPriceCache = {
@@ -560,7 +567,7 @@ async function fetchLiveSpotPricesNow(generation) {
     // markets close at 5, though. A fetch then (a deploy on Friday evening
     // runs one) read nothing that traded, and the close it replaced was.
     const fridayParts = {};
-    for (const p of marketFmt.formatToParts(new Date())) fridayParts[p.type] = p.value;
+    for (const p of marketFmt.formatToParts(readAt)) fridayParts[p.type] = p.value;
     const fridayDayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
     if (!marketsClosed && fridayDayMap[fridayParts.weekday] === 5 && parseInt(fridayParts.hour) >= 16) {
       console.log('   Friday afternoon — saving as Friday close');
@@ -593,7 +600,7 @@ async function fetchLiveSpotPricesNow(generation) {
         // of Friday's close, in the widget and in Monday's reference.
         console.log('   Markets closed, so price_log is skipped');
       } else {
-        logPriceToSupabase(spotPriceCache.prices, fetched.source).catch(err => {
+        logPriceToSupabase(spotPriceCache.prices, fetched.source, readAt).catch(err => {
           console.log('   Price log skipped:', err.message);
         });
       }
@@ -622,16 +629,16 @@ async function fetchLiveSpotPricesNow(generation) {
 // ============================================
 
 /**
- * Write current prices to price_log table in Supabase.
+ * Write current prices to price_log table in Supabase, stamped with the time
+ * they were read.
  */
-async function logPriceToSupabase(prices, source) {
+async function logPriceToSupabase(prices, source, readAt = new Date()) {
   if (!prices || !prices.gold || !prices.silver) return;
 
-  const now = new Date().toISOString();
   const { error } = await supabase
     .from('price_log')
     .insert({
-      timestamp: now,
+      timestamp: readAt.toISOString(),
       gold_price: prices.gold,
       silver_price: prices.silver,
       platinum_price: prices.platinum || null,

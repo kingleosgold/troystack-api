@@ -304,6 +304,33 @@ test("over the weekend a metal missing from Friday's reading shows its last pric
   assert.strictEqual(body.metals[2].change_pct, 0);
 });
 
+test('right at the Sunday 6 PM open, before a trading row lands, the widget shows Friday with no change', async (t) => {
+  const db = priceLog([
+    row('2026-11-12T22:55:00.000Z', 3881.7, 49.96), // Thursday's last reading
+    row('2026-11-13T21:59:00.000Z', 3920, 50.2), // Friday's last reading
+  ]);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-15T23:00:30Z') }); // Sunday, 6:00:30 PM EST
+  const { status, body } = await getWidget(loadWidget(db));
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.metals[0].price, 3920);
+  assert.strictEqual(body.timestamp, '2026-11-13T21:59:00.000Z');
+  assert.strictEqual(body.change.gold.prevClose, 3920, "the new session measures from Friday's last reading");
+  assert.strictEqual(body.metals[0].change_pct, 0);
+});
+
+test('with nothing logged before the close, a metal missing from the newest reading shows its last price after the close', async (t) => {
+  const db = priceLog([
+    { timestamp: '2026-11-14T15:00:00.000Z', gold_price: 3945, silver_price: 50.9, platinum_price: 1599, palladium_price: 1110 },
+    { timestamp: '2026-11-14T16:00:00.000Z', gold_price: 3950, silver_price: 51, platinum_price: null, palladium_price: 1110 },
+  ]);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-14T17:00:00Z') }); // Saturday
+  const { status, body } = await getWidget(loadWidget(db));
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.metals[0].price, 3950);
+  assert.strictEqual(body.metals[2].price, 1599);
+  assert.strictEqual(body.metals[2].change_pct, 0);
+});
+
 test('a sparkline row missing a metal leaves that point out of its line only', async (t) => {
   const spark = [
     row('2026-11-13T14:30:00.000Z', 3895, 50.4),
