@@ -124,8 +124,9 @@ Manifest: https://api.troystack.ai/.well-known/mcp.json
 // OpenAPI 3.0 specification
 // ============================================================
 // The /v1/prices answer, as src/routes/prices.js builds it. timestamp is when
-// the reading was last rebuilt. quotedAt is when its prices were last read
-// from a live source, and null when they never were, so it's nullable.
+// the reading was last rebuilt, and while markets are closed and a Friday close
+// is stored, when that close's prices were read. quotedAt is when its prices were last read from a live source, and
+// null when they never were, so it's nullable.
 const METAL_PRICE_SCHEMA = {
   type: 'object',
   required: ['symbol', 'price', 'change_pct', 'unit'],
@@ -137,12 +138,23 @@ const METAL_PRICE_SCHEMA = {
   },
 };
 
+// One metal's daily change. Every key is missing when there's no previous
+// close to measure against.
+const METAL_CHANGE_SCHEMA = {
+  type: 'object',
+  properties: {
+    amount: { type: 'number', description: 'Change in US dollars per troy ounce' },
+    percent: { type: 'number', description: 'Change in percent' },
+    prevClose: { type: 'number', description: 'The previous close the change is measured against' },
+  },
+};
+
 const PRICES_RESPONSE_SCHEMA = {
   type: 'object',
-  required: ['success', 'timestamp', 'quotedAt', 'prices', 'source', 'marketsClosed'],
+  required: ['success', 'timestamp', 'quotedAt', 'prices', 'source', 'cacheAgeMinutes', 'marketsClosed', 'change'],
   properties: {
     success: { type: 'boolean' },
-    timestamp: { type: 'string', format: 'date-time', description: 'When this reading was last rebuilt. A failed fetch moves it.' },
+    timestamp: { type: 'string', format: 'date-time', description: 'When this reading was last rebuilt, and a failed fetch moves it. While markets are closed and a Friday close is stored, it is when that close\'s prices were read.' },
     quotedAt: { type: 'string', format: 'date-time', nullable: true, description: 'When these prices were last read from a live source, or null if they never were.' },
     prices: {
       type: 'object',
@@ -155,9 +167,20 @@ const PRICES_RESPONSE_SCHEMA = {
       },
     },
     source: { type: 'string', description: 'Where the prices came from, such as yahoo_finance, cached-fallback or a Friday close' },
-    cacheAgeMinutes: { type: 'number' },
+    cacheAgeMinutes: { type: 'number', description: 'Minutes since a cached reading was rebuilt. 0 when this request ran a fetch, even one that failed and kept the old prices, and for a Friday close. timestamp and quotedAt say how old the prices are.' },
     marketsClosed: { type: 'boolean' },
-    change: { type: 'object', description: 'Daily change per metal with amount, percent and prevClose when known' },
+    change: {
+      type: 'object',
+      description: 'Daily change per metal, and where it was measured from',
+      required: ['gold', 'silver', 'platinum', 'palladium', 'source'],
+      properties: {
+        gold: METAL_CHANGE_SCHEMA,
+        silver: METAL_CHANGE_SCHEMA,
+        platinum: METAL_CHANGE_SCHEMA,
+        palladium: METAL_CHANGE_SCHEMA,
+        source: { type: 'string', enum: ['calculated', 'unavailable'], description: 'calculated when measured against the previous close, unavailable when there was none' },
+      },
+    },
   },
 };
 
