@@ -116,9 +116,14 @@ router.get('/', async (req, res) => {
     const data = await getSpotPrices();
     const { prices, change, timestamp, source, cacheAgeMinutes, marketsClosed } = data;
 
+    // timestamp is when this reading was last rebuilt, and a failed fetch
+    // moves it. quotedAt is when its prices were last read from a live
+    // source, or null when they never were, so a client can tell how old the
+    // prices really are.
     res.json({
       success: true,
       timestamp,
+      quotedAt: data.quotedAt ?? null,
       prices: {
         gold: { symbol: 'Au', price: prices.gold, change_pct: change.gold?.percent || 0, unit: 'USD/oz' },
         silver: { symbol: 'Ag', price: prices.silver, change_pct: change.silver?.percent || 0, unit: 'USD/oz' },
