@@ -202,15 +202,16 @@ test('calculateChanges gives the dollar and percent change against the previous 
   assert.strictEqual(calculateChanges(PRICES, null).source, 'unavailable');
 });
 
-test('the schema check refuses what the spec does not allow', () => {
+test('the schema check refuses what the spec does not allow', async () => {
   const schema = pricesSchema();
-  const good = {
+  const good = await getPrices({
     prices: PRICES, change: FULL_CHANGE, source: 'yahoo_finance', cacheAgeMinutes: 0, marketsClosed: false,
     timestamp: '2026-11-16T15:10:00.000Z', quotedAt: '2026-11-16T15:10:00.000Z',
-  };
-  const bad = (patch) => assert.throws(() => checkAgainst(schema, { ...good, ...patch }, 'body'), assert.AssertionError);
-  bad({ change: { ...FULL_CHANGE, gold: { amount: NaN, percent: 0.5, prevClose: 4000.4 } } });
-  bad({ change: { ...FULL_CHANGE, source: 'guessed' } });
-  bad({ change: [] });
-  bad({ quotedAt: 'Mon Nov 16 2026' });
+  });
+  checkAgainst(schema, good, 'body');
+  const bad = (patch, message) => assert.throws(() => checkAgainst(schema, { ...good, ...patch }, 'body'), message);
+  bad({ change: { ...good.change, gold: { amount: NaN, percent: 0.5, prevClose: 4000.4 } } }, /change\.gold\.amount is a finite number/);
+  bad({ change: { ...good.change, source: 'guessed' } }, /change\.source is one of/);
+  bad({ change: [] }, /change is an object/);
+  bad({ quotedAt: 'Mon Nov 16 2026' }, /quotedAt is an ISO date-time/);
 });
