@@ -137,7 +137,7 @@ router.get('/openapi.json', (req, res) => {
       '/v1/prices': {
         get: {
           summary: 'Get live spot prices',
-          description: 'Returns current spot prices for gold, silver, platinum, and palladium with daily change percentages.',
+          description: 'Returns current spot prices for gold, silver, platinum, and palladium with daily change percentages. quotedAt is when the prices were last read from a live source, or null if they never were.',
           operationId: 'getPrices',
           tags: ['Prices'],
           responses: {
