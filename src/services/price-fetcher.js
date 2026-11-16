@@ -556,11 +556,13 @@ async function fetchLiveSpotPricesNow(generation) {
 
     console.log(`   Prices updated: Gold $${fetched.gold}, Silver $${fetched.silver} [${fetched.source}]${marketsClosed ? ' [MARKETS CLOSED]' : ''}`);
 
-    // Save as Friday close if it's Friday afternoon (after 4pm ET)
+    // Save as Friday close if it's Friday afternoon (after 4pm ET). Not once
+    // markets close at 5, though. A fetch then (a deploy on Friday evening
+    // runs one) read nothing that traded, and the close it replaced was.
     const fridayParts = {};
     for (const p of marketFmt.formatToParts(new Date())) fridayParts[p.type] = p.value;
     const fridayDayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-    if (fridayDayMap[fridayParts.weekday] === 5 && parseInt(fridayParts.hour) >= 16) {
+    if (!marketsClosed && fridayDayMap[fridayParts.weekday] === 5 && parseInt(fridayParts.hour) >= 16) {
       console.log('   Friday afternoon — saving as Friday close');
       saveFridayClose({
         prices: spotPriceCache.prices,
@@ -585,6 +587,11 @@ async function fetchLiveSpotPricesNow(generation) {
       spotPriceCache.spikeRejected = goldPctChange > 0.10 || silverPctChange > 0.10;
       if (spotPriceCache.spikeRejected) {
         console.log(`   ⚠️ Spike guard: Gold ${(goldPctChange * 100).toFixed(1)}%, Silver ${(silverPctChange * 100).toFixed(1)}% — skipping price_log`);
+      } else if (marketsClosed) {
+        // The cron only fetches while markets are open, so this is a startup
+        // fetch over the weekend. Its row would read as the newest price, ahead
+        // of Friday's close, in the widget and in Monday's reference.
+        console.log('   Markets closed, so price_log is skipped');
       } else {
         logPriceToSupabase(spotPriceCache.prices, fetched.source).catch(err => {
           console.log('   Price log skipped:', err.message);

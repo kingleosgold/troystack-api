@@ -289,7 +289,7 @@ function stallingDb(hangOnRead = 1) {
 }
 
 test('a replaced fetch that finishes late leaves the newer prices alone', async (t) => {
-  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T21:30:00Z') }); // Friday, 5:30 PM in New York
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T20:30:00Z') }); // Friday, 4:30 PM in New York
   const quotes = { 'GC=F': 5140.5, 'SI=F': 86.9, 'PL=F': 2160, 'PA=F': 1775 };
   const db = stallingDb();
   const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios(quotes) });
@@ -307,6 +307,7 @@ test('a replaced fetch that finishes late leaves the newer prices alone', async 
   db.release();
   await slow;
   assert.strictEqual(fetcher.getCachedPrices().gold, 5160.25, 'the cache keeps the newer price');
+  t.mock.timers.tick(60 * 60 * 1000); // 5:30 PM, markets closed
   assert.strictEqual(fetcher.getPriceSnapshot().prices.gold, 5160.25, 'so does the Friday close');
   assert.deepStrictEqual(db.logged.map((row) => row.gold_price), [5160.25], 'only the newer price went to price_log');
 });
@@ -505,8 +506,9 @@ const STORED_AT_3PM = {
 };
 
 test('a startup read of the Friday close that comes back late keeps a newer close saved since', async (t) => {
-  // Friday, 5:30 PM in New York, right after a restart.
-  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-09T21:30:00Z') });
+  // Friday, 4:30 PM in New York, right after a restart. Fetches save the
+  // close until 5 PM and not after.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-09T20:30:00Z') });
   const db = fridayCloseDb(STORED_AT_3PM);
   const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios({ ...FRIDAY_QUOTES, 'GC=F': 4310 }) });
 
@@ -520,6 +522,7 @@ test('a startup read of the Friday close that comes back late keeps a newer clos
   // its next read here, before its own fetch saves another close.
   releaseLoad();
   await settle();
+  t.mock.timers.setTime(Date.parse('2026-10-09T21:30:00Z')); // 5:30 PM, markets closed
   assert.strictEqual(fetcher.getPriceSnapshot().prices.gold, 4310, 'the close saved since startup is newer, so it stays');
 
   releasePtPd();
@@ -945,4 +948,30 @@ test("a session with nothing logged leaves the change unavailable, not measured 
   await fetcher.fetchLiveSpotPrices();
   await settle();
   assert.strictEqual(fetcher.getPriceSnapshot().change.source, 'unavailable');
+});
+
+test('a fetch after the Friday close keeps the close and logs nothing', async (t) => {
+  // Friday 4:30 PM in New York saves the close, then a deploy at 7 PM fetches again.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-09T20:30:00Z') });
+  const quotes = { 'GC=F': 5140.5, 'SI=F': 86.9, 'PL=F': 2160, 'PA=F': 1775 };
+  const db = stallingDb(0);
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios(quotes) });
+  await fetcher.fetchLiveSpotPrices();
+  assert.deepStrictEqual(db.logged.map((row) => row.gold_price), [5140.5]);
+
+  quotes['GC=F'] = 5170;
+  t.mock.timers.tick(2.5 * 60 * 60 * 1000);
+  await fetcher.fetchLiveSpotPrices();
+  assert.strictEqual(fetcher.getPriceSnapshot().prices.gold, 5140.5, 'the Friday close stays the 4:30 reading');
+  assert.strictEqual((await fetcher.getSpotPrices()).prices.gold, 5140.5, 'and /v1/prices serves it');
+  assert.deepStrictEqual(db.logged.map((row) => row.gold_price), [5140.5], 'nothing is logged while closed');
+});
+
+test('a Saturday fetch logs nothing to price_log', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-10T16:00:00Z') }); // Saturday noon in New York
+  const quotes = { 'GC=F': 5140.5, 'SI=F': 86.9, 'PL=F': 2160, 'PA=F': 1775 };
+  const db = stallingDb(0);
+  const fetcher = loadWith('services/price-fetcher', { supabase: db, axios: fakeAxios(quotes) });
+  await fetcher.fetchLiveSpotPrices();
+  assert.deepStrictEqual(db.logged, []);
 });
