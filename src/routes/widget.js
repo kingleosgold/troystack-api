@@ -136,34 +136,39 @@ router.get('/widget-data', async (req, res) => {
     // price-fetcher logs a metal it has no price for as null, so a missing
     // metal shows its newest logged price instead of a blank. Its change
     // still reads zero, since that price may be older than the reference.
+    // maybeSingle answers a metal never logged with a price as no rows and
+    // no error, so a real error is logged and the metal shows null.
     const missing = { gold_price: false, silver_price: false, platinum_price: false, palladium_price: false };
     const shown = { ...latest };
-    await Promise.all(PRICE_COLS.map(async (col) => {
+    const lastKnown = Promise.all(PRICE_COLS.map(async (col) => {
       if (latest[col] > 0) return;
       missing[col] = true;
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('price_log')
         .select(`timestamp, ${col}`)
         .gt(col, 0)
         .order('timestamp', { ascending: false })
         .limit(1)
-        .single();
+        .maybeSingle();
+      if (error) console.error(`Widget last-known ${col} lookup error:`, error);
       shown[col] = data && data[col] > 0 ? data[col] : null;
     }));
 
     // The change measures from the same reference as /v1/prices, the last
     // reading of the previous futures session, so the widget and the app
-    // show the same move.
-    const reference = await getYesterdayPrices();
+    // show the same move. The reference, the last-known lookups and the
+    // last 24h of trading data (weekends skipped) are read together.
+    const [reference, sparklineData] = await Promise.all([
+      getYesterdayPrices(),
+      getTradingRows(96),
+      lastKnown,
+    ]);
     const prev = reference && {
       gold_price: reference.gold,
       silver_price: reference.silver,
       platinum_price: reference.platinum,
       palladium_price: reference.palladium,
     };
-
-    // Get last 24h of trading data (skips weekends)
-    const sparklineData = await getTradingRows(96);
 
     // Sample down to ~24 points
     const sample = (arr, col, targetPoints = 24) => {

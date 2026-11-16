@@ -36,8 +36,9 @@ function loadWidget(supabase) {
 
 // A price_log that answers a bounded read with the newest row in the window,
 // an unbounded one with the newest row of all, and the sparkline's paged read
-// with nothing. Counts the bounded reads.
-function priceLog(rows) {
+// with nothing. Counts the bounded reads. maybeSingle answers no rows with no
+// error, as Supabase does, or with `lastKnownError` when one is given.
+function priceLog(rows, { lastKnownError = null } = {}) {
   let boundedReads = 0;
   const from = () => {
     let gte = null;
@@ -57,6 +58,13 @@ function priceLog(rows) {
           .filter((r) => (!gte || r.timestamp >= gte) && (!lt || r.timestamp < lt) && (!lte || r.timestamp <= lte) && (!gt || r[gt[0]] > gt[1]))
           .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
         return Promise.resolve(hit.length ? { data: hit[0], error: null } : { data: null, error: { message: 'no rows' } });
+      },
+      maybeSingle: () => {
+        if (lastKnownError) return Promise.resolve({ data: null, error: lastKnownError });
+        const hit = rows
+          .filter((r) => (!gt || r[gt[0]] > gt[1]))
+          .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+        return Promise.resolve({ data: hit.length ? hit[0] : null, error: null });
       },
     };
     return q;
@@ -203,4 +211,36 @@ test('a metal never logged with a price stays null rather than failing the widge
   assert.deepStrictEqual(body.change.platinum, { amount: 0, percent: 0, prevClose: null });
   assert.strictEqual(body.change.palladium.percent, 0);
   assert.strictEqual(body.change.palladium.prevClose, 1100);
+});
+
+test('a real error on the last-known lookup is logged and the metal stays null', async (t) => {
+  const db = priceLog([
+    row('2026-11-12T22:55:00.000Z', 3881.7, 49.96),
+    { timestamp: '2026-11-13T14:00:00.000Z', gold_price: 3890, silver_price: 50.4, platinum_price: 1561.2, palladium_price: 1104.5 },
+    { timestamp: '2026-11-13T15:00:00.000Z', gold_price: 3900, silver_price: 50.5, platinum_price: null, palladium_price: 1104.5 },
+  ], { lastKnownError: { code: '57014', message: 'canceling statement due to statement timeout' } });
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => { errors.push(args); });
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-13T15:00:30Z') });
+  const { status, body } = await getWidget(loadWidget(db));
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.metals[2].price, null);
+  assert.deepStrictEqual(body.change.platinum, { amount: 0, percent: 0, prevClose: 1550 });
+  assert.strictEqual(body.metals[3].price, 1104.5);
+  assert.strictEqual(errors.length, 1);
+  assert.match(String(errors[0][0]), /platinum_price/);
+  assert.strictEqual(errors[0][1].code, '57014');
+});
+
+test('a metal never logged with a price logs no error', async (t) => {
+  const db = priceLog([
+    { timestamp: '2026-11-13T15:00:00.000Z', gold_price: 3900, silver_price: 50.5, platinum_price: null, palladium_price: 1100 },
+  ]);
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => { errors.push(args); });
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-13T15:00:30Z') });
+  const { status, body } = await getWidget(loadWidget(db));
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.metals[2].price, null);
+  assert.deepStrictEqual(errors.filter((e) => /last-known/.test(String(e[0]))), []);
 });
