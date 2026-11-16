@@ -544,10 +544,11 @@ async function fetchLiveSpotPricesNow(generation) {
     // there's none. Taken before the cache update.
     const prevPrices = spikeReference(spotPriceCache, yesterday);
 
-    // Update cache. A fallback to the cached prices keeps the time they were
-    // read live, and built-in prices were never read live at all.
+    // Update cache. Live prices are quoted at the time they were read, a
+    // fallback to the cached prices keeps the time those were read live, and
+    // built-in prices were never read live at all.
     const now = new Date();
-    let quotedAt = now.toISOString();
+    let quotedAt = readAt.toISOString();
     if (fetched.source === 'cached-fallback') quotedAt = spotPriceCache.quotedAt;
     else if (fetched.source === 'static-fallback') quotedAt = null;
     spotPriceCache = {

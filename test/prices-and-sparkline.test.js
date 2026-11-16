@@ -331,6 +331,7 @@ test('a 4:59 PM Friday reading whose fetch finishes after 5 is logged at 4:59 an
   const snap = fetcher.getPriceSnapshot();
   assert.strictEqual(snap.source, 'yahoo_finance (friday-close)');
   assert.strictEqual(snap.prices.gold, 5140.5, 'and the reading is saved as the Friday close');
+  assert.strictEqual(snap.quotedAt, '2026-10-09T20:59:50.000Z', 'quoted at the time it was read, as the widget shows it');
 });
 
 // Lets waiting promise callbacks run without moving the mocked clock.
