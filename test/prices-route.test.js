@@ -107,8 +107,9 @@ function checkAgainst(schema, value, where) {
     assert.ok(schema.nullable, `${where} is null but the spec doesn't allow it`);
     return;
   }
+  if (schema.enum) assert.ok(schema.enum.includes(value), `${where} is one of ${schema.enum.join(', ')}`);
   if (schema.type === 'object') {
-    assert.strictEqual(typeof value, 'object', `${where} is an object`);
+    assert.ok(typeof value === 'object' && !Array.isArray(value), `${where} is an object`);
     for (const key of schema.required || []) assert.ok(key in value, `${where} sends ${key}`);
     for (const [key, v] of Object.entries(value)) {
       assert.ok(schema.properties && key in schema.properties, `the spec names ${where}.${key}`);
@@ -118,7 +119,12 @@ function checkAgainst(schema, value, where) {
   }
   const type = schema.type === 'integer' ? 'number' : schema.type;
   assert.strictEqual(typeof value, type, `${where} is a ${schema.type}`);
-  if (schema.format === 'date-time') assert.ok(!Number.isNaN(Date.parse(value)), `${where} is a date-time`);
+  if (type === 'number') assert.ok(Number.isFinite(value), `${where} is a finite number`);
+  if (schema.type === 'integer') assert.ok(Number.isInteger(value), `${where} is an integer`);
+  if (schema.format === 'date-time') {
+    assert.match(value, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/, `${where} is an ISO date-time`);
+    assert.ok(!Number.isNaN(Date.parse(value)), `${where} is a real date`);
+  }
 }
 
 function pricesSchema() {
@@ -166,4 +172,45 @@ test('the spec requires cacheAgeMinutes and the change of all four metals', () =
   assert.deepStrictEqual(schema.properties.change.required, ['gold', 'silver', 'platinum', 'palladium', 'source']);
   assert.match(schema.properties.timestamp.description, /Friday close is stored/);
   assert.deepStrictEqual(schema.properties.change.properties.source.enum, ['calculated', 'unavailable']);
+});
+
+// The change the route sends is built by calculateChanges, so the spec is
+// checked against what it really returns, not only hand-written readings.
+const { calculateChanges } = require(path.join(SRC, 'services', 'price-fetcher'));
+
+for (const [name, yesterday] of [
+  ['a full reference session', { gold: 4000.4, silver: 50.76, platinum: 1590.25, palladium: 1110 }],
+  ['a reference session with no platinum or palladium', { gold: 4000.4, silver: 50.76, platinum: 0, palladium: 0 }],
+  ['no reference session', null],
+]) {
+  test(`calculateChanges for ${name} matches the /v1/prices schema`, async () => {
+    const change = calculateChanges(PRICES, yesterday);
+    const body = await getPrices({
+      prices: PRICES, change, source: 'yahoo_finance', cacheAgeMinutes: 0, marketsClosed: false,
+      timestamp: '2026-11-16T15:10:00.000Z', quotedAt: '2026-11-16T15:10:00.000Z',
+    });
+    checkAgainst(pricesSchema(), body, 'body');
+  });
+}
+
+test('calculateChanges gives the dollar and percent change against the previous close', () => {
+  const change = calculateChanges(PRICES, { gold: 4000.4, silver: 50.76, platinum: 0, palladium: 0 });
+  assert.deepStrictEqual(change.gold, { amount: 20.1, percent: 0.5, prevClose: 4000.4 });
+  assert.deepStrictEqual(change.silver, { amount: -0.51, percent: -1, prevClose: 50.76 });
+  assert.deepStrictEqual(change.platinum, {});
+  assert.strictEqual(change.source, 'calculated');
+  assert.strictEqual(calculateChanges(PRICES, null).source, 'unavailable');
+});
+
+test('the schema check refuses what the spec does not allow', () => {
+  const schema = pricesSchema();
+  const good = {
+    prices: PRICES, change: FULL_CHANGE, source: 'yahoo_finance', cacheAgeMinutes: 0, marketsClosed: false,
+    timestamp: '2026-11-16T15:10:00.000Z', quotedAt: '2026-11-16T15:10:00.000Z',
+  };
+  const bad = (patch) => assert.throws(() => checkAgainst(schema, { ...good, ...patch }, 'body'), assert.AssertionError);
+  bad({ change: { ...FULL_CHANGE, gold: { amount: NaN, percent: 0.5, prevClose: 4000.4 } } });
+  bad({ change: { ...FULL_CHANGE, source: 'guessed' } });
+  bad({ change: [] });
+  bad({ quotedAt: 'Mon Nov 16 2026' });
 });

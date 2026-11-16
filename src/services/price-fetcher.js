@@ -844,4 +844,5 @@ module.exports = {
   fetchFromYahooFinance,
   getReferenceSession,
   getYesterdayPrices,
+  calculateChanges,
 };
