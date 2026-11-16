@@ -99,3 +99,70 @@ test('the OpenAPI spec for /v1/prices marks quotedAt nullable and requires it', 
   for (const key of schema.required) assert.ok(key in body, `the route sends ${key}`);
   for (const key of Object.keys(body)) assert.ok(key in schema.properties, `the spec names ${key}`);
 });
+
+// A small check of a body against the spec's schema: every required key is
+// sent, every sent key is named, and each value has the named type.
+function checkAgainst(schema, value, where) {
+  if (value === null) {
+    assert.ok(schema.nullable, `${where} is null but the spec doesn't allow it`);
+    return;
+  }
+  if (schema.type === 'object') {
+    assert.strictEqual(typeof value, 'object', `${where} is an object`);
+    for (const key of schema.required || []) assert.ok(key in value, `${where} sends ${key}`);
+    for (const [key, v] of Object.entries(value)) {
+      assert.ok(schema.properties && key in schema.properties, `the spec names ${where}.${key}`);
+      checkAgainst(schema.properties[key], v, `${where}.${key}`);
+    }
+    return;
+  }
+  const type = schema.type === 'integer' ? 'number' : schema.type;
+  assert.strictEqual(typeof value, type, `${where} is a ${schema.type}`);
+  if (schema.format === 'date-time') assert.ok(!Number.isNaN(Date.parse(value)), `${where} is a date-time`);
+}
+
+function pricesSchema() {
+  const llms = require(path.join(SRC, 'routes', 'llms'));
+  const layer = llms.stack.find((l) => l.route && l.route.path === '/openapi.json');
+  let spec;
+  layer.route.stack[0].handle({}, { json(b) { spec = b; return this; } });
+  return spec.paths['/v1/prices'].get.responses['200'].content['application/json'].schema;
+}
+
+const FULL_CHANGE = {
+  gold: { amount: 20.1, percent: 0.5, prevClose: 4000.4 },
+  silver: { amount: -0.51, percent: -1, prevClose: 50.76 },
+  platinum: {}, palladium: {}, source: 'calculated',
+};
+const NO_CHANGE = { gold: {}, silver: {}, platinum: {}, palladium: {}, source: 'unavailable' };
+
+for (const [name, reading] of [
+  ['a fresh fetch', {
+    prices: PRICES, change: FULL_CHANGE, source: 'yahoo_finance', cacheAgeMinutes: 0, marketsClosed: false,
+    timestamp: '2026-11-16T15:10:00.000Z', quotedAt: '2026-11-16T15:10:00.000Z',
+  }],
+  ['a cache hit', {
+    prices: PRICES, change: FULL_CHANGE, source: 'yahoo_finance', cacheAgeMinutes: 3.4, marketsClosed: false,
+    timestamp: '2026-11-16T15:10:00.000Z', quotedAt: '2026-11-16T15:10:00.000Z', live: { gold: true }, spikeRejected: false,
+  }],
+  ['a Friday close', {
+    prices: PRICES, change: NO_CHANGE, source: 'yahoo_finance (friday-close)', cacheAgeMinutes: 0, marketsClosed: true,
+    timestamp: '2026-11-13T21:59:41.000Z', quotedAt: '2026-11-13T21:59:41.000Z', live: { gold: true },
+  }],
+  ['prices never read live', {
+    prices: PRICES, change: NO_CHANGE, source: 'static-fallback', cacheAgeMinutes: 0, marketsClosed: false,
+    timestamp: '2026-11-16T15:10:00.000Z', quotedAt: null,
+  }],
+]) {
+  test(`the /v1/prices body for ${name} matches its OpenAPI schema`, async () => {
+    checkAgainst(pricesSchema(), await getPrices(reading), 'body');
+  });
+}
+
+test('the spec requires cacheAgeMinutes and the change of all four metals', () => {
+  const schema = pricesSchema();
+  assert.ok(schema.required.includes('cacheAgeMinutes'));
+  assert.ok(schema.required.includes('change'));
+  assert.deepStrictEqual(schema.properties.change.required, ['gold', 'silver', 'platinum', 'palladium', 'source']);
+  assert.match(schema.properties.timestamp.description, /Friday/);
+});
