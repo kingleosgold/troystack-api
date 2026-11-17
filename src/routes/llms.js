@@ -178,7 +178,7 @@ const PRICES_RESPONSE_SCHEMA = {
         silver: METAL_CHANGE_SCHEMA,
         platinum: METAL_CHANGE_SCHEMA,
         palladium: METAL_CHANGE_SCHEMA,
-        source: { type: 'string', enum: ['calculated', 'unavailable'], description: 'calculated when measured against the previous close, unavailable when there was none' },
+        source: { type: 'string', enum: ['calculated', 'unavailable'], description: 'calculated when at least one metal was measured against its previous close, unavailable when none could be. A metal that could not be measured is an empty object.' },
       },
     },
   },
