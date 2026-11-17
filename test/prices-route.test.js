@@ -219,6 +219,25 @@ test('calculateChanges leaves a metal empty when either price is missing or not 
   checkAgainst(pricesSchema(), body, 'body');
 });
 
+test('calculateChanges leaves a metal empty when only its previous close is missing', async () => {
+  const change = calculateChanges(PRICES, { gold: 4000.4, silver: undefined, platinum: NaN, palladium: null });
+  assert.deepStrictEqual(change.gold, { amount: 20.1, percent: 0.5, prevClose: 4000.4 });
+  assert.deepStrictEqual(change.silver, {});
+  assert.deepStrictEqual(change.platinum, {});
+  assert.deepStrictEqual(change.palladium, {});
+  assert.strictEqual(change.source, 'calculated');
+  assert.strictEqual(calculateChanges(PRICES, { gold: undefined }).source, 'unavailable');
+  const body = await getPrices({
+    prices: PRICES, change, source: 'yahoo_finance', cacheAgeMinutes: 0, marketsClosed: false,
+    timestamp: '2026-11-16T15:10:00.000Z', quotedAt: '2026-11-16T15:10:00.000Z',
+  });
+  checkAgainst(pricesSchema(), body, 'body');
+});
+
+test('the spec says calculated means at least one metal was measured', () => {
+  assert.match(pricesSchema().properties.change.properties.source.description, /at least one metal/);
+});
+
 test('calculateChanges reports unavailable when no metal could be measured', () => {
   const zero = { gold: 0, silver: 0, platinum: 0, palladium: 0 };
   assert.deepStrictEqual(calculateChanges(PRICES, zero),
