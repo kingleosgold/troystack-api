@@ -202,6 +202,30 @@ test('calculateChanges gives the dollar and percent change against the previous 
   assert.strictEqual(calculateChanges(PRICES, null).source, 'unavailable');
 });
 
+test('calculateChanges leaves a metal empty when either price is missing or not a real number', async () => {
+  const yesterday = { gold: 4000.4, silver: 50.76, platinum: 1590.25, palladium: 1110 };
+  const change = calculateChanges({ ...PRICES, silver: undefined, platinum: NaN, palladium: 0 }, yesterday);
+  assert.deepStrictEqual(change.gold, { amount: 20.1, percent: 0.5, prevClose: 4000.4 });
+  assert.deepStrictEqual(change.silver, {});
+  assert.deepStrictEqual(change.platinum, {});
+  assert.deepStrictEqual(change.palladium, {});
+  assert.strictEqual(change.source, 'calculated');
+  assert.deepStrictEqual(calculateChanges(PRICES, { ...yesterday, gold: Infinity }).gold, {});
+  assert.deepStrictEqual(calculateChanges(PRICES, { ...yesterday, gold: -5 }).gold, {});
+  const body = await getPrices({
+    prices: PRICES, change, source: 'yahoo_finance', cacheAgeMinutes: 0, marketsClosed: false,
+    timestamp: '2026-11-16T15:10:00.000Z', quotedAt: '2026-11-16T15:10:00.000Z',
+  });
+  checkAgainst(pricesSchema(), body, 'body');
+});
+
+test('calculateChanges reports unavailable when no metal could be measured', () => {
+  const zero = { gold: 0, silver: 0, platinum: 0, palladium: 0 };
+  assert.deepStrictEqual(calculateChanges(PRICES, zero),
+    { gold: {}, silver: {}, platinum: {}, palladium: {}, source: 'unavailable' });
+  assert.strictEqual(calculateChanges(undefined, { gold: 4000.4 }).source, 'unavailable');
+});
+
 test('the schema check refuses what the spec does not allow', async () => {
   const schema = pricesSchema();
   const good = await getPrices({

@@ -194,20 +194,24 @@ async function getYesterdayPrices(isCurrent = () => true) {
  * Calculate change data for all 4 metals given current prices and yesterday's prices.
  */
 function calculateChanges(current, yesterday) {
+  // A metal is measured only when both prices are real positive numbers.
+  // Anything else leaves it empty, so a missing price never goes out as NaN.
   const calc = (cur, prev) => {
-    if (!prev || prev === 0) return {};
+    if (!(Number.isFinite(cur) && cur > 0 && Number.isFinite(prev) && prev > 0)) return {};
     const amount = Math.round((cur - prev) * 100) / 100;
     const percent = Math.round(((cur - prev) / prev) * 10000) / 100;
     return { amount, percent, prevClose: prev };
   };
 
-  return {
-    gold: calc(current.gold, yesterday?.gold),
-    silver: calc(current.silver, yesterday?.silver),
-    platinum: calc(current.platinum, yesterday?.platinum),
-    palladium: calc(current.palladium, yesterday?.palladium),
-    source: yesterday ? 'calculated' : 'unavailable',
+  const changes = {
+    gold: calc(current?.gold, yesterday?.gold),
+    silver: calc(current?.silver, yesterday?.silver),
+    platinum: calc(current?.platinum, yesterday?.platinum),
+    palladium: calc(current?.palladium, yesterday?.palladium),
   };
+  // calculated only when at least one metal was measured.
+  const measured = Object.values(changes).some((c) => 'percent' in c);
+  return { ...changes, source: measured ? 'calculated' : 'unavailable' };
 }
 
 // ============================================
